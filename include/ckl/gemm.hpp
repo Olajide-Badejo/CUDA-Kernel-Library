@@ -39,6 +39,12 @@ void gemm_naive(const float* a, const float* b, float* c,
                 int m, int n, int k, float alpha, float beta,
                 cudaStream_t stream = nullptr);
 
+// Shared memory tiled FP32 GEMM: reuse each staged tile TILE times, cutting
+// global traffic by the tile factor over the naive kernel.
+void gemm_tiled(const float* a, const float* b, float* c,
+                int m, int n, int k, float alpha, float beta,
+                cudaStream_t stream = nullptr);
+
 // cuBLAS SGEMM oracle producing the same row major C. Manages a cached handle
 // internally. Used as both the correctness oracle and the performance baseline.
 void gemm_cublas(const float* a, const float* b, float* c,

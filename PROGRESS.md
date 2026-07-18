@@ -128,5 +128,51 @@ ladder closes, one attributable technique at a time.
 
 ## Phase 2: shared memory tiled GEMM, first diagnostic round
 
-Status: pending (kernel can be built now; the ncu round waits on the counter
-permission fix noted in Phase 0).
+Status: kernel built and verified correct; wall clock measured; the ncu
+diagnostic round is staged and waits on the counter permission fix from Phase 0.
+
+### Built
+
+- `src/gemm/gemm_tiled.cu`: 32 by 32 shared memory tiled kernel, one column of
+  shared padding against bank conflicts, boundary guarded so non tile aligned
+  and sub tile shapes stay correct. Added to the test and benchmark variant
+  lists, which now iterate every hand written variant against cuBLAS.
+
+### Verified output
+
+Correctness: tiled passes the 1e-4 gate on all 8 shapes.
+
+Wall clock (this machine), an honest and initially surprising result:
+
+| size | naive GFLOP/s | tiled GFLOP/s | cuBLAS GFLOP/s | tiled percent of cuBLAS |
+|---|---|---|---|---|
+| 512 | 1943 | 1597 | 7170 | 22.3 |
+| 1024 | 2137 | 1814 | 18431 | 9.8 |
+| 2048 | 2046 | 1751 | 23167 | 7.6 |
+| 4096 | 1910 | 1588 | 22099 | 7.2 |
+
+Reading (hypothesis, to be confirmed by the ncu round): tiling alone does not
+beat the naive kernel on this GPU. Two reasons stand out before profiling. First,
+occupancy: the 32 by 32 tile is a 1024 thread block, and with 1536 threads per SM
+only one block fits (about 66 percent occupancy), while the naive 16 by 16 block
+reaches 100 percent, and both kernels are latency bound so occupancy dominates.
+Second, the 48 MB L2 already services the naive kernel's repeated B column reads,
+so the shared memory staging trades cache hits for shared memory latency plus two
+syncthreads per K tile without raising arithmetic intensity per thread, which
+stays at one output element per thread. This matches the design rationale that
+register blocking, not tiling, is the decisive step (Volkov and Demmel, SC 2008),
+and it is precisely the picture the diagnostic round is meant to make concrete.
+Phase 3 (register blocking, many outputs per thread) is where the ladder is
+expected to pull clearly ahead of naive.
+
+### Diagnostic round (staged, pending ncu counters)
+
+Planned round on tiled versus naive at 2048 and 4096: capture Speed of Light,
+occupancy, memory workload, and warp stall reasons; confirm or refute the
+occupancy and shared memory latency hypothesis above; record in
+`docs/DIAGNOSTIC_LOG.md` with the ncu report path. Blocked only by the Windows
+side counter permission (see Phase 0).
+
+## Phases 3 to 11
+
+Status: pending.

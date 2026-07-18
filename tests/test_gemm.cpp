@@ -50,6 +50,21 @@ struct Shape {
 
 constexpr double kTolerance = 1e-4;
 
+struct NamedVariant {
+    const char* name;
+    LaunchFn launch;
+};
+
+// Every hand written FP32 variant is checked against cuBLAS through this list;
+// a new ladder rung is added with one line.
+const std::vector<NamedVariant>& hand_written_variants() {
+    static const std::vector<NamedVariant> variants = {
+        {"naive", ckl::gemm_naive},
+        {"tiled", ckl::gemm_tiled},
+    };
+    return variants;
+}
+
 bool run_case(const Shape& s) {
     const float alpha = 1.25f;
     const float beta = 0.5f;  // exercises the C read-modify-write path
@@ -57,13 +72,8 @@ bool run_case(const Shape& s) {
     const auto b = ckl::random_matrix(s.k, s.n, 0x5678 + static_cast<std::uint64_t>(s.n));
     const auto c0 = ckl::random_matrix(s.m, s.n, 0x9abc + static_cast<std::uint64_t>(s.k));
 
-    const auto c_naive = run_device_gemm(ckl::gemm_naive, a, b, c0, s.m, s.n, s.k, alpha, beta);
     const auto c_cublas = run_device_gemm(ckl::gemm_cublas, a, b, c0, s.m, s.n, s.k, alpha, beta);
-
-    // Primary gate: my kernel versus cuBLAS.
-    std::vector<double> cublas_as_ref(c_cublas.begin(), c_cublas.end());
-    const double err_vs_cublas = c_naive.empty() ? 0.0
-        : ckl::relative_frobenius_error(c_naive, cublas_as_ref);
+    const std::vector<double> cublas_as_ref(c_cublas.begin(), c_cublas.end());
 
     // Cross check on small shapes: cuBLAS versus a CPU double reference. This is
     // what catches a wrong transpose or leading dimension in the oracle.
@@ -73,9 +83,16 @@ bool run_case(const Shape& s) {
         err_cublas_vs_cpu = ckl::relative_frobenius_error(c_cublas, ref);
     }
 
-    const bool ok = err_vs_cublas < kTolerance && err_cublas_vs_cpu < kTolerance;
-    std::printf("  %-22s m=%-5d n=%-5d k=%-5d  naive_vs_cublas=%.3e  cublas_vs_cpu=%.3e  %s\n",
-                s.label, s.m, s.n, s.k, err_vs_cublas, err_cublas_vs_cpu, ok ? "PASS" : "FAIL");
+    bool ok = err_cublas_vs_cpu < kTolerance;
+    std::printf("  %-22s m=%-5d n=%-5d k=%-5d  cublas_vs_cpu=%.3e\n",
+                s.label, s.m, s.n, s.k, err_cublas_vs_cpu);
+    for (const auto& v : hand_written_variants()) {
+        const auto out = run_device_gemm(v.launch, a, b, c0, s.m, s.n, s.k, alpha, beta);
+        const double err = out.empty() ? 0.0 : ckl::relative_frobenius_error(out, cublas_as_ref);
+        const bool pass = err < kTolerance;
+        ok = ok && pass;
+        std::printf("      %-10s vs cuBLAS = %.3e  %s\n", v.name, err, pass ? "PASS" : "FAIL");
+    }
     return ok;
 }
 

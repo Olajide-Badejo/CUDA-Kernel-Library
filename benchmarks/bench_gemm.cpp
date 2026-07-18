@@ -49,6 +49,7 @@ int main(int argc, char** argv) {
 
     const std::vector<Variant> variants = {
         {"naive", ckl::gemm_naive},
+        {"tiled", ckl::gemm_tiled},
         {"cublas", ckl::gemm_cublas},
     };
 
