@@ -5,6 +5,7 @@
 add_library(ckl_gemm STATIC
     gemm_naive.cu
     gemm_tiled.cu
+    gemm_register.cu
     cublas_gemm.cpp
 )
 

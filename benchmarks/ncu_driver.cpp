@@ -34,6 +34,8 @@ int main(int argc, char** argv) {
         launch = ckl::gemm_naive;
     } else if (variant == "tiled") {
         launch = ckl::gemm_tiled;
+    } else if (variant == "register") {
+        launch = ckl::gemm_register;
     } else {
         std::fprintf(stderr, "unknown variant: %s\n", variant.c_str());
         return 2;

@@ -61,6 +61,7 @@ const std::vector<NamedVariant>& hand_written_variants() {
     static const std::vector<NamedVariant> variants = {
         {"naive", ckl::gemm_naive},
         {"tiled", ckl::gemm_tiled},
+        {"register", ckl::gemm_register},
     };
     return variants;
 }

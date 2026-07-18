@@ -176,7 +176,39 @@ percent L1 hit rate at 99.8 percent occupancy and was never DRAM bound (37
 percent DRAM throughput). Full metric table and reasoning in
 `docs/DIAGNOSTIC_LOG.md` Round 1. Next single change: register blocking (Phase 3).
 
-## Phases 3 to 11
+## Phase 3: register blocked, vectorized GEMM, diagnostic round 2
 
-Status: pending. Phase 3 (register blocking) is next, targeting the occupancy and
-MIO limits Round 1 named.
+Status: complete and verified.
+
+### Built
+
+- `src/gemm/gemm_register.cu`: 128 by 128 block, 8 by 8 register tile per thread
+  (256 threads), float4 staging loads, A transposed into shared memory. Aligned
+  fast path (m by 128, n by 128, k by 8); falls back to the tiled kernel for odd,
+  sub tile, and zero k shapes so correctness holds everywhere.
+
+### Verified output
+
+Correctness: register passes the 1e-4 gate on all 8 shapes (aligned shapes use
+the fast kernel; several correctness shapes, including 256 cubed and 384 by 512
+by 128 and 512 by 384 by 640, are aligned and exercise it directly).
+
+Benchmark (this machine):
+
+| size | register GFLOP/s | register percent of cuBLAS | naive GFLOP/s |
+|---|---|---|---|
+| 512 | 2945 | 60.3 | 1960 |
+| 1024 | 7041 | 38.1 | 2136 |
+| 2048 | 9763 | 41.5 | 2045 |
+| 4096 | 10381 | 47.4 | 1890 |
+
+At 4096 the register kernel is 5.5 times naive and 6.5 times the tiled kernel, and
+jumps from about 8 percent to 47 percent of cuBLAS. Round 2 (see DIAGNOSTIC_LOG)
+names the new limiter: the L1 / TEX shared read pipe at 88.8 percent plus a 32.6
+percent occupancy ceiling from 106 registers per thread. DRAM is only 18.5
+percent, so it is not bandwidth bound. Next single change: cp.async double
+buffering (Phase 4).
+
+## Phases 4 to 11
+
+Status: pending.

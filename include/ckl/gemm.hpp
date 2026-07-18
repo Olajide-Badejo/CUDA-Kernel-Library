@@ -45,6 +45,13 @@ void gemm_tiled(const float* a, const float* b, float* c,
                 int m, int n, int k, float alpha, float beta,
                 cudaStream_t stream = nullptr);
 
+// Register blocked, float4 vectorized FP32 GEMM: 128x128 block, 8x8 register
+// tile per thread. Falls back to the tiled kernel for shapes that do not divide
+// the block factors (m by 128, n by 128, k by 8).
+void gemm_register(const float* a, const float* b, float* c,
+                   int m, int n, int k, float alpha, float beta,
+                   cudaStream_t stream = nullptr);
+
 // cuBLAS SGEMM oracle producing the same row major C. Manages a cached handle
 // internally. Used as both the correctness oracle and the performance baseline.
 void gemm_cublas(const float* a, const float* b, float* c,

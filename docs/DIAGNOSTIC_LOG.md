@@ -69,3 +69,55 @@ is reused many times from registers (raising arithmetic intensity per thread and
 work per MIO instruction), and the loads become fewer and wider (float4). This is
 the Volkov and Demmel decisive step, and the next round measures whether it lifts
 compute throughput and pulls clearly ahead of naive.
+
+## Round 2: register blocked kernel, the decisive step and the new limiter
+
+Date: 2026-07-19. Artifacts: `experiments/results/ncu/round02/`
+(register at 2048 and 4096 cubed).
+
+Result (4096 cubed): the register blocked kernel runs in 14.9 ms at 10381
+GFLOP/s, versus tiled at 97.7 ms and 1588 GFLOP/s and naive at 1890 GFLOP/s. That
+is 6.5 times the tiled kernel and 5.5 times naive, and it moves from about 8
+percent of cuBLAS to 47 percent in one step. The ladder's central claim holds:
+register blocking, not shared tiling, is the decisive move on this GPU.
+
+Metric snapshot at 4096 cubed, register versus the tiled kernel from Round 1:
+
+| metric | tiled | register |
+|---|---|---|
+| Duration (ms) | 97.7 | 14.9 |
+| Achieved GFLOP/s | 1588 | 10381 |
+| Speed of Light, memory (percent) | 81.4 | 85.4 |
+| L1 / TEX pipe throughput (percent) | n/a | 88.8 |
+| Speed of Light, compute (percent) | 81.4 | 65.1 |
+| DRAM throughput (percent) | 15.7 | 18.5 |
+| L1 / TEX hit rate (percent) | 0.4 | 18.5 |
+| L2 hit rate (percent) | 50.9 | 65.0 |
+| Achieved occupancy (percent) | 66.6 | 32.6 |
+| Registers per thread | 37 | 106 |
+| Warp cycles per issued instruction | 45.5 | 9.3 |
+| Top warp stall | MIO throttle, 28.1 cyc | MIO throttle, 4.4 cyc |
+
+Why it is faster despite lower occupancy: warp cycles per issued instruction fell
+from 45.5 to 9.3, so each warp makes far more forward progress per cycle. The 8 by
+8 register tile turns 16 shared memory reads per contraction step into 64 fused
+multiply adds, so arithmetic intensity per thread rose sharply and the machine no
+longer needs high occupancy to stay busy. DRAM throughput is only 18.5 percent, so
+this kernel is not close to global bandwidth bound.
+
+New top limiter, named: the L1 / TEX pipe at 88.8 percent, which here is the
+shared memory read path feeding registers, and a secondary occupancy ceiling. The
+8 by 8 accumulators plus fragments cost 106 registers per thread, so only two
+128 by 128 blocks fit per SM and achieved occupancy is 32.6 percent (about 15.6
+active warps per SM). The inner loop issues eight scalar LDS for A and eight for B
+per contraction step; those scalar shared loads are what saturate the L1 / TEX
+pipe.
+
+Two candidate single changes were considered: (a) vectorize the shared loads to
+128 bit (LDS.128) to cut the shared load instruction count roughly fourfold and
+relieve the L1 / TEX pipe, and (b) cp.async double buffering (Phase 4) to overlap
+the global tile loads with the compute of the previous tile and remove the
+serializing syncthreads. Per the one change per round rule the next rung applies
+cp.async double buffering, the ladder's designated Phase 4 step; the vectorized
+shared load idea is kept on the list for a later round on the top kernel if the
+L1 / TEX pipe is still the limiter after double buffering.
