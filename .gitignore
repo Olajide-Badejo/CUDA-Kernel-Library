@@ -8,10 +8,11 @@ cmake-build-*/
 _deps/
 /third_party/
 
-# Experiment outputs (generated); keep one canonical summary committed
-experiments/results/*
-!experiments/results/.gitkeep
-!experiments/results/summary.csv
+# Experiment outputs. Generated benchmark rows are not committed, but the ncu
+# diagnostic text pages and round metadata are: the diagnostic log points at
+# them as evidence. The large binary ncu and nsys reports stay out (regenerable).
+experiments/results/**/*.jsonl
+experiments/results/summary_*.csv
 
 # Nsight artifacts
 *.ncu-rep

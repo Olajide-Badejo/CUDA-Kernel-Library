@@ -67,7 +67,9 @@ all users; (b) set registry DWORD `RmProfilingAdminOnly = 0` under
 `HKLM\SYSTEM\CurrentControlSet\Services\nvlddmkm\Global\NVTweak` and reboot. Both
 need Windows administrator; the registry path needs a reboot.
 
-Status: open. This blocks the Phase 2 to 5 diagnostic rounds but not the Phase 1
-and Phase 2 kernel and correctness work, which proceed in parallel. Recorded in
-PROGRESS.md with the exact fix. To be verified by rerunning the ncu probe once
-the setting is changed.
+Resolved 2026-07-19. The repo owner set `RmProfilingAdminOnly = 0` under the
+nvlddmkm NVTweak key and rebooted. Verification: the ncu probe on `stream_copy`
+now returns no `ERR_NVGPUCTRPERM` and a populated table (DRAM throughput 86
+percent, SM throughput 1.76 percent, the expected memory bound signature of a
+copy kernel). Round 1 (tiled versus naive) ran cleanly afterward; see
+`docs/DIAGNOSTIC_LOG.md`.

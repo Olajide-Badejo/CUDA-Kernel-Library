@@ -165,14 +165,18 @@ and it is precisely the picture the diagnostic round is meant to make concrete.
 Phase 3 (register blocking, many outputs per thread) is where the ladder is
 expected to pull clearly ahead of naive.
 
-### Diagnostic round (staged, pending ncu counters)
+### Diagnostic round 1 (done, counters enabled)
 
-Planned round on tiled versus naive at 2048 and 4096: capture Speed of Light,
-occupancy, memory workload, and warp stall reasons; confirm or refute the
-occupancy and shared memory latency hypothesis above; record in
-`docs/DIAGNOSTIC_LOG.md` with the ncu report path. Blocked only by the Windows
-side counter permission (see Phase 0).
+Counter permission cleared (owner set `RmProfilingAdminOnly = 0` and rebooted;
+verified). Round 1 ran on naive and tiled at 2048 and 4096; artifacts in
+`experiments/results/ncu/round01/`. Result confirms the hypothesis: the tiled
+kernel is limited by the shared memory (MIO) pipe and by 66.6 percent occupancy
+(1024 thread block, one block per SM), while the naive kernel rides an 87.5
+percent L1 hit rate at 99.8 percent occupancy and was never DRAM bound (37
+percent DRAM throughput). Full metric table and reasoning in
+`docs/DIAGNOSTIC_LOG.md` Round 1. Next single change: register blocking (Phase 3).
 
 ## Phases 3 to 11
 
-Status: pending.
+Status: pending. Phase 3 (register blocking) is next, targeting the occupancy and
+MIO limits Round 1 named.
