@@ -1,0 +1,44 @@
+# Build trees
+/build/
+/out/
+**/build/
+cmake-build-*/
+
+# CUTLASS and other fetched content
+_deps/
+/third_party/
+
+# Experiment outputs (generated); keep one canonical summary committed
+experiments/results/*
+!experiments/results/.gitkeep
+!experiments/results/summary.csv
+
+# Nsight artifacts
+*.ncu-rep
+*.nsys-rep
+*.sqlite
+
+# LaTeX build junk
+report/build/
+report_debug/build/
+*.aux
+*.log
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.bbl
+*.blg
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor and OS
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
