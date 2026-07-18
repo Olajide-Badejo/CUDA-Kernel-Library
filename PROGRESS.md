@@ -75,4 +75,58 @@ Verification after the fix: rerun the ncu probe on `stream_copy` and confirm no
 
 ## Phase 1: naive GEMM, harness, cuBLAS oracle
 
-Status: pending.
+Status: complete and verified on the machine.
+
+### Built
+
+- `include/ckl/gemm.hpp`: shared row major GEMM interface for the whole ladder.
+- `src/gemm/gemm_naive.cu`: honest baseline, one thread per output element,
+  natural indexing, no reuse.
+- `src/gemm/cublas_gemm.cpp`: cuBLAS SGEMM oracle producing the identical row
+  major C through the column major transpose identity; caches one handle;
+  handles the empty contraction (k == 0) by scaling rather than a zero leading
+  dimension SGEMM.
+- `include/ckl/event_timer.hpp`: CUDA event timing, 5 warmups then 20 reps,
+  median and IQR.
+- `include/ckl/reference.hpp`: seeded random fill, double precision CPU GEMM,
+  relative Frobenius error.
+- `tests/test_gemm.cpp`: correctness gate over 8 shapes.
+- `benchmarks/bench_gemm.cpp`: the early harness (naive vs cuBLAS, GFLOP/s,
+  percent of cuBLAS).
+
+### Verified output
+
+Correctness (relative Frobenius, tolerance 1e-4), all PASS including the
+degenerate shapes; cuBLAS versus the CPU double reference near 1e-7 confirms the
+oracle orientation:
+
+| shape | naive vs cuBLAS | cuBLAS vs CPU |
+|---|---|---|
+| 256^3 square | 3.0e-7 | 1.5e-7 |
+| 384 x 512 x 128 | 4.4e-8 | 2.1e-7 |
+| 129 x 257 x 193 (non tile aligned) | 2.6e-7 | 1.5e-7 |
+| 7 x 5 x 11 (sub tile) | 9.2e-8 | 6.7e-8 |
+| 512 x 384 x 640 | 4.6e-7 | 2.7e-7 |
+| zero m, zero n, zero k | 0 | 0 |
+
+Baseline benchmark (this machine, commit recorded in the run; naive is the
+honest first pass, not a strawman):
+
+| size | naive GFLOP/s | cuBLAS GFLOP/s | naive percent of cuBLAS |
+|---|---|---|---|
+| 256 | 1245 | 1419 | 87.8 |
+| 512 | 1930 | 5604 | 34.4 |
+| 1024 | 2132 | 17465 | 12.2 |
+| 2048 | 2045 | 23606 | 8.7 |
+| 4096 | 1909 | 22005 | 8.7 |
+
+Reading: the naive kernel plateaus near 2 TFLOP/s because every A and B element
+is refetched from global memory with no reuse, so it is bandwidth and latency
+bound the moment the matrices leave the caches. cuBLAS reaches about 22 to 24
+TFLOP/s true FP32 (below the 32.3 TFLOP/s estimated peak). This gap is what the
+ladder closes, one attributable technique at a time.
+
+## Phase 2: shared memory tiled GEMM, first diagnostic round
+
+Status: pending (kernel can be built now; the ncu round waits on the counter
+permission fix noted in Phase 0).
