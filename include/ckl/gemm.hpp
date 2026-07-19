@@ -95,6 +95,13 @@ void gemm_mma_opt(const __half* a, const __half* b, float* c,
                   int m, int n, int k, float alpha, float beta,
                   cudaStream_t stream = nullptr);
 
+// Fusion study: the top kernel with a per column bias add and ReLU folded into
+// the epilogue (computes C = relu(alpha * A*B + bias)), versus the unfused path of
+// a plain GEMM followed by gemm_bias_relu (a separate memory bound pass over C).
+void gemm_mma_opt_bias(const __half* a, const __half* b, float* c, const float* bias,
+                       int m, int n, int k, float alpha, cudaStream_t stream = nullptr);
+void gemm_bias_relu(float* c, const float* bias, int m, int n, cudaStream_t stream = nullptr);
+
 // cuBLAS tensor core oracles (cublasGemmEx, FP16 or BF16 in, FP32 accumulate),
 // producing the same row major C. Baseline for the tensor path per precision.
 void gemm_cublas_fp16(const __half* a, const __half* b, float* c,

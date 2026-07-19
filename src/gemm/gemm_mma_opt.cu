@@ -82,9 +82,13 @@ __device__ inline void mma_m16n8k16(float (&d)[4], const uint32_t (&a)[4],
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
 }
 
+// FUSE_BIAS folds a per column bias add and a ReLU into the epilogue, while the
+// accumulator is still in registers, so no extra pass over C is needed. The
+// default (false) path is the plain kernel used everywhere else.
+template <bool FUSE_BIAS>
 __global__ __launch_bounds__(kThreads) void gemm_mma_opt_kernel(
     const __half* __restrict__ a, const __half* __restrict__ b, float* __restrict__ c,
-    int m, int n, int k, float alpha, float beta) {
+    int m, int n, int k, float alpha, float beta, const float* __restrict__ bias) {
     __shared__ __align__(16) __half as[2][kBM * kBK];  // [buf][row][kk]
     __shared__ __align__(16) __half bs[2][kBK * kBN];  // [buf][kk][col]
 
@@ -173,11 +177,31 @@ __global__ __launch_bounds__(kThreads) void gemm_mma_opt_kernel(
             const long long i01 = static_cast<long long>(r0) * n + c1;
             const long long i10 = static_cast<long long>(r1) * n + c0;
             const long long i11 = static_cast<long long>(r1) * n + c1;
-            c[i00] = alpha * acc[mi][ni][0] + beta * c[i00];
-            c[i01] = alpha * acc[mi][ni][1] + beta * c[i01];
-            c[i10] = alpha * acc[mi][ni][2] + beta * c[i10];
-            c[i11] = alpha * acc[mi][ni][3] + beta * c[i11];
+            if constexpr (FUSE_BIAS) {
+                // C = relu(alpha * A*B + bias[col]); no read of C, no extra pass.
+                const auto relu = [](float v) { return v > 0.0f ? v : 0.0f; };
+                c[i00] = relu(alpha * acc[mi][ni][0] + bias[c0]);
+                c[i01] = relu(alpha * acc[mi][ni][1] + bias[c1]);
+                c[i10] = relu(alpha * acc[mi][ni][2] + bias[c0]);
+                c[i11] = relu(alpha * acc[mi][ni][3] + bias[c1]);
+            } else {
+                c[i00] = alpha * acc[mi][ni][0] + beta * c[i00];
+                c[i01] = alpha * acc[mi][ni][1] + beta * c[i01];
+                c[i10] = alpha * acc[mi][ni][2] + beta * c[i10];
+                c[i11] = alpha * acc[mi][ni][3] + beta * c[i11];
+            }
         }
+    }
+}
+
+// Standalone bias plus ReLU epilogue, the unfused path: reads C, adds the column
+// bias, applies ReLU, writes C. A separate memory bound pass over C.
+__global__ void bias_relu_kernel(float* __restrict__ c, const float* __restrict__ bias,
+                                 int m, int n) {
+    const long long idx = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < static_cast<long long>(m) * n) {
+        const float v = c[idx] + bias[idx % n];
+        c[idx] = v > 0.0f ? v : 0.0f;
     }
 }
 
@@ -199,7 +223,27 @@ void gemm_mma_opt(const __half* a, const __half* b, float* c,
     }
     const dim3 block(kThreads);
     const dim3 grid(n / kBN, m / kBM);
-    gemm_mma_opt_kernel<<<grid, block, 0, stream>>>(a, b, c, m, n, k, alpha, beta);
+    gemm_mma_opt_kernel<false><<<grid, block, 0, stream>>>(a, b, c, m, n, k, alpha, beta, nullptr);
+}
+
+void gemm_mma_opt_bias(const __half* a, const __half* b, float* c, const float* bias,
+                       int m, int n, int k, float alpha, cudaStream_t stream) {
+    if (m <= 0 || n <= 0 || !aligned(m, n, k)) {
+        return;  // fusion study drives aligned shapes only
+    }
+    const dim3 block(kThreads);
+    const dim3 grid(n / kBN, m / kBM);
+    gemm_mma_opt_kernel<true><<<grid, block, 0, stream>>>(a, b, c, m, n, k, alpha, 0.0f, bias);
+}
+
+void gemm_bias_relu(float* c, const float* bias, int m, int n, cudaStream_t stream) {
+    if (m <= 0 || n <= 0) {
+        return;
+    }
+    constexpr int kBlock = 256;
+    const long long total = static_cast<long long>(m) * n;
+    const int grid = static_cast<int>((total + kBlock - 1) / kBlock);
+    bias_relu_kernel<<<grid, kBlock, 0, stream>>>(c, bias, m, n);
 }
 
 }  // namespace ckl

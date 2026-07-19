@@ -9,6 +9,10 @@ add_executable(bench_gemm_tensor bench_gemm_tensor.cpp)
 target_link_libraries(bench_gemm_tensor PRIVATE ckl_gemm ckl_headers)
 ckl_set_warnings(bench_gemm_tensor)
 
+add_executable(fusion_study fusion_study.cpp)
+target_link_libraries(fusion_study PRIVATE ckl_gemm ckl_headers)
+ckl_set_warnings(fusion_study)
+
 add_executable(ncu_driver ncu_driver.cpp)
 target_link_libraries(ncu_driver PRIVATE ckl_gemm ckl_headers)
 ckl_set_warnings(ncu_driver)

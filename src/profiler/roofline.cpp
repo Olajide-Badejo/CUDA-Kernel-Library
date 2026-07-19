@@ -113,8 +113,6 @@ int main() {
     const double fp32_peak = measure_gemm_fp32(8192);
     const double tensor_peak = measure_gemm_fp16(8192);
 
-    ckl::MachineCeilings ceil{bw, fp32_peak, tensor_peak};
-
     const int n = 4096;
     std::vector<ckl::RooflinePoint> points;
     points.push_back({"gemm_naive", ckl::gemm_flops(n, n, n), ckl::gemm_bytes(n, n, n, 4),

@@ -429,6 +429,17 @@ consistent with the 90.3 percent gate measurement in DIAGNOSTIC_LOG Round 9); th
 SpMV warp kernel beats cuSPARSE on L2 resident sizes. Resumability verified (a
 second run skipped the finished rows).
 
+### Fusion study
+
+`benchmarks/fusion_study.cpp` folds a bias add and ReLU into the top kernel's
+epilogue (templated, so the verified default path is untouched) and compares it
+with an unfused GEMM plus a separate elementwise pass. Measured at 4096 cubed: the
+separate epilogue pass is 0.19 ms, and fusion saves 0.23 ms (8.4 percent of the
+unfused 2.70 ms). The epilogue's intensity is 0.167 FLOP/byte, deep in the memory
+bound region, so as a separate pass it is pure bandwidth cost; folding it into the
+compute bound GEMM removes that pass. This is the roofline justified fusion
+decision. See `docs/benchmarking.md`.
+
 ## Phases 10 to 11
 
 Status: pending.
