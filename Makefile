@@ -54,6 +54,9 @@ report: build
 	python3 scripts/gen_report_assets.py
 	cd report && latexmk -pdf -interaction=nonstopmode -output-directory=build main.tex
 	cd report_debug && latexmk -pdf -interaction=nonstopmode -output-directory=build debug_report.tex
+	mkdir -p reports
+	cp report/build/main.pdf reports/main_report.pdf
+	cp report_debug/build/debug_report.pdf reports/debug_report.pdf
 	python3 scripts/check_no_dashes.py .
 
 # `all` is the reproduction target: build, test, sweep, report, style gate, from a
