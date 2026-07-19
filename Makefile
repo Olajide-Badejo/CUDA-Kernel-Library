@@ -31,6 +31,11 @@ test: build
 bench: build
 	./$(BUILD_DIR)/benchmarks/bench_gemm
 
+# Measure the roofline (ceilings plus the ladder) and render the figure.
+roofline: build
+	./$(BUILD_DIR)/src/profiler/roofline
+	python3 scripts/plot_roofline.py
+
 check-style: dash
 
 dash:

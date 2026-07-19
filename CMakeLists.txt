@@ -84,6 +84,18 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/src/trsm/CMakeLists.txt")
     add_subdirectory(src/trsm)
 endif()
 
+if(EXISTS "${CMAKE_SOURCE_DIR}/src/solver/CMakeLists.txt")
+    add_subdirectory(src/solver)
+endif()
+
+if(EXISTS "${CMAKE_SOURCE_DIR}/src/telemetry/CMakeLists.txt")
+    add_subdirectory(src/telemetry)
+endif()
+
+if(EXISTS "${CMAKE_SOURCE_DIR}/src/profiler/CMakeLists.txt")
+    add_subdirectory(src/profiler)
+endif()
+
 if(CKL_BUILD_TESTS AND EXISTS "${CMAKE_SOURCE_DIR}/tests/CMakeLists.txt")
     enable_testing()
     add_subdirectory(tests)

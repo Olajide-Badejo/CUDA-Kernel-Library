@@ -1,0 +1,8 @@
+# Python dependencies for the sweep driver, the report asset generation, and the
+# roofline plot. Install with `pip install -r requirements.txt` in a virtual
+# environment, or use the distribution packages (on Ubuntu: apt install
+# python3-matplotlib python3-numpy). Versions are floors, not pins; the exact
+# versions used are recorded in PROGRESS.md.
+matplotlib>=3.8
+numpy>=1.26
+tqdm>=4.66

@@ -374,6 +374,35 @@ Status: complete and verified.
   about 1e-7 with residuals near 1e-7, across square, tall, and non block aligned
   shapes. See `docs/trsm.md`.
 
-## Phases 8 to 11
+## Phase 8: cuSOLVER, NVML telemetry, roofline profiler
+
+Status: complete and verified.
+
+### Built
+
+- `src/solver/dense_solver.cpp`: RAII `DenseSolver` over cuSOLVER; LU (getrf,
+  getrs) and Cholesky (potrf, potrs) with `_bufferSize` workspace queries and
+  device info checks. Residual verified (`tests/test_solver.cpp`): LU 5.6e-7,
+  Cholesky 4.3e-7. See `docs/cusolver.md`.
+- `src/telemetry/nvml_monitor.cpp`: background sampling thread (SM clock, temp,
+  power, utilization, throttle reasons) with a throttle summary; CUDA 13 NVML API
+  so the build stays warning free. Self check `tests/test_nvml.cpp` collected 22
+  samples during a GEMM burst, no throttle. See `docs/nvml_telemetry.md`.
+- `include/ckl/roofline.hpp` plus `src/profiler/roofline.cpp`: analytical FLOP and
+  byte model plus empirical measurement of the ceilings and the ladder. Writes
+  `experiments/results/roofline.csv` and `roofline_ceilings.csv`;
+  `scripts/plot_roofline.py` renders `report/figures/roofline.{png,pdf}`, a
+  pedagogical log log roofline with shaded memory bound and compute bound regions,
+  the ridge, measured ceilings, and every variant. Measured ceilings: 579 GB/s,
+  23 TFLOP/s FP32, 65 TFLOP/s tensor; the top kernel lands at about 84 percent of
+  the tensor roof and clearly in the compute bound region. See
+  `docs/roofline_profiler.md`.
+
+matplotlib 3.10.7 and numpy 2.3.5 installed (via apt `python3-matplotlib`,
+`python3-numpy`) for the roofline plot and the report figures; recorded here per
+the reproducibility rule. `requirements.txt` lists the pip floors as the
+alternative.
+
+## Phases 9 to 11
 
 Status: pending.
