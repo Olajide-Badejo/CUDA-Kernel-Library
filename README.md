@@ -14,11 +14,43 @@ a number is trusted.
 
 Author: Olajide Badejo. License: MIT.
 
+## Headline results
+
+Measured on this RTX 5070, every number my kernel versus the vendor library in the
+same process. The GEMM ladder at 4096 cubed, each rung against cuBLAS of the same
+precision:
+
+| rung | precision | GFLOP/s | percent of cuBLAS |
+|---|---|---|---|
+| naive | FP32 | 1905 | 8.6 |
+| shared tiled | FP32 | 1589 | 7.2 |
+| register blocked | FP32 | 10380 | 47 |
+| cp.async double buffered | FP32 | 16174 | 73 |
+| WMMA | FP16 | 36308 | 60 |
+| mma.sync plus ldmatrix plus swizzle (top) | FP16 | 54930 | 90 |
+
+The top tensor kernel passes the compute bound gate (Nsight Speed of Light: tensor
+pipe 83 percent versus memory 30 percent) and reaches 90 percent of cuBLAS at both
+4096 and 8192 cubed for FP16. Each rung was profiled and its next change chosen from
+the evidence; the nine round record is in `docs/DIAGNOSTIC_LOG.md`.
+
+Supporting families, same device, versus the vendor library:
+
+| family | best hand written | baseline | note |
+|---|---|---|---|
+| GEMV (warp) | about 610 GB/s at 8192 | cuBLAS SGEMV | memory bound, matches cuBLAS |
+| CSR SpMV (warp per row) | 1.6 times the naive kernel | cuSPARSE | skewed degree matrix |
+| TRSM (blocked) | matches cuBLAS to 1e-7 | cuBLAS STRSM | residual verified |
+| cuSOLVER LU / Cholesky | residual 5.6e-7 / 4.3e-7 | (is the vendor path) | RAII wrapper |
+
+Roofline (measured ceilings 579 GB/s, 23 TFLOP/s FP32, 65 TFLOP/s tensor):
+`report/figures/roofline.png`. Full per shape data: `experiments/results/summary.csv`.
+
 ## Status
 
-Under construction, built phase by phase (see the roadmap in the build spec and
-`PROGRESS.md`). The headline results table is added last, filled only from real
-runs on this machine; until then any pending value reads "pending".
+Kernel families, diagnostic rounds, sweep, and roofline are complete and verified
+on the machine (see `PROGRESS.md`). Remaining: the CUTLASS reference and the two
+report PDFs. Every number above is traceable to a results file and a commit.
 
 ## Target machine
 
