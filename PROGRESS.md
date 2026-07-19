@@ -209,6 +209,38 @@ percent occupancy ceiling from 106 registers per thread. DRAM is only 18.5
 percent, so it is not bandwidth bound. Next single change: cp.async double
 buffering (Phase 4).
 
-## Phases 4 to 11
+## Phase 4: cp.async double buffered GEMM, diagnostic round 3
 
-Status: pending.
+Status: complete and verified.
+
+### Built
+
+- `src/gemm/gemm_cp_async.cu`: double buffered register blocked kernel using
+  cp.async (`__pipeline_memcpy_async`) to overlap the next tile's global to
+  shared copy with the current tile's math. A is stored non transposed so
+  cp.async can copy contiguous bytes; its shared reads broadcast across the warp
+  so that costs no bank conflicts. Same alignment contract and tiled fallback.
+
+### Verified output
+
+Correctness: cp_async passes the 1e-4 gate on all 8 shapes.
+
+Benchmark (this machine):
+
+| size | cp_async GFLOP/s | percent of cuBLAS | register GFLOP/s |
+|---|---|---|---|
+| 1024 | 10895 | 63.2 | 7010 |
+| 2048 | 15081 | 65.9 | 9721 |
+| 4096 | 16174 | 73.4 | 10380 |
+
+Round 3 (see DIAGNOSTIC_LOG): cp.async overlapped the loads (warp cycles per
+issued instruction 9.3 to 3.49, DRAM 18.5 to 29.0 percent, no pipe saturated).
+The terminal FP32 limiter is occupancy: 149 registers per thread caps the kernel
+at one block per SM and 16.7 percent occupancy. Accepted as the top hand written
+FP32 variant at 73 percent of cuBLAS, gap diagnosed. Next: tensor cores (Phase 5)
+to lift the compute ceiling toward the compute bound gate.
+
+## Phase 5 to 11
+
+Status: pending. Phase 5 (WMMA FP16 and BF16, mma.sync PTX, CUTLASS reference,
+rounds to the compute bound gate) is next.

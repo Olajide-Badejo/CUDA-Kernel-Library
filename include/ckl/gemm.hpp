@@ -52,6 +52,13 @@ void gemm_register(const float* a, const float* b, float* c,
                    int m, int n, int k, float alpha, float beta,
                    cudaStream_t stream = nullptr);
 
+// cp.async double buffered FP32 GEMM: overlaps the next tile's global to shared
+// copy with the current tile's math. Same alignment contract and fallback as the
+// register kernel.
+void gemm_cp_async(const float* a, const float* b, float* c,
+                   int m, int n, int k, float alpha, float beta,
+                   cudaStream_t stream = nullptr);
+
 // cuBLAS SGEMM oracle producing the same row major C. Manages a cached handle
 // internally. Used as both the correctness oracle and the performance baseline.
 void gemm_cublas(const float* a, const float* b, float* c,

@@ -121,3 +121,51 @@ serializing syncthreads. Per the one change per round rule the next rung applies
 cp.async double buffering, the ladder's designated Phase 4 step; the vectorized
 shared load idea is kept on the list for a later round on the top kernel if the
 L1 / TEX pipe is still the limiter after double buffering.
+
+## Round 3: cp.async double buffering, and the FP32 occupancy wall
+
+Date: 2026-07-19. Artifacts: `experiments/results/ncu/round03/`
+(cp_async and register at 4096 cubed).
+
+Result (4096 cubed): the cp.async kernel runs at 16174 GFLOP/s, 73.4 percent of
+cuBLAS, up from the register kernel's 10380 GFLOP/s and 47 percent. Correctness
+holds on all shapes.
+
+Metric snapshot at 4096 cubed, cp.async versus the register kernel:
+
+| metric | register | cp.async |
+|---|---|---|
+| Achieved GFLOP/s | 10380 | 16174 |
+| Speed of Light, memory (percent) | 85.4 | 62.7 |
+| Speed of Light, compute (percent) | 65.1 | 55.1 |
+| DRAM throughput (percent) | 18.5 | 29.0 |
+| Warp cycles per issued instruction | 9.3 | 3.49 |
+| Achieved occupancy (percent) | 32.6 | 16.7 |
+| Registers per thread | 106 | 149 |
+| Active warps per SM | 15.6 | 8.0 |
+
+What cp.async bought: warp cycles per issued instruction fell from 9.3 to 3.49, so
+the loads now overlap the math instead of stalling in front of it, DRAM
+utilization rose from 18.5 to 29.0 percent, and no pipe is saturated any more
+(memory 62.7, compute 55.1). The kernel has excellent instruction level
+parallelism.
+
+New and terminal limiter for the FP32 path, named: occupancy. The double buffered
+8 by 8 tile now costs 149 registers per thread, so only one 128 by 128 block fits
+per SM and achieved occupancy is 16.7 percent, about 8 active warps per SM. With so
+few warps and no pipe near its ceiling, the SM is underpopulated and latency
+exposed; this is why it sits at 73 percent of cuBLAS rather than higher. Two FP32
+levers remain (shrink the tile or otherwise cut register pressure to raise
+occupancy, or vectorize shared loads), but both trade against the arithmetic
+intensity per thread that made the register kernel fast, and neither changes the
+fundamental ceiling: cuBLAS SGEMM on this card is itself a well tuned CUDA core
+kernel, and matching it on FP32 CUDA cores is a game of diminishing returns.
+
+Single change to apply next (Phase 5): change the compute primitive. Move the
+inner product onto the fifth generation tensor cores with WMMA (FP16 and BF16
+storage, FP32 accumulate). This is the designated path to the compute bound gate
+and the 90 percent of cuBLAS target, because the tensor cores raise the compute
+ceiling far above the FP32 CUDA core peak that both this kernel and cuBLAS SGEMM
+are bounded by. The FP32 cp.async kernel is accepted as the top hand written FP32
+variant at 73 percent of cuBLAS, with its gap diagnosed here as an occupancy and
+register pressure wall.

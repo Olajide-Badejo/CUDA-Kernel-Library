@@ -36,6 +36,8 @@ int main(int argc, char** argv) {
         launch = ckl::gemm_tiled;
     } else if (variant == "register") {
         launch = ckl::gemm_register;
+    } else if (variant == "cp_async") {
+        launch = ckl::gemm_cp_async;
     } else {
         std::fprintf(stderr, "unknown variant: %s\n", variant.c_str());
         return 2;

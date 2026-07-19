@@ -62,6 +62,7 @@ const std::vector<NamedVariant>& hand_written_variants() {
         {"naive", ckl::gemm_naive},
         {"tiled", ckl::gemm_tiled},
         {"register", ckl::gemm_register},
+        {"cp_async", ckl::gemm_cp_async},
     };
     return variants;
 }
