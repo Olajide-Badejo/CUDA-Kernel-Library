@@ -116,6 +116,7 @@ def plot_ladder(plotted: list[tuple[str, str, float, float]]) -> None:
     labels = [p[0] for p in plotted]
     gflops = [p[2] for p in plotted]
     colors = []
+    fp32_count = 0
     for label, dtype, _g, _pct in plotted:
         if "swizzle" in label:
             colors.append(top_c)
@@ -123,8 +124,13 @@ def plot_ladder(plotted: list[tuple[str, str, float, float]]) -> None:
             colors.append(tensor_c)
         else:
             colors.append(fp32_c)
+            fp32_count += 1
 
-    fig, ax = plt.subplots(figsize=(9.2, 5.2))
+    fig, ax = plt.subplots(figsize=(9.6, 6.4))
+    # Fixed margins (not a tight bbox) so the figure centered title sits at the
+    # center of the whole picture, and the legend has reserved space below.
+    fig.subplots_adjust(left=0.235, right=0.965, top=0.82, bottom=0.26)
+
     y = list(range(len(labels)))
     ax.barh(y, gflops, color=colors, edgecolor="white", height=0.72, zorder=3)
     ax.set_yticks(y)
@@ -137,15 +143,12 @@ def plot_ladder(plotted: list[tuple[str, str, float, float]]) -> None:
         ax.text(g, i, f"  {g:,.0f} GFLOP/s   ({pct:.0f}% of cuBLAS)", va="center",
                 fontsize=8.5, color=ink)
 
+    # Dashed divider between the FP32 group (top) and the tensor core group
+    # (bottom): the plot is really two grouped bar charts sharing one axis.
+    ax.axhline(fp32_count - 0.5, color=muted, linestyle="--", linewidth=1.4, zorder=4)
+
     ax.set_xlabel("achieved throughput at $4096^3$  (bar length, higher is better)",
-                  fontsize=10, color=ink)
-    # Title plus a subtitle that resolves the apparent paradox (a lower GFLOP/s bar
-    # can be a higher percent, because the baseline differs by precision).
-    ax.set_title("GEMM optimization ladder on the RTX 5070", fontsize=14,
-                 fontweight="bold", color=ink, pad=26)
-    ax.text(0.0, 1.03,
-            "each rung is one attributable step; percent is of cuBLAS at the same precision",
-            transform=ax.transAxes, fontsize=9.5, color=muted, va="bottom")
+                  fontsize=10.5, fontweight="bold", color=ink)
 
     handles = [
         Patch(facecolor=fp32_c, edgecolor="white",
@@ -154,11 +157,16 @@ def plot_ladder(plotted: list[tuple[str, str, float, float]]) -> None:
               label="tensor core kernel  (percent of cuBLAS FP16 or BF16, about 65 TFLOP/s)"),
         Patch(facecolor=top_c, edgecolor="white", label="top kernel"),
     ]
-    # Legend in its own space below the x-axis label, left aligned, so it never
-    # covers a bar or a data label.
-    ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(0.0, -0.16),
-              frameon=True, framealpha=0.95, edgecolor="#DDDDDD", fontsize=8.5,
-              ncol=1, borderaxespad=0.0)
+    # Legend in its own reserved space at the bottom left, below the axis label.
+    fig.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.02, 0.015),
+               frameon=True, framealpha=0.95, edgecolor="#DDDDDD", fontsize=8.5, ncol=1)
+
+    # Title centered on the whole figure, with an explanatory subtitle under it.
+    fig.suptitle("GEMM optimization ladder", x=0.5, y=0.955, fontsize=15,
+                 fontweight="bold", color=ink)
+    fig.text(0.5, 0.9,
+             "each rung is one attributable step; percent is of cuBLAS at the same precision",
+             ha="center", va="top", fontsize=9.5, color=muted)
 
     ax.grid(True, axis="x", color="#E6E6E6", linewidth=0.6, zorder=0)
     for spine in ("top", "right"):
@@ -166,11 +174,9 @@ def plot_ladder(plotted: list[tuple[str, str, float, float]]) -> None:
     for spine in ("left", "bottom"):
         ax.spines[spine].set_color(muted)
     ax.tick_params(colors=muted, labelcolor=ink)
-    ax.set_xlim(0, max(gflops) * 1.5)
-    fig.tight_layout()
-    # bbox_inches tight so the legend placed below the axes is included in the file.
-    fig.savefig(FIGURES / "ladder.pdf", bbox_inches="tight")
-    fig.savefig(FIGURES / "ladder.png", dpi=150, bbox_inches="tight")
+    ax.set_xlim(0, max(gflops) * 1.62)
+    fig.savefig(FIGURES / "ladder.pdf")
+    fig.savefig(FIGURES / "ladder.png", dpi=150)
 
 
 def main() -> int:
