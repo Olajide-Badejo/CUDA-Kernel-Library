@@ -350,6 +350,30 @@ near the measured streaming ceiling; the naive kernel is coalescing limited.
 Documented as memory bound with roofline evidence in `docs/gemv.md` (arithmetic
 intensity 0.5 FLOP per byte, far left of the measured ridge of about 60).
 
-## Phases 7 to 11
+## Phase 7: TRSM and CSR SpMV families
+
+Status: complete and verified.
+
+### Built
+
+- SpMV: `src/sparse/spmv_csr_naive.cu` (thread per row), `spmv_csr_warp.cu` (warp
+  per row, shfl reduction), `cusparse_ref.cpp` (cusparseSpMV oracle). Tested on a
+  skewed degree matrix; benchmark included.
+- TRSM: `src/trsm/trsm_naive.cu` (forward substitution), `trsm_blocked.cu` (32
+  wide diagonal blocks with a GEMM style trailing update), `cublas_trsm.cpp`
+  (STRSM oracle, row major left solve mapped to a right side upper solve).
+
+### Verified output
+
+- SpMV correctness (skewed matrix, max row degree about 700): naive and warp both
+  match cuSPARSE to about 1e-7. Benchmark at 131072 squared, 3.9 M nonzeros: naive
+  60.1 GFLOP/s, warp 94.8 (131.8 percent of cuSPARSE), cuSPARSE 71.9. The warp
+  kernel is 1.6 times naive on the skewed load, the intended result. See
+  `docs/sparse.md`.
+- TRSM correctness (lower, diagonally dominant): naive and blocked match cuBLAS to
+  about 1e-7 with residuals near 1e-7, across square, tall, and non block aligned
+  shapes. See `docs/trsm.md`.
+
+## Phases 8 to 11
 
 Status: pending.
