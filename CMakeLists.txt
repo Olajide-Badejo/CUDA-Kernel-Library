@@ -72,6 +72,10 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/src/gemm/CMakeLists.txt")
     add_subdirectory(src/gemm)
 endif()
 
+if(EXISTS "${CMAKE_SOURCE_DIR}/src/gemv/CMakeLists.txt")
+    add_subdirectory(src/gemv)
+endif()
+
 if(CKL_BUILD_TESTS AND EXISTS "${CMAKE_SOURCE_DIR}/tests/CMakeLists.txt")
     enable_testing()
     add_subdirectory(tests)

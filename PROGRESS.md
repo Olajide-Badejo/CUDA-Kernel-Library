@@ -325,6 +325,31 @@ fragment loads.
 Still to do in Phase 5: the CUTLASS reference instantiation (open source upper
 reference), and the roofline based gate figure (Phase 8).
 
-## Phases 6 to 11
+## Phase 6: GEMV family
+
+Status: complete and verified.
+
+### Built
+
+- `src/gemv/gemv_naive.cu` (thread per row), `gemv_warp.cu` (warp per row with
+  shfl reduction), `gemv_vectorized.cu` (float4 warp per row), `cublas_gemv.cpp`
+  (SGEMV oracle). Tests and benchmark added.
+
+### Verified output
+
+Correctness (1e-4 versus cuBLAS) passes on square, tall, wide, non multiple of 4,
+single row, and zero n shapes. Effective bandwidth for the read of A:
+
+| size | naive GB/s | warp GB/s | vectorized GB/s | cuBLAS GB/s |
+|---|---|---|---|---|
+| 4096 | 250 | 590 | 577 | 587 |
+| 8192 | 325 | 616 | 610 | 613 |
+
+The warp and vectorized kernels match cuBLAS and reach about 610 GB/s at 8192,
+near the measured streaming ceiling; the naive kernel is coalescing limited.
+Documented as memory bound with roofline evidence in `docs/gemv.md` (arithmetic
+intensity 0.5 FLOP per byte, far left of the measured ridge of about 60).
+
+## Phases 7 to 11
 
 Status: pending.
