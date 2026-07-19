@@ -120,6 +120,9 @@ int main() {
     for (const auto& s : shapes) {
         all_ok = run_case<__nv_bfloat16>(s, "bf16", ckl::gemm_wmma_bf16, ckl::gemm_cublas_bf16) && all_ok;
     }
+    for (const auto& s : shapes) {
+        all_ok = run_case<__half>(s, "ptx", ckl::gemm_mma_ptx, ckl::gemm_cublas_fp16) && all_ok;
+    }
     std::printf("%s\n", all_ok ? "all tensor GEMM cases passed" : "tensor GEMM cases FAILED");
     return all_ok ? 0 : 1;
 }

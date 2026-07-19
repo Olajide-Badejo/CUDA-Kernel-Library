@@ -273,7 +273,19 @@ WMMA at 4096 (36.3 TFLOP/s FP16) is 2.2 times the top FP32 kernel (16.2 TFLOP/s)
 confirming tensor cores lift the ceiling. Round 4 (see DIAGNOSTIC_LOG): the kernel
 is shared read (L1 / TEX) pipe bound at 92 percent with the tensor pipe only 53.7
 percent utilized, so the cores are starved by the generic load_matrix_sync
-fragment loads. Next single change: mma.sync PTX with ldmatrix.
+fragment loads.
+
+- `src/gemm/gemm_mma_ptx.cu`: PTX level mma.sync.aligned.m16n8k16 (FP16, FP32
+  accumulate) with the lane to fragment mapping done by hand. Correct on all
+  shapes (matches the oracle to about 1e-7). Round 5: it matches the WMMA kernel
+  within noise (about 36.4 TFLOP/s), which is the informative result. It isolates
+  the instruction path from the load path and confirms that mma.sync was never
+  the bottleneck; the scalar fragment loads are. The single change that would move
+  the number is ldmatrix (plus a larger tile and cp.async double buffering).
+
+Still to do in Phase 5: the ldmatrix backed, larger tile, double buffered top
+tensor kernel to chase the compute bound gate; the CUTLASS reference
+instantiation; and the roofline based compute bound gate check.
 
 ## Phases 6 to 11
 

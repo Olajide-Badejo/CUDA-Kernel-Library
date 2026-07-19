@@ -212,3 +212,30 @@ of the many scalar loads the WMMA abstraction emits, which directly relieves the
 L1 / TEX pipe and feeds the tensor cores. Larger block tiles and cp.async double
 buffering are the further levers for the top kernel on the way to the compute
 bound gate.
+
+## Round 5: mma.sync PTX, isolating the instruction path from the load path
+
+Date: 2026-07-19. The mma.sync kernel uses the same 64 by 64 block tile as the
+WMMA kernel and the same shared staging, but replaces the WMMA fragment API with
+direct mma.sync.aligned.m16n8k16 and manual, indexed shared loads for the
+fragments (no ldmatrix yet). This is deliberately a like for like swap so the
+round isolates the instruction path.
+
+Result (this machine, FP16): the mma.sync kernel matches the WMMA kernel within
+noise, about 36.4 TFLOP/s at 4096 cubed (57 to 60 percent of the FP16 cuBLAS
+oracle), the same as WMMA's 36.3 TFLOP/s.
+
+Reading: this is the honest and informative outcome. Round 4 named the limiter as
+the shared read (L1 / TEX) pipe, not the WMMA abstraction. Removing the WMMA
+abstraction while still assembling fragments with scalar shared loads leaves that
+limiter untouched, so performance does not move. The mma.sync instruction was
+never the bottleneck; the fragment loads are. This confirms the Round 4 diagnosis
+by controlled experiment: it is the load path, not the compute instruction, that
+gates the tensor kernel.
+
+Single change that would matter (ldmatrix): replace the scalar fragment loads with
+`ldmatrix.sync.aligned.m8n8.x4`, which fetches a full 16 by 16 fragment per warp in
+one swizzled shared transaction and is the specific relief for the L1 / TEX pipe.
+Combined with a larger block tile and cp.async double buffering, this is the route
+toward the compute bound gate. The mma.sync kernel is kept as the honest PTX rung
+that proves the instruction path was not the problem.

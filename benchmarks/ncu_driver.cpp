@@ -77,6 +77,8 @@ int main(int argc, char** argv) {
         run<__half>(ckl::gemm_wmma_fp16, n, launches);
     } else if (variant == "wmma_bf16") {
         run<__nv_bfloat16>(ckl::gemm_wmma_bf16, n, launches);
+    } else if (variant == "mma_ptx") {
+        run<__half>(ckl::gemm_mma_ptx, n, launches);
     } else {
         std::fprintf(stderr, "unknown variant: %s\n", variant.c_str());
         return 2;

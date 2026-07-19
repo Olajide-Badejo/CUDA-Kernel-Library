@@ -83,5 +83,8 @@ int main(int argc, char** argv) {
     for (int sz : sizes) {
         bench_precision<__nv_bfloat16>("bf16", sz, ckl::gemm_wmma_bf16, ckl::gemm_cublas_bf16);
     }
+    for (int sz : sizes) {
+        bench_precision<__half>("ptx", sz, ckl::gemm_mma_ptx, ckl::gemm_cublas_fp16);
+    }
     return 0;
 }
