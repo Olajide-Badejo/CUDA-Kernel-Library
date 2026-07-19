@@ -22,7 +22,8 @@ namespace {
 
 // Grid stride copy of float4 elements. Reads N float4 and writes N float4, so
 // the moved traffic is 2 * N * sizeof(float4) bytes.
-__global__ void stream_copy(const float4* __restrict__ src, float4* __restrict__ dst, std::size_t n) {
+__global__ void stream_copy(const float4* __restrict__ src, float4* __restrict__ dst,
+                            std::size_t n) {
     std::size_t stride = static_cast<std::size_t>(blockDim.x) * gridDim.x;
     for (std::size_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
         dst[i] = src[i];
@@ -111,7 +112,8 @@ int main(int argc, char** argv) {
         std::printf("  \"name\": \"%s\",\n", p.name);
         std::printf("  \"compute_capability\": \"%d.%d\",\n", p.major, p.minor);
         std::printf("  \"sm_count\": %d,\n", p.multiProcessorCount);
-        std::printf("  \"global_mem_mib\": %.0f,\n", static_cast<double>(p.totalGlobalMem) / (1024.0 * 1024.0));
+        std::printf("  \"global_mem_mib\": %.0f,\n",
+                    static_cast<double>(p.totalGlobalMem) / (1024.0 * 1024.0));
         std::printf("  \"mem_bus_width_bits\": %d,\n", p.memoryBusWidth);
         std::printf("  \"mem_clock_khz\": %d,\n", mem_clock_khz);
         std::printf("  \"core_clock_khz\": %d,\n", core_clock_khz);
@@ -134,7 +136,8 @@ int main(int argc, char** argv) {
     std::printf("Device                 : %s\n", p.name);
     std::printf("Compute capability     : %d.%d (sm_%d%d)\n", p.major, p.minor, p.major, p.minor);
     std::printf("SM count               : %d\n", p.multiProcessorCount);
-    std::printf("Global memory          : %.0f MiB\n", static_cast<double>(p.totalGlobalMem) / (1024.0 * 1024.0));
+    std::printf("Global memory          : %.0f MiB\n",
+                static_cast<double>(p.totalGlobalMem) / (1024.0 * 1024.0));
     std::printf("Memory bus width       : %d bits\n", p.memoryBusWidth);
     std::printf("Memory clock           : %.0f MHz\n", static_cast<double>(mem_clock_khz) / 1000.0);
     std::printf("Core boost clock       : %.0f MHz\n", core_clock_hz / 1.0e6);

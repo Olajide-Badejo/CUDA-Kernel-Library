@@ -15,19 +15,19 @@
 namespace ckl {
 
 // One thread per row: simple, but a long row stalls its whole warp.
-void spmv_csr_naive(const int* row_ptr, const int* col_idx, const float* values,
-                    const float* x, float* y, int m, int n, int nnz,
-                    float alpha, float beta, cudaStream_t stream = nullptr);
+void spmv_csr_naive(const int* row_ptr, const int* col_idx, const float* values, const float* x,
+                    float* y, int m, int n, int nnz, float alpha, float beta,
+                    cudaStream_t stream = nullptr);
 
 // One warp per row with a shfl reduction: the row's nonzeros are shared across 32
 // lanes, so a few long rows do not serialize.
-void spmv_csr_warp(const int* row_ptr, const int* col_idx, const float* values,
-                   const float* x, float* y, int m, int n, int nnz,
-                   float alpha, float beta, cudaStream_t stream = nullptr);
+void spmv_csr_warp(const int* row_ptr, const int* col_idx, const float* values, const float* x,
+                   float* y, int m, int n, int nnz, float alpha, float beta,
+                   cudaStream_t stream = nullptr);
 
 // cuSPARSE cusparseSpMV oracle and baseline (CSR, FP32), same result.
-void spmv_cusparse(const int* row_ptr, const int* col_idx, const float* values,
-                   const float* x, float* y, int m, int n, int nnz,
-                   float alpha, float beta, cudaStream_t stream = nullptr);
+void spmv_cusparse(const int* row_ptr, const int* col_idx, const float* values, const float* x,
+                   float* y, int m, int n, int nnz, float alpha, float beta,
+                   cudaStream_t stream = nullptr);
 
 }  // namespace ckl

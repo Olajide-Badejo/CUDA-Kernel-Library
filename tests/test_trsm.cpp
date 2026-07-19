@@ -30,8 +30,8 @@ std::vector<float> make_lower(int m, std::uint64_t seed) {
     return full;
 }
 
-std::vector<double> trsm_reference(const std::vector<float>& a, const std::vector<float>& b,
-                                   int m, int n, float alpha) {
+std::vector<double> trsm_reference(const std::vector<float>& a, const std::vector<float>& b, int m,
+                                   int n, float alpha) {
     std::vector<double> x(static_cast<std::size_t>(m) * n);
     for (int c = 0; c < n; ++c) {
         for (int i = 0; i < m; ++i) {
@@ -96,8 +96,8 @@ bool run_case(const Shape& s) {
     const auto cpu_ref = trsm_reference(a, b0, s.m, s.n, alpha);
     const double err_oracle = ckl::relative_frobenius_error(x_cublas, cpu_ref);
     const double res_cublas = residual(a, x_cublas, b0, s.m, s.n, alpha);
-    std::printf("  %-10s m=%-5d n=%-5d cublas_vs_cpu=%.3e residual=%.3e\n",
-                s.label, s.m, s.n, err_oracle, res_cublas);
+    std::printf("  %-10s m=%-5d n=%-5d cublas_vs_cpu=%.3e residual=%.3e\n", s.label, s.m, s.n,
+                err_oracle, res_cublas);
 
     bool ok = err_oracle < 1e-3 && res_cublas < 1e-3;
     const std::vector<std::pair<const char*, LaunchFn>> variants = {
@@ -110,8 +110,8 @@ bool run_case(const Shape& s) {
         const double res = residual(a, x, b0, s.m, s.n, alpha);
         const bool pass = err < 1e-3 && res < 1e-3;
         ok = ok && pass;
-        std::printf("      %-8s vs cuBLAS = %.3e  residual = %.3e  %s\n",
-                    v.first, err, res, pass ? "PASS" : "FAIL");
+        std::printf("      %-8s vs cuBLAS = %.3e  residual = %.3e  %s\n", v.first, err, res,
+                    pass ? "PASS" : "FAIL");
     }
     return ok;
 }

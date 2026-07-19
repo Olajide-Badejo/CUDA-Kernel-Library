@@ -26,11 +26,17 @@ namespace {
 template <typename T>
 T from_float(float f);
 template <>
-float from_float<float>(float f) { return f; }
+float from_float<float>(float f) {
+    return f;
+}
 template <>
-__half from_float<__half>(float f) { return __float2half(f); }
+__half from_float<__half>(float f) {
+    return __float2half(f);
+}
 template <>
-__nv_bfloat16 from_float<__nv_bfloat16>(float f) { return __float2bfloat16(f); }
+__nv_bfloat16 from_float<__nv_bfloat16>(float f) {
+    return __float2bfloat16(f);
+}
 
 template <typename T, typename LaunchFn>
 void run(LaunchFn launch, int n, int launches) {

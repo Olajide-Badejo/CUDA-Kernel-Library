@@ -19,18 +19,20 @@ namespace ckl {
 
 namespace {
 
-constexpr int kBM = 128;  // output rows per block
-constexpr int kBN = 128;  // output cols per block
-constexpr int kBK = 8;    // contraction depth per shared stage
-constexpr int kTM = 8;    // output rows per thread
-constexpr int kTN = 8;    // output cols per thread
+constexpr int kBM = 128;                             // output rows per block
+constexpr int kBN = 128;                             // output cols per block
+constexpr int kBK = 8;                               // contraction depth per shared stage
+constexpr int kTM = 8;                               // output rows per thread
+constexpr int kTN = 8;                               // output cols per thread
 constexpr int kThreads = (kBM / kTM) * (kBN / kTN);  // 16 * 16 = 256
 
 // Requires m % kBM == 0, n % kBN == 0, k % kBK == 0. The dispatcher guarantees
 // this; the loads and stores below assume it so they can stay branchless.
-__global__ __launch_bounds__(kThreads) void gemm_register_kernel(
-    const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c,
-    int m, int n, int k, float alpha, float beta) {
+__global__ __launch_bounds__(kThreads) void gemm_register_kernel(const float* __restrict__ a,
+                                                                 const float* __restrict__ b,
+                                                                 float* __restrict__ c, int m,
+                                                                 int n, int k, float alpha,
+                                                                 float beta) {
     __shared__ float as[kBK][kBM];  // transposed: as[e][row]
     __shared__ float bs[kBK][kBN];  // bs[e][col]
 
@@ -109,9 +111,8 @@ bool aligned(int m, int n, int k) {
 
 }  // namespace
 
-void gemm_register(const float* a, const float* b, float* c,
-                   int m, int n, int k, float alpha, float beta,
-                   cudaStream_t stream) {
+void gemm_register(const float* a, const float* b, float* c, int m, int n, int k, float alpha,
+                   float beta, cudaStream_t stream) {
     if (m <= 0 || n <= 0) {
         return;
     }

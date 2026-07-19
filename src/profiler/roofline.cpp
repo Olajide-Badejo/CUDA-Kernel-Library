@@ -57,7 +57,10 @@ double measure_gemm_fp16(int n) {
     const auto fb = ckl::random_matrix(n, n, 2);
     std::vector<__half> a(fa.size());
     std::vector<__half> b(fb.size());
-    for (std::size_t i = 0; i < a.size(); ++i) { a[i] = __float2half(fa[i]); b[i] = __float2half(fb[i]); }
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        a[i] = __float2half(fa[i]);
+        b[i] = __float2half(fb[i]);
+    }
     ckl::DeviceBuffer<__half> da(a.size());
     ckl::DeviceBuffer<__half> db(b.size());
     ckl::DeviceBuffer<float> dc(static_cast<std::size_t>(n) * n);
@@ -81,9 +84,8 @@ double measure_variant_fp32(Fn fn, int n) {
     da.copy_from_host(a);
     db.copy_from_host(b);
     dc.zero();
-    ckl::TimingStats st = ckl::time_stream([&](cudaStream_t s) {
-        fn(da.data(), db.data(), dc.data(), n, n, n, 1.0f, 0.0f, s);
-    });
+    ckl::TimingStats st = ckl::time_stream(
+        [&](cudaStream_t s) { fn(da.data(), db.data(), dc.data(), n, n, n, 1.0f, 0.0f, s); });
     return ckl::gemm_flops(n, n, n) / (st.median_ms / 1000.0);
 }
 
@@ -93,16 +95,18 @@ double measure_variant_fp16(Fn fn, int n) {
     const auto fb = ckl::random_matrix(n, n, 4);
     std::vector<__half> a(fa.size());
     std::vector<__half> b(fb.size());
-    for (std::size_t i = 0; i < a.size(); ++i) { a[i] = __float2half(fa[i]); b[i] = __float2half(fb[i]); }
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        a[i] = __float2half(fa[i]);
+        b[i] = __float2half(fb[i]);
+    }
     ckl::DeviceBuffer<__half> da(a.size());
     ckl::DeviceBuffer<__half> db(b.size());
     ckl::DeviceBuffer<float> dc(static_cast<std::size_t>(n) * n);
     da.copy_from_host(a);
     db.copy_from_host(b);
     dc.zero();
-    ckl::TimingStats st = ckl::time_stream([&](cudaStream_t s) {
-        fn(da.data(), db.data(), dc.data(), n, n, n, 1.0f, 0.0f, s);
-    });
+    ckl::TimingStats st = ckl::time_stream(
+        [&](cudaStream_t s) { fn(da.data(), db.data(), dc.data(), n, n, n, 1.0f, 0.0f, s); });
     return ckl::gemm_flops(n, n, n) / (st.median_ms / 1000.0);
 }
 
@@ -139,8 +143,8 @@ int main() {
             ckl::gemv_warp(da.data(), dx.data(), dy.data(), gn, gn, 1.0f, 0.0f, s);
         });
         const double f = ckl::gemv_flops(gn, gn);
-        points.push_back({"gemv_warp", f, ckl::gemv_bytes(gn, gn, 4),
-                          f / (st.median_ms / 1000.0), false});
+        points.push_back(
+            {"gemv_warp", f, ckl::gemv_bytes(gn, gn, 4), f / (st.median_ms / 1000.0), false});
     }
 
     const double ridge_fp32 = ckl::ridge_intensity(fp32_peak, bw);
@@ -152,11 +156,12 @@ int main() {
     std::printf("  tensor peak (cuBLAS): %.1f TFLOP/s\n", tensor_peak / 1.0e12);
     std::printf("  ridge FP32          : %.1f FLOP/byte\n", ridge_fp32);
     std::printf("  ridge tensor        : %.1f FLOP/byte\n", ridge_tensor);
-    std::printf("%-16s %12s %12s %12s %10s %s\n",
-                "variant", "intensity", "gflops", "roof_gflops", "pct_roof", "bound");
+    std::printf("%-16s %12s %12s %12s %10s %s\n", "variant", "intensity", "gflops", "roof_gflops",
+                "pct_roof", "bound");
 
     // Companion file with the measured ceilings so the plot can draw the roofs.
-    if (std::FILE* cf = std::fopen("experiments/results/roofline_ceilings.csv", "w"); cf != nullptr) {
+    if (std::FILE* cf = std::fopen("experiments/results/roofline_ceilings.csv", "w");
+        cf != nullptr) {
         std::fprintf(cf, "quantity,value\n");
         std::fprintf(cf, "bandwidth_gbps,%.3f\n", bw / 1.0e9);
         std::fprintf(cf, "fp32_gflops,%.3f\n", fp32_peak / 1.0e9);
@@ -168,7 +173,8 @@ int main() {
 
     std::FILE* csv = std::fopen("experiments/results/roofline.csv", "w");
     if (csv != nullptr) {
-        std::fprintf(csv, "label,intensity_flop_per_byte,achieved_gflops,roof_gflops,ceiling,bound\n");
+        std::fprintf(csv,
+                     "label,intensity_flop_per_byte,achieved_gflops,roof_gflops,ceiling,bound\n");
     }
     for (const auto& p : points) {
         const double peak = p.tensor ? tensor_peak : fp32_peak;
@@ -176,8 +182,8 @@ int main() {
         const double pct = roof > 0.0 ? 100.0 * p.achieved_gflops() / roof : 0.0;
         const double ridge = p.tensor ? ridge_tensor : ridge_fp32;
         const char* bound = p.intensity() < ridge ? "memory" : "compute";
-        std::printf("%-16s %12.2f %12.1f %12.1f %9.1f%% %s\n",
-                    p.label.c_str(), p.intensity(), p.achieved_gflops(), roof, pct, bound);
+        std::printf("%-16s %12.2f %12.1f %12.1f %9.1f%% %s\n", p.label.c_str(), p.intensity(),
+                    p.achieved_gflops(), roof, pct, bound);
         if (csv != nullptr) {
             std::fprintf(csv, "%s,%.4f,%.1f,%.1f,%s,%s\n", p.label.c_str(), p.intensity(),
                          p.achieved_gflops(), roof, p.tensor ? "tensor" : "fp32", bound);

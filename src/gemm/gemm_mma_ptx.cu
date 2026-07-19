@@ -38,8 +38,8 @@ __device__ inline uint32_t pack(__half lo, __half hi) {
     return *reinterpret_cast<uint32_t*>(&h);
 }
 
-__device__ inline void mma_m16n8k16(float (&d)[4], uint32_t a0, uint32_t a1,
-                                    uint32_t a2, uint32_t a3, uint32_t b0, uint32_t b1) {
+__device__ inline void mma_m16n8k16(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2,
+                                    uint32_t a3, uint32_t b0, uint32_t b1) {
     asm volatile(
         "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
         "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
@@ -47,9 +47,10 @@ __device__ inline void mma_m16n8k16(float (&d)[4], uint32_t a0, uint32_t a1,
         : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
 
-__global__ __launch_bounds__(kThreads) void gemm_mma_ptx_kernel(
-    const __half* __restrict__ a, const __half* __restrict__ b, float* __restrict__ c,
-    int m, int n, int k, float alpha, float beta) {
+__global__ __launch_bounds__(kThreads) void gemm_mma_ptx_kernel(const __half* __restrict__ a,
+                                                                const __half* __restrict__ b,
+                                                                float* __restrict__ c, int m, int n,
+                                                                int k, float alpha, float beta) {
     __shared__ __align__(16) __half as[kBM * kBK];  // [row][kk]
     __shared__ __align__(16) __half bs[kBK * kBN];  // [kk][col]
 
@@ -76,12 +77,10 @@ __global__ __launch_bounds__(kThreads) void gemm_mma_ptx_kernel(
     const int b_col = (tid % 8) * 8;
 
     for (int kk = 0; kk < k; kk += kBK) {
-        *reinterpret_cast<float4*>(&as[a_row * kBK + a_col]) =
-            *reinterpret_cast<const float4*>(
-                &a[static_cast<long long>(block_row + a_row) * k + kk + a_col]);
-        *reinterpret_cast<float4*>(&bs[b_row * kBN + b_col]) =
-            *reinterpret_cast<const float4*>(
-                &b[static_cast<long long>(kk + b_row) * n + block_col + b_col]);
+        *reinterpret_cast<float4*>(&as[a_row * kBK + a_col]) = *reinterpret_cast<const float4*>(
+            &a[static_cast<long long>(block_row + a_row) * k + kk + a_col]);
+        *reinterpret_cast<float4*>(&bs[b_row * kBN + b_col]) = *reinterpret_cast<const float4*>(
+            &b[static_cast<long long>(kk + b_row) * n + block_col + b_col]);
         __syncthreads();
 
 #pragma unroll
@@ -89,10 +88,14 @@ __global__ __launch_bounds__(kThreads) void gemm_mma_ptx_kernel(
             const int row_base = warp_m * kWarpM + mi * 16;
             // A fragment: adjacent K elements pack into one b32, so a uint32 read
             // of the shared row grabs the f16x2 pair directly.
-            const uint32_t a0 = *reinterpret_cast<const uint32_t*>(&as[(row_base + group) * kBK + 2 * tpair]);
-            const uint32_t a1 = *reinterpret_cast<const uint32_t*>(&as[(row_base + group + 8) * kBK + 2 * tpair]);
-            const uint32_t a2 = *reinterpret_cast<const uint32_t*>(&as[(row_base + group) * kBK + 2 * tpair + 8]);
-            const uint32_t a3 = *reinterpret_cast<const uint32_t*>(&as[(row_base + group + 8) * kBK + 2 * tpair + 8]);
+            const uint32_t a0 =
+                *reinterpret_cast<const uint32_t*>(&as[(row_base + group) * kBK + 2 * tpair]);
+            const uint32_t a1 =
+                *reinterpret_cast<const uint32_t*>(&as[(row_base + group + 8) * kBK + 2 * tpair]);
+            const uint32_t a2 =
+                *reinterpret_cast<const uint32_t*>(&as[(row_base + group) * kBK + 2 * tpair + 8]);
+            const uint32_t a3 = *reinterpret_cast<const uint32_t*>(
+                &as[(row_base + group + 8) * kBK + 2 * tpair + 8]);
 #pragma unroll
             for (int ni = 0; ni < kNTiles; ++ni) {
                 const int col_base = warp_n * kWarpN + ni * 8;
@@ -138,9 +141,8 @@ bool aligned(int m, int n, int k) {
 
 }  // namespace
 
-void gemm_mma_ptx(const __half* a, const __half* b, float* c,
-                  int m, int n, int k, float alpha, float beta,
-                  cudaStream_t stream) {
+void gemm_mma_ptx(const __half* a, const __half* b, float* c, int m, int n, int k, float alpha,
+                  float beta, cudaStream_t stream) {
     if (m <= 0 || n <= 0) {
         return;
     }

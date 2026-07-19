@@ -20,9 +20,8 @@ __device__ inline float warp_reduce_sum(float v) {
 
 __global__ void spmv_csr_warp_kernel(const int* __restrict__ row_ptr,
                                      const int* __restrict__ col_idx,
-                                     const float* __restrict__ values,
-                                     const float* __restrict__ x, float* __restrict__ y,
-                                     int m, float alpha, float beta) {
+                                     const float* __restrict__ values, const float* __restrict__ x,
+                                     float* __restrict__ y, int m, float alpha, float beta) {
     const int row = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
     const int lane = threadIdx.x % 32;
     if (row >= m) {
@@ -42,9 +41,8 @@ __global__ void spmv_csr_warp_kernel(const int* __restrict__ row_ptr,
 
 }  // namespace
 
-void spmv_csr_warp(const int* row_ptr, const int* col_idx, const float* values,
-                   const float* x, float* y, int m, int n, int nnz,
-                   float alpha, float beta, cudaStream_t stream) {
+void spmv_csr_warp(const int* row_ptr, const int* col_idx, const float* values, const float* x,
+                   float* y, int m, int n, int nnz, float alpha, float beta, cudaStream_t stream) {
     (void)n;
     (void)nnz;
     if (m <= 0) {
@@ -53,8 +51,8 @@ void spmv_csr_warp(const int* row_ptr, const int* col_idx, const float* values,
     constexpr int kWarpsPerBlock = 4;
     constexpr int kBlock = kWarpsPerBlock * 32;
     const int grid = (m + kWarpsPerBlock - 1) / kWarpsPerBlock;
-    spmv_csr_warp_kernel<<<grid, kBlock, 0, stream>>>(row_ptr, col_idx, values, x, y,
-                                                      m, alpha, beta);
+    spmv_csr_warp_kernel<<<grid, kBlock, 0, stream>>>(row_ptr, col_idx, values, x, y, m, alpha,
+                                                      beta);
 }
 
 }  // namespace ckl

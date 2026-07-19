@@ -28,10 +28,10 @@ struct NvmlSummary {
     unsigned int max_temperature_c = 0;
     double max_power_w = 0.0;
     double mean_gpu_util_pct = 0.0;
-    bool throttled = false;                 // any thermal, power, or reliability throttle seen
+    bool throttled = false;                   // any thermal, power, or reliability throttle seen
     unsigned long long throttle_reasons = 0;  // union of reasons across samples
-    bool available = false;                 // false if NVML could not be initialized
-    std::string note;                       // human readable status or error
+    bool available = false;                   // false if NVML could not be initialized
+    std::string note;                         // human readable status or error
 };
 
 // Samples NVML on a background thread between start() and stop(). Non copyable;

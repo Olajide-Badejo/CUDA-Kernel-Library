@@ -23,9 +23,13 @@ namespace {
 template <typename T>
 T from_float(float f);
 template <>
-__half from_float<__half>(float f) { return __float2half(f); }
+__half from_float<__half>(float f) {
+    return __float2half(f);
+}
 template <>
-__nv_bfloat16 from_float<__nv_bfloat16>(float f) { return __float2bfloat16(f); }
+__nv_bfloat16 from_float<__nv_bfloat16>(float f) {
+    return __float2bfloat16(f);
+}
 
 template <typename T>
 std::vector<T> convert(const std::vector<float>& src) {
@@ -53,12 +57,10 @@ void bench_precision(const char* type_name, int sz, KernelFn kernel, OracleFn or
     db.copy_from_host(hb);
     dc.zero();
 
-    ckl::TimingStats ks = ckl::time_stream([&](cudaStream_t s) {
-        kernel(da.data(), db.data(), dc.data(), m, n, k, 1.0f, 0.0f, s);
-    });
-    ckl::TimingStats os = ckl::time_stream([&](cudaStream_t s) {
-        oracle(da.data(), db.data(), dc.data(), m, n, k, 1.0f, 0.0f, s);
-    });
+    ckl::TimingStats ks = ckl::time_stream(
+        [&](cudaStream_t s) { kernel(da.data(), db.data(), dc.data(), m, n, k, 1.0f, 0.0f, s); });
+    ckl::TimingStats os = ckl::time_stream(
+        [&](cudaStream_t s) { oracle(da.data(), db.data(), dc.data(), m, n, k, 1.0f, 0.0f, s); });
 
     const double kg = ckl::gemm_gflops(m, n, k, ks.median_ms);
     const double og = ckl::gemm_gflops(m, n, k, os.median_ms);

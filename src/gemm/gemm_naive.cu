@@ -10,11 +10,9 @@ namespace ckl {
 
 namespace {
 
-__global__ void gemm_naive_kernel(const float* __restrict__ a,
-                                  const float* __restrict__ b,
-                                  float* __restrict__ c,
-                                  int m, int n, int k,
-                                  float alpha, float beta) {
+__global__ void gemm_naive_kernel(const float* __restrict__ a, const float* __restrict__ b,
+                                  float* __restrict__ c, int m, int n, int k, float alpha,
+                                  float beta) {
     const int col = blockIdx.x * blockDim.x + threadIdx.x;
     const int row = blockIdx.y * blockDim.y + threadIdx.y;
     if (row >= m || col >= n) {
@@ -30,9 +28,8 @@ __global__ void gemm_naive_kernel(const float* __restrict__ a,
 
 }  // namespace
 
-void gemm_naive(const float* a, const float* b, float* c,
-                int m, int n, int k, float alpha, float beta,
-                cudaStream_t stream) {
+void gemm_naive(const float* a, const float* b, float* c, int m, int n, int k, float alpha,
+                float beta, cudaStream_t stream) {
     if (m <= 0 || n <= 0) {
         return;  // nothing to write; k == 0 still applies beta below
     }
@@ -44,15 +41,24 @@ void gemm_naive(const float* a, const float* b, float* c,
 
 const char* gemm_variant_name(GemmVariant v) {
     switch (v) {
-        case GemmVariant::kNaive: return "naive";
-        case GemmVariant::kTiled: return "tiled";
-        case GemmVariant::kRegister: return "register";
-        case GemmVariant::kCpAsync: return "cp_async";
-        case GemmVariant::kWmmaFp16: return "wmma_fp16";
-        case GemmVariant::kWmmaBf16: return "wmma_bf16";
-        case GemmVariant::kMmaPtx: return "mma_ptx";
-        case GemmVariant::kCutlass: return "cutlass";
-        case GemmVariant::kCublas: return "cublas";
+        case GemmVariant::kNaive:
+            return "naive";
+        case GemmVariant::kTiled:
+            return "tiled";
+        case GemmVariant::kRegister:
+            return "register";
+        case GemmVariant::kCpAsync:
+            return "cp_async";
+        case GemmVariant::kWmmaFp16:
+            return "wmma_fp16";
+        case GemmVariant::kWmmaBf16:
+            return "wmma_bf16";
+        case GemmVariant::kMmaPtx:
+            return "mma_ptx";
+        case GemmVariant::kCutlass:
+            return "cutlass";
+        case GemmVariant::kCublas:
+            return "cublas";
     }
     return "unknown";
 }

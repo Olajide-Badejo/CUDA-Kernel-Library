@@ -10,8 +10,8 @@ namespace ckl {
 
 namespace {
 
-__global__ void trsm_naive_kernel(const float* __restrict__ a, float* __restrict__ b,
-                                  int m, int n, float alpha) {
+__global__ void trsm_naive_kernel(const float* __restrict__ a, float* __restrict__ b, int m, int n,
+                                  float alpha) {
     const int col = blockIdx.x * blockDim.x + threadIdx.x;
     if (col >= n) {
         return;

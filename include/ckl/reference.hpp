@@ -26,10 +26,8 @@ inline std::vector<float> random_matrix(int rows, int cols, std::uint64_t seed) 
 // Row major double precision reference: C = alpha * (A * B) + beta * C.
 // A is m by k, B is k by n, C is m by n. Only for shapes small enough to afford
 // the O(m n k) host cost; the tests pick those.
-inline std::vector<double> gemm_reference(const std::vector<float>& a,
-                                          const std::vector<float>& b,
-                                          const std::vector<float>& c_in,
-                                          int m, int n, int k,
+inline std::vector<double> gemm_reference(const std::vector<float>& a, const std::vector<float>& b,
+                                          const std::vector<float>& c_in, int m, int n, int k,
                                           float alpha, float beta) {
     std::vector<double> c(static_cast<std::size_t>(m) * static_cast<std::size_t>(n));
     for (int i = 0; i < m; ++i) {

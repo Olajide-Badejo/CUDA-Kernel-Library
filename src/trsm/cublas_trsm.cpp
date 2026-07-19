@@ -40,9 +40,8 @@ void trsm_cublas(const float* a, float* b, int m, int n, float alpha, cudaStream
     }
     cublasHandle_t h = handle();
     check(cublasSetStream(h, stream), "cublasSetStream");
-    check(cublasStrsm(h, CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_UPPER,
-                      CUBLAS_OP_N, CUBLAS_DIAG_NON_UNIT,
-                      n, m, &alpha, a, m, b, n),
+    check(cublasStrsm(h, CUBLAS_SIDE_RIGHT, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_N,
+                      CUBLAS_DIAG_NON_UNIT, n, m, &alpha, a, m, b, n),
           "cublasStrsm");
 }
 

@@ -18,8 +18,8 @@
 
 namespace {
 
-using LaunchFn = std::function<void(const float*, const float*, float*, int, int,
-                                    float, float, cudaStream_t)>;
+using LaunchFn =
+    std::function<void(const float*, const float*, float*, int, int, float, float, cudaStream_t)>;
 
 double gemv_gbps(int m, int n, double ms) {
     // A dominates the traffic: m*n floats read once, plus x and y.
@@ -44,7 +44,8 @@ int main(int argc, char** argv) {
         {"cublas", ckl::gemv_cublas},
     };
 
-    std::printf("%-6s %-12s %12s %12s %10s\n", "size", "variant", "median_ms", "gbps", "pct_cublas");
+    std::printf("%-6s %-12s %12s %12s %10s\n", "size", "variant", "median_ms", "gbps",
+                "pct_cublas");
     for (int sz : sizes) {
         const int m = sz;
         const int n = sz;
@@ -71,8 +72,8 @@ int main(int argc, char** argv) {
         for (const auto& r : rows) {
             const double gbps = gemv_gbps(m, n, r.second.median_ms);
             const double pct = cublas_gbps > 0.0 ? 100.0 * gbps / cublas_gbps : 0.0;
-            std::printf("%-6d %-12s %12.4f %12.1f %9.1f%%\n",
-                        sz, r.first.c_str(), r.second.median_ms, gbps, pct);
+            std::printf("%-6d %-12s %12.4f %12.1f %9.1f%%\n", sz, r.first.c_str(),
+                        r.second.median_ms, gbps, pct);
         }
     }
     return 0;

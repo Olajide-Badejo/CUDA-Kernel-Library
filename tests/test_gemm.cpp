@@ -19,21 +19,22 @@
 
 namespace {
 
-using LaunchFn = std::function<void(const float*, const float*, float*, int, int, int,
-                                    float, float, cudaStream_t)>;
+using LaunchFn = std::function<void(const float*, const float*, float*, int, int, int, float, float,
+                                    cudaStream_t)>;
 
 // Runs a GEMM launcher on device and returns the host C result.
-std::vector<float> run_device_gemm(const LaunchFn& launch,
-                                   const std::vector<float>& a,
-                                   const std::vector<float>& b,
-                                   const std::vector<float>& c_in,
+std::vector<float> run_device_gemm(const LaunchFn& launch, const std::vector<float>& a,
+                                   const std::vector<float>& b, const std::vector<float>& c_in,
                                    int m, int n, int k, float alpha, float beta) {
     ckl::DeviceBuffer<float> da(a.size());
     ckl::DeviceBuffer<float> db(b.size());
     ckl::DeviceBuffer<float> dc(c_in.size());
-    if (!a.empty()) da.copy_from_host(a);
-    if (!b.empty()) db.copy_from_host(b);
-    if (!c_in.empty()) dc.copy_from_host(c_in);
+    if (!a.empty())
+        da.copy_from_host(a);
+    if (!b.empty())
+        db.copy_from_host(b);
+    if (!c_in.empty())
+        dc.copy_from_host(c_in);
 
     launch(da.data(), db.data(), dc.data(), m, n, k, alpha, beta, nullptr);
     CKL_CUDA_CHECK(cudaDeviceSynchronize());
@@ -86,8 +87,8 @@ bool run_case(const Shape& s) {
     }
 
     bool ok = err_cublas_vs_cpu < kTolerance;
-    std::printf("  %-22s m=%-5d n=%-5d k=%-5d  cublas_vs_cpu=%.3e\n",
-                s.label, s.m, s.n, s.k, err_cublas_vs_cpu);
+    std::printf("  %-22s m=%-5d n=%-5d k=%-5d  cublas_vs_cpu=%.3e\n", s.label, s.m, s.n, s.k,
+                err_cublas_vs_cpu);
     for (const auto& v : hand_written_variants()) {
         const auto out = run_device_gemm(v.launch, a, b, c0, s.m, s.n, s.k, alpha, beta);
         const double err = out.empty() ? 0.0 : ckl::relative_frobenius_error(out, cublas_as_ref);
@@ -102,14 +103,10 @@ bool run_case(const Shape& s) {
 
 int main() {
     const std::vector<Shape> shapes = {
-        {256, 256, 256, "square aligned"},
-        {384, 512, 128, "non square aligned"},
-        {129, 257, 193, "non tile aligned"},
-        {7, 5, 11, "smaller than one tile"},
-        {512, 384, 640, "non square large"},
-        {0, 128, 128, "zero m dimension"},
-        {128, 0, 128, "zero n dimension"},
-        {64, 64, 0, "zero k dimension"},
+        {256, 256, 256, "square aligned"},   {384, 512, 128, "non square aligned"},
+        {129, 257, 193, "non tile aligned"}, {7, 5, 11, "smaller than one tile"},
+        {512, 384, 640, "non square large"}, {0, 128, 128, "zero m dimension"},
+        {128, 0, 128, "zero n dimension"},   {64, 64, 0, "zero k dimension"},
     };
 
     std::printf("GEMM correctness (tolerance relative Frobenius < %.0e)\n", kTolerance);

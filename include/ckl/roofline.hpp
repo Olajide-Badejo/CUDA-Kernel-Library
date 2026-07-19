@@ -15,17 +15,17 @@ namespace ckl {
 // Measured machine ceilings, from the Phase 0 device probe rather than the
 // datasheet. Bandwidth in bytes per second, compute in FLOP per second.
 struct MachineCeilings {
-    double bandwidth_bytes_per_s;   // measured streaming bandwidth
-    double fp32_flops_per_s;        // FP32 CUDA core peak
-    double tensor_flops_per_s;      // tensor core peak (empirical, e.g. best cuBLAS FP16)
+    double bandwidth_bytes_per_s;  // measured streaming bandwidth
+    double fp32_flops_per_s;       // FP32 CUDA core peak
+    double tensor_flops_per_s;     // tensor core peak (empirical, e.g. best cuBLAS FP16)
 };
 
 struct RooflinePoint {
     std::string label;
-    double flops;                   // total FLOPs of the operation
-    double bytes;                   // total bytes moved (min traffic model)
-    double achieved_flops_per_s;    // measured, from a timed run
-    bool tensor;                    // compare against the tensor ceiling if true
+    double flops;                 // total FLOPs of the operation
+    double bytes;                 // total bytes moved (min traffic model)
+    double achieved_flops_per_s;  // measured, from a timed run
+    bool tensor;                  // compare against the tensor ceiling if true
 
     double intensity() const { return bytes > 0.0 ? flops / bytes : 0.0; }
     double achieved_gflops() const { return achieved_flops_per_s / 1.0e9; }
@@ -51,8 +51,8 @@ inline double gemm_flops(int m, int n, int k) {
     return 2.0 * static_cast<double>(m) * n * k;
 }
 inline double gemm_bytes(int m, int n, int k, std::size_t element_size) {
-    const double words = static_cast<double>(m) * k + static_cast<double>(k) * n +
-                         static_cast<double>(m) * n;
+    const double words =
+        static_cast<double>(m) * k + static_cast<double>(k) * n + static_cast<double>(m) * n;
     return words * static_cast<double>(element_size);
 }
 

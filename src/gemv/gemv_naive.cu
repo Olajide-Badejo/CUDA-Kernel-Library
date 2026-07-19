@@ -11,8 +11,7 @@ namespace ckl {
 namespace {
 
 __global__ void gemv_naive_kernel(const float* __restrict__ a, const float* __restrict__ x,
-                                  float* __restrict__ y, int m, int n,
-                                  float alpha, float beta) {
+                                  float* __restrict__ y, int m, int n, float alpha, float beta) {
     const int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= m) {
         return;
@@ -27,8 +26,8 @@ __global__ void gemv_naive_kernel(const float* __restrict__ a, const float* __re
 
 }  // namespace
 
-void gemv_naive(const float* a, const float* x, float* y,
-                int m, int n, float alpha, float beta, cudaStream_t stream) {
+void gemv_naive(const float* a, const float* x, float* y, int m, int n, float alpha, float beta,
+                cudaStream_t stream) {
     if (m <= 0) {
         return;
     }

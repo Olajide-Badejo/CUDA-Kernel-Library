@@ -49,8 +49,7 @@ __device__ inline void ldmatrix_x2_trans(uint32_t (&r)[2], const void* p) {
                  : "r"(smem_u32(p)));
 }
 
-__device__ inline void mma_m16n8k16(float (&d)[4], const uint32_t (&a)[4],
-                                    const uint32_t (&b)[2]) {
+__device__ inline void mma_m16n8k16(float (&d)[4], const uint32_t (&a)[4], const uint32_t (&b)[2]) {
     asm volatile(
         "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
         "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
@@ -58,9 +57,11 @@ __device__ inline void mma_m16n8k16(float (&d)[4], const uint32_t (&a)[4],
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
 }
 
-__global__ __launch_bounds__(kThreads) void gemm_mma_ldmatrix_kernel(
-    const __half* __restrict__ a, const __half* __restrict__ b, float* __restrict__ c,
-    int m, int n, int k, float alpha, float beta) {
+__global__ __launch_bounds__(kThreads) void gemm_mma_ldmatrix_kernel(const __half* __restrict__ a,
+                                                                     const __half* __restrict__ b,
+                                                                     float* __restrict__ c, int m,
+                                                                     int n, int k, float alpha,
+                                                                     float beta) {
     __shared__ __align__(16) __half as[kBM * kBK];  // [row][kk]
     __shared__ __align__(16) __half bs[kBK * kBN];  // [kk][col]
 
@@ -80,12 +81,10 @@ __global__ __launch_bounds__(kThreads) void gemm_mma_ldmatrix_kernel(
     const int b_col = (tid % 8) * 8;
 
     for (int kk = 0; kk < k; kk += kBK) {
-        *reinterpret_cast<float4*>(&as[a_row * kBK + a_col]) =
-            *reinterpret_cast<const float4*>(
-                &a[static_cast<long long>(block_row + a_row) * k + kk + a_col]);
-        *reinterpret_cast<float4*>(&bs[b_row * kBN + b_col]) =
-            *reinterpret_cast<const float4*>(
-                &b[static_cast<long long>(kk + b_row) * n + block_col + b_col]);
+        *reinterpret_cast<float4*>(&as[a_row * kBK + a_col]) = *reinterpret_cast<const float4*>(
+            &a[static_cast<long long>(block_row + a_row) * k + kk + a_col]);
+        *reinterpret_cast<float4*>(&bs[b_row * kBN + b_col]) = *reinterpret_cast<const float4*>(
+            &b[static_cast<long long>(kk + b_row) * n + block_col + b_col]);
         __syncthreads();
 
         uint32_t a_frag[kMTiles][4];
@@ -139,9 +138,8 @@ bool aligned(int m, int n, int k) {
 
 }  // namespace
 
-void gemm_mma_ldm(const __half* a, const __half* b, float* c,
-                  int m, int n, int k, float alpha, float beta,
-                  cudaStream_t stream) {
+void gemm_mma_ldm(const __half* a, const __half* b, float* c, int m, int n, int k, float alpha,
+                  float beta, cudaStream_t stream) {
     if (m <= 0 || n <= 0) {
         return;
     }

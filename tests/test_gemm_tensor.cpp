@@ -70,8 +70,10 @@ bool run_case(const Shape& s, const char* type_name, KernelFn kernel, OracleFn o
     ckl::DeviceBuffer<T> db(hb.size());
     ckl::DeviceBuffer<float> dk(fc0.size());
     ckl::DeviceBuffer<float> doo(fc0.size());
-    if (!ha.empty()) da.copy_from_host(ha);
-    if (!hb.empty()) db.copy_from_host(hb);
+    if (!ha.empty())
+        da.copy_from_host(ha);
+    if (!hb.empty())
+        db.copy_from_host(hb);
     dk.zero();
     doo.zero();
 
@@ -92,9 +94,8 @@ bool run_case(const Shape& s, const char* type_name, KernelFn kernel, OracleFn o
     }
 
     const bool ok = err_vs_oracle < kTensorTolerance;
-    std::printf("  %-6s %-22s m=%-5d n=%-5d k=%-5d  vs_oracle=%.3e  vs_fp32=%.3e  %s\n",
-                type_name, s.label, s.m, s.n, s.k, err_vs_oracle, err_vs_fp32,
-                ok ? "PASS" : "FAIL");
+    std::printf("  %-6s %-22s m=%-5d n=%-5d k=%-5d  vs_oracle=%.3e  vs_fp32=%.3e  %s\n", type_name,
+                s.label, s.m, s.n, s.k, err_vs_oracle, err_vs_fp32, ok ? "PASS" : "FAIL");
     return ok;
 }
 
@@ -102,12 +103,9 @@ bool run_case(const Shape& s, const char* type_name, KernelFn kernel, OracleFn o
 
 int main() {
     const std::vector<Shape> shapes = {
-        {256, 256, 256, "square aligned"},
-        {384, 512, 128, "non square aligned"},
-        {129, 257, 193, "non tile aligned"},
-        {7, 5, 11, "smaller than one tile"},
-        {512, 384, 640, "non square large"},
-        {64, 0, 128, "zero n dimension"},
+        {256, 256, 256, "square aligned"},   {384, 512, 128, "non square aligned"},
+        {129, 257, 193, "non tile aligned"}, {7, 5, 11, "smaller than one tile"},
+        {512, 384, 640, "non square large"}, {64, 0, 128, "zero n dimension"},
         {64, 64, 0, "zero k dimension"},
     };
 
@@ -118,7 +116,8 @@ int main() {
         all_ok = run_case<__half>(s, "fp16", ckl::gemm_wmma_fp16, ckl::gemm_cublas_fp16) && all_ok;
     }
     for (const auto& s : shapes) {
-        all_ok = run_case<__nv_bfloat16>(s, "bf16", ckl::gemm_wmma_bf16, ckl::gemm_cublas_bf16) && all_ok;
+        all_ok = run_case<__nv_bfloat16>(s, "bf16", ckl::gemm_wmma_bf16, ckl::gemm_cublas_bf16) &&
+                 all_ok;
     }
     for (const auto& s : shapes) {
         all_ok = run_case<__half>(s, "ptx", ckl::gemm_mma_ptx, ckl::gemm_cublas_fp16) && all_ok;

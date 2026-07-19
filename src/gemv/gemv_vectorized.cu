@@ -19,8 +19,8 @@ __device__ inline float warp_reduce_sum(float v) {
 }
 
 __global__ void gemv_vectorized_kernel(const float* __restrict__ a, const float* __restrict__ x,
-                                       float* __restrict__ y, int m, int n,
-                                       float alpha, float beta) {
+                                       float* __restrict__ y, int m, int n, float alpha,
+                                       float beta) {
     const int warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
     const int lane = threadIdx.x % 32;
     if (warp_id >= m) {
@@ -43,8 +43,8 @@ __global__ void gemv_vectorized_kernel(const float* __restrict__ a, const float*
 
 }  // namespace
 
-void gemv_vectorized(const float* a, const float* x, float* y,
-                     int m, int n, float alpha, float beta, cudaStream_t stream) {
+void gemv_vectorized(const float* a, const float* x, float* y, int m, int n, float alpha,
+                     float beta, cudaStream_t stream) {
     if (m <= 0) {
         return;
     }

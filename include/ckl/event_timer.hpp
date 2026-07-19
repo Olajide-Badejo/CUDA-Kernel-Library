@@ -26,8 +26,7 @@ struct TimingStats {
 // the stream and must only enqueue asynchronous work; synchronization is handled
 // here through events.
 inline TimingStats time_stream(const std::function<void(cudaStream_t)>& launch,
-                               cudaStream_t stream = nullptr,
-                               int warmups = 5, int reps = 20) {
+                               cudaStream_t stream = nullptr, int warmups = 5, int reps = 20) {
     cudaEvent_t start;
     cudaEvent_t stop;
     CKL_CUDA_CHECK(cudaEventCreate(&start));
@@ -73,7 +72,8 @@ inline TimingStats time_stream(const std::function<void(cudaStream_t)>& launch,
 
 // GEMM flop count: two flops per multiply add, m*n*k of them.
 inline double gemm_gflops(int m, int n, int k, double ms) {
-    const double flops = 2.0 * static_cast<double>(m) * static_cast<double>(n) * static_cast<double>(k);
+    const double flops =
+        2.0 * static_cast<double>(m) * static_cast<double>(n) * static_cast<double>(k);
     return flops / (ms / 1000.0) / 1.0e9;
 }
 

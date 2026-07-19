@@ -1,0 +1,16 @@
+# A focused clang-tidy set: bug prone patterns, portability, performance, and a
+# few readability checks, without the noisy ones that fight CUDA idioms. Enforced
+# in CI over the host translation units (device code is checked by nvcc warnings).
+Checks: >
+  bugprone-*,
+  performance-*,
+  portability-*,
+  modernize-use-nullptr,
+  modernize-use-override,
+  readability-braces-around-statements,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -performance-avoid-endl
+WarningsAsErrors: ''
+HeaderFilterRegex: 'include/ckl/.*'
+FormatStyle: file

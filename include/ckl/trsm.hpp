@@ -16,8 +16,7 @@ namespace ckl {
 
 // Naive forward substitution: one thread per right hand side column, sequential
 // down the rows. Correct and simple, limited parallelism (n columns).
-void trsm_naive(const float* a, float* b, int m, int n, float alpha,
-                cudaStream_t stream = nullptr);
+void trsm_naive(const float* a, float* b, int m, int n, float alpha, cudaStream_t stream = nullptr);
 
 // Blocked: scale by alpha, then for each diagonal block solve the block system
 // and subtract its contribution from the trailing rows with a GEMM style update.

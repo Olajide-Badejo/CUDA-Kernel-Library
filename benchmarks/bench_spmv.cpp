@@ -18,8 +18,8 @@
 
 namespace {
 
-using LaunchFn = std::function<void(const int*, const int*, const float*, const float*,
-                                    float*, int, int, int, float, float, cudaStream_t)>;
+using LaunchFn = std::function<void(const int*, const int*, const float*, const float*, float*, int,
+                                    int, int, float, float, cudaStream_t)>;
 
 struct Csr {
     std::vector<int> row_ptr;
@@ -44,14 +44,16 @@ Csr make_skewed(int m, int n, std::uint64_t seed) {
         std::vector<int> cols;
         while (static_cast<int>(cols.size()) < degree) {
             int c = col_dist(rng);
-            if (std::find(cols.begin(), cols.end(), c) == cols.end()) cols.push_back(c);
+            if (std::find(cols.begin(), cols.end(), c) == cols.end())
+                cols.push_back(c);
         }
         std::sort(cols.begin(), cols.end());
         for (int c : cols) {
             a.col_idx.push_back(c);
             a.values.push_back(val(rng));
         }
-        a.row_ptr[static_cast<std::size_t>(i) + 1] = a.row_ptr[static_cast<std::size_t>(i)] + degree;
+        a.row_ptr[static_cast<std::size_t>(i) + 1] =
+            a.row_ptr[static_cast<std::size_t>(i)] + degree;
     }
     a.nnz = a.row_ptr.back();
     return a;
@@ -87,11 +89,12 @@ int main(int argc, char** argv) {
     std::vector<std::pair<std::string, double>> rows;
     for (const auto& v : variants) {
         ckl::TimingStats st = ckl::time_stream([&](cudaStream_t s) {
-            v.second(drp.data(), dci.data(), dv.data(), dx.data(), dy.data(),
-                     m, n, a.nnz, 1.0f, 0.0f, s);
+            v.second(drp.data(), dci.data(), dv.data(), dx.data(), dy.data(), m, n, a.nnz, 1.0f,
+                     0.0f, s);
         });
         const double gflops = flops / (st.median_ms / 1000.0) / 1.0e9;
-        if (v.first == "cusparse") base = gflops;
+        if (v.first == "cusparse")
+            base = gflops;
         rows.emplace_back(v.first, gflops);
     }
     std::printf("%-10s %12s %12s\n", "variant", "gflops", "pct_cusparse");

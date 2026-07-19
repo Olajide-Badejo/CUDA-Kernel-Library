@@ -16,11 +16,9 @@ namespace {
 
 constexpr int kTile = 32;
 
-__global__ void gemm_tiled_kernel(const float* __restrict__ a,
-                                  const float* __restrict__ b,
-                                  float* __restrict__ c,
-                                  int m, int n, int k,
-                                  float alpha, float beta) {
+__global__ void gemm_tiled_kernel(const float* __restrict__ a, const float* __restrict__ b,
+                                  float* __restrict__ c, int m, int n, int k, float alpha,
+                                  float beta) {
     __shared__ float as[kTile][kTile + 1];
     __shared__ float bs[kTile][kTile + 1];
 
@@ -35,10 +33,8 @@ __global__ void gemm_tiled_kernel(const float* __restrict__ a,
         const int a_col = t * kTile + tx;
         const int b_row = t * kTile + ty;
 
-        as[ty][tx] = (row < m && a_col < k)
-            ? a[static_cast<long long>(row) * k + a_col] : 0.0f;
-        bs[ty][tx] = (b_row < k && col < n)
-            ? b[static_cast<long long>(b_row) * n + col] : 0.0f;
+        as[ty][tx] = (row < m && a_col < k) ? a[static_cast<long long>(row) * k + a_col] : 0.0f;
+        bs[ty][tx] = (b_row < k && col < n) ? b[static_cast<long long>(b_row) * n + col] : 0.0f;
         __syncthreads();
 
 #pragma unroll
@@ -56,9 +52,8 @@ __global__ void gemm_tiled_kernel(const float* __restrict__ a,
 
 }  // namespace
 
-void gemm_tiled(const float* a, const float* b, float* c,
-                int m, int n, int k, float alpha, float beta,
-                cudaStream_t stream) {
+void gemm_tiled(const float* a, const float* b, float* c, int m, int n, int k, float alpha,
+                float beta, cudaStream_t stream) {
     if (m <= 0 || n <= 0) {
         return;
     }

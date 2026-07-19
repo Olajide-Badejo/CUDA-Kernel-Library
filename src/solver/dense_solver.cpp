@@ -75,15 +75,15 @@ void DenseSolver::solve_lu(float* a, float* b, int n, int nrhs) {
         impl_->pivots = DeviceBuffer<int>(static_cast<std::size_t>(n));
     }
 
-    check(cusolverDnSgetrf(impl_->handle, n, n, a, n, impl_->workspace.data(),
-                           impl_->pivots.data(), impl_->info.data()),
+    check(cusolverDnSgetrf(impl_->handle, n, n, a, n, impl_->workspace.data(), impl_->pivots.data(),
+                           impl_->info.data()),
           "cusolverDnSgetrf");
     if (int info = read_info(impl_->info); info != 0) {
         throw std::runtime_error("LU factorization failed, U is singular at pivot " +
                                  std::to_string(info));
     }
-    check(cusolverDnSgetrs(impl_->handle, CUBLAS_OP_N, n, nrhs, a, n,
-                           impl_->pivots.data(), b, n, impl_->info.data()),
+    check(cusolverDnSgetrs(impl_->handle, CUBLAS_OP_N, n, nrhs, a, n, impl_->pivots.data(), b, n,
+                           impl_->info.data()),
           "cusolverDnSgetrs");
     if (int info = read_info(impl_->info); info != 0) {
         throw std::runtime_error("LU solve reported invalid argument " + std::to_string(info));
@@ -102,8 +102,8 @@ void DenseSolver::solve_cholesky(float* a, float* b, int n, int nrhs, Fill fill)
           "cusolverDnSpotrf_bufferSize");
     impl_->ensure_workspace(lwork);
 
-    check(cusolverDnSpotrf(impl_->handle, uplo, n, a, n, impl_->workspace.data(),
-                           lwork, impl_->info.data()),
+    check(cusolverDnSpotrf(impl_->handle, uplo, n, a, n, impl_->workspace.data(), lwork,
+                           impl_->info.data()),
           "cusolverDnSpotrf");
     if (int info = read_info(impl_->info); info != 0) {
         throw std::runtime_error("Cholesky factorization failed, leading minor " +

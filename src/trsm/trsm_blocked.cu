@@ -26,8 +26,8 @@ __global__ void scale_kernel(float* __restrict__ b, long long count, float alpha
 
 // Solve one diagonal block L[k:k+kb, k:k+kb] X = B[k:k+kb, :] in place. One thread
 // per right hand side column, substitution within the block.
-__global__ void block_solve_kernel(const float* __restrict__ a, float* __restrict__ b,
-                                   int m, int n, int k, int kb) {
+__global__ void block_solve_kernel(const float* __restrict__ a, float* __restrict__ b, int m, int n,
+                                   int k, int kb) {
     const int col = blockIdx.x * blockDim.x + threadIdx.x;
     if (col >= n) {
         return;
@@ -46,8 +46,8 @@ __global__ void block_solve_kernel(const float* __restrict__ a, float* __restric
 // Trailing update: B[i, c] -= sum_{j in block} L[i, j] * X[j, c] for i below the
 // block. This is the GEMM step; one thread per trailing (row, col) element,
 // reading the just solved block of X from B.
-__global__ void trailing_update_kernel(const float* __restrict__ a, float* __restrict__ b,
-                                       int m, int n, int k, int kb) {
+__global__ void trailing_update_kernel(const float* __restrict__ a, float* __restrict__ b, int m,
+                                       int n, int k, int kb) {
     const int col = blockIdx.x * blockDim.x + threadIdx.x;
     const int i = (k + kb) + blockIdx.y * blockDim.y + threadIdx.y;
     if (col >= n || i >= m) {
@@ -84,8 +84,7 @@ void trsm_blocked(const float* a, float* b, int m, int n, float alpha, cudaStrea
         const int rows_below = m - (k + kb);
         if (rows_below > 0) {
             const dim3 block(32, 8);
-            const dim3 grid((n + block.x - 1) / block.x,
-                            (rows_below + block.y - 1) / block.y);
+            const dim3 grid((n + block.x - 1) / block.x, (rows_below + block.y - 1) / block.y);
             trailing_update_kernel<<<grid, block, 0, stream>>>(a, b, m, n, k, kb);
         }
     }

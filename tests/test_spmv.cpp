@@ -77,8 +77,8 @@ std::vector<double> spmv_reference(const Csr& a, const std::vector<float>& x,
     return y;
 }
 
-using LaunchFn = std::function<void(const int*, const int*, const float*, const float*,
-                                    float*, int, int, int, float, float, cudaStream_t)>;
+using LaunchFn = std::function<void(const int*, const int*, const float*, const float*, float*, int,
+                                    int, int, float, float, cudaStream_t)>;
 
 std::vector<float> run(const LaunchFn& launch, const Csr& a, const ckl::DeviceBuffer<int>& drp,
                        const ckl::DeviceBuffer<int>& dci, const ckl::DeviceBuffer<float>& dv,
@@ -86,8 +86,8 @@ std::vector<float> run(const LaunchFn& launch, const Csr& a, const ckl::DeviceBu
                        float alpha, float beta) {
     ckl::DeviceBuffer<float> dy(y0.size());
     dy.copy_from_host(y0);
-    launch(drp.data(), dci.data(), dv.data(), dx.data(), dy.data(),
-           a.m, a.n, a.nnz, alpha, beta, nullptr);
+    launch(drp.data(), dci.data(), dv.data(), dx.data(), dy.data(), a.m, a.n, a.nnz, alpha, beta,
+           nullptr);
     CKL_CUDA_CHECK(cudaDeviceSynchronize());
     return dy.to_host();
 }
@@ -105,8 +105,8 @@ int main() {
     for (int i = 0; i < m; ++i) {
         max_deg = std::max(max_deg, a.row_ptr[i + 1] - a.row_ptr[i]);
     }
-    std::printf("CSR SpMV correctness: m=%d n=%d nnz=%d max_row_degree=%d (skewed)\n",
-                m, n, a.nnz, max_deg);
+    std::printf("CSR SpMV correctness: m=%d n=%d nnz=%d max_row_degree=%d (skewed)\n", m, n, a.nnz,
+                max_deg);
 
     const auto x = ckl::random_matrix(n, 1, 999);
     const auto y0 = ckl::random_matrix(m, 1, 555);

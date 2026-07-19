@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  style:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Dash gate
+        run: python3 scripts/check_no_dashes.py .
+      - name: Ruff
+        run: |
+          pip install ruff
+          ruff check .
+      - name: clang-format
+        run: |
+          sudo apt-get update && sudo apt-get install -y clang-format
+          find include src tests benchmarks -type f \( -name '*.cpp' -o -name '*.hpp' \
+            -o -name '*.cu' -o -name '*.cuh' \) -print0 \
+            | xargs -0 clang-format --dry-run --Werror
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: "12.8.0"
+          method: network
+      - name: Configure
+        # sm_120 codegen exists from CUDA 12.8; the runner has no GPU, so nvcc
+        # compiles but the GPU tests and the sweep do not run here.
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=120
+      - name: Build (zero warnings is a gate)
+        run: cmake --build build --parallel
+      - name: Host only tests
+        run: ctest --test-dir build --output-on-failure --label-exclude gpu
+
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LaTeX
+        run: sudo apt-get update && sudo apt-get install -y texlive-latex-extra latexmk
+      - name: Build reports from committed summary
+        run: |
+          if [ -f report/main.tex ]; then make report; else echo "reports pending"; fi

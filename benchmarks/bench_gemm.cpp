@@ -17,8 +17,8 @@
 
 namespace {
 
-using LaunchFn = std::function<void(const float*, const float*, float*, int, int, int,
-                                    float, float, cudaStream_t)>;
+using LaunchFn = std::function<void(const float*, const float*, float*, int, int, int, float, float,
+                                    cudaStream_t)>;
 
 struct Variant {
     const char* name;
@@ -26,8 +26,8 @@ struct Variant {
 };
 
 double bench_one(const Variant& v, const ckl::DeviceBuffer<float>& da,
-                 const ckl::DeviceBuffer<float>& db, ckl::DeviceBuffer<float>& dc,
-                 int m, int n, int k, ckl::TimingStats& stats_out) {
+                 const ckl::DeviceBuffer<float>& db, ckl::DeviceBuffer<float>& dc, int m, int n,
+                 int k, ckl::TimingStats& stats_out) {
     const float alpha = 1.0f;
     const float beta = 0.0f;
     stats_out = ckl::time_stream([&](cudaStream_t s) {
@@ -48,15 +48,13 @@ int main(int argc, char** argv) {
     }
 
     const std::vector<Variant> variants = {
-        {"naive", ckl::gemm_naive},
-        {"tiled", ckl::gemm_tiled},
-        {"register", ckl::gemm_register},
-        {"cp_async", ckl::gemm_cp_async},
+        {"naive", ckl::gemm_naive},       {"tiled", ckl::gemm_tiled},
+        {"register", ckl::gemm_register}, {"cp_async", ckl::gemm_cp_async},
         {"cublas", ckl::gemm_cublas},
     };
 
-    std::printf("%-8s %-8s %14s %14s %10s %12s\n",
-                "size", "variant", "median_ms", "gflops", "pct_cublas", "iqr_ms");
+    std::printf("%-8s %-8s %14s %14s %10s %12s\n", "size", "variant", "median_ms", "gflops",
+                "pct_cublas", "iqr_ms");
 
     for (int sz : sizes) {
         const int m = sz;
@@ -90,8 +88,8 @@ int main(int argc, char** argv) {
         }
         for (const auto& r : rows) {
             const double pct = cublas_gflops > 0.0 ? 100.0 * r.gflops / cublas_gflops : 0.0;
-            std::printf("%-8d %-8s %14.3f %14.1f %9.1f%% %12.4f\n",
-                        sz, r.name.c_str(), r.stats.median_ms, r.gflops, pct, r.stats.iqr_ms);
+            std::printf("%-8d %-8s %14.3f %14.1f %9.1f%% %12.4f\n", sz, r.name.c_str(),
+                        r.stats.median_ms, r.gflops, pct, r.stats.iqr_ms);
         }
     }
     return 0;

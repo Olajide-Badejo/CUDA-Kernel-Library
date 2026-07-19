@@ -36,8 +36,8 @@ cublasHandle_t handle() {
 // Shared body: compute C_transpose(n by m) = B_transpose * A_transpose so the
 // column major result lands as our row major C. a_type is the cuda data type of
 // the FP16 or BF16 inputs.
-void gemm_ex(const void* a, const void* b, float* c, int m, int n, int k,
-             float alpha, float beta, cudaStream_t stream, cudaDataType_t in_type) {
+void gemm_ex(const void* a, const void* b, float* c, int m, int n, int k, float alpha, float beta,
+             cudaStream_t stream, cudaDataType_t in_type) {
     if (m <= 0 || n <= 0) {
         return;
     }
@@ -48,28 +48,20 @@ void gemm_ex(const void* a, const void* b, float* c, int m, int n, int k,
         check(cublasSscal(h, m * n, &beta, c, 1), "cublasSscal");
         return;
     }
-    check(cublasGemmEx(h, CUBLAS_OP_N, CUBLAS_OP_N,
-                       n, m, k,
-                       &alpha,
-                       b, in_type, n,
-                       a, in_type, k,
-                       &beta,
-                       c, CUDA_R_32F, n,
-                       CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT),
+    check(cublasGemmEx(h, CUBLAS_OP_N, CUBLAS_OP_N, n, m, k, &alpha, b, in_type, n, a, in_type, k,
+                       &beta, c, CUDA_R_32F, n, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT),
           "cublasGemmEx");
 }
 
 }  // namespace
 
-void gemm_cublas_fp16(const __half* a, const __half* b, float* c,
-                      int m, int n, int k, float alpha, float beta,
-                      cudaStream_t stream) {
+void gemm_cublas_fp16(const __half* a, const __half* b, float* c, int m, int n, int k, float alpha,
+                      float beta, cudaStream_t stream) {
     gemm_ex(a, b, c, m, n, k, alpha, beta, stream, CUDA_R_16F);
 }
 
-void gemm_cublas_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, float* c,
-                      int m, int n, int k, float alpha, float beta,
-                      cudaStream_t stream) {
+void gemm_cublas_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, float* c, int m, int n, int k,
+                      float alpha, float beta, cudaStream_t stream) {
     gemm_ex(a, b, c, m, n, k, alpha, beta, stream, CUDA_R_16BF);
 }
 

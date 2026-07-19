@@ -29,9 +29,11 @@ constexpr int kTM = 8;
 constexpr int kTN = 8;
 constexpr int kThreads = (kBM / kTM) * (kBN / kTN);  // 256
 
-__global__ __launch_bounds__(kThreads) void gemm_cp_async_kernel(
-    const float* __restrict__ a, const float* __restrict__ b, float* __restrict__ c,
-    int m, int n, int k, float alpha, float beta) {
+__global__ __launch_bounds__(kThreads) void gemm_cp_async_kernel(const float* __restrict__ a,
+                                                                 const float* __restrict__ b,
+                                                                 float* __restrict__ c, int m,
+                                                                 int n, int k, float alpha,
+                                                                 float beta) {
     // Double buffered. A stored [row][e] naturally, B stored [e][col].
     __shared__ __align__(16) float as[2][kBM * kBK];
     __shared__ __align__(16) float bs[2][kBK * kBN];
@@ -50,14 +52,12 @@ __global__ __launch_bounds__(kThreads) void gemm_cp_async_kernel(
     const int b_col = (tid % 32) * 4;
 
     auto stage = [&](int buf, int kk) {
-        __pipeline_memcpy_async(
-            &as[buf][a_row * kBK + a_col],
-            &a[static_cast<long long>(block_row + a_row) * k + kk + a_col],
-            sizeof(float4));
-        __pipeline_memcpy_async(
-            &bs[buf][b_row * kBN + b_col],
-            &b[static_cast<long long>(kk + b_row) * n + block_col + b_col],
-            sizeof(float4));
+        __pipeline_memcpy_async(&as[buf][a_row * kBK + a_col],
+                                &a[static_cast<long long>(block_row + a_row) * k + kk + a_col],
+                                sizeof(float4));
+        __pipeline_memcpy_async(&bs[buf][b_row * kBN + b_col],
+                                &b[static_cast<long long>(kk + b_row) * n + block_col + b_col],
+                                sizeof(float4));
         __pipeline_commit();
     };
 
@@ -118,9 +118,8 @@ bool aligned(int m, int n, int k) {
 
 }  // namespace
 
-void gemm_cp_async(const float* a, const float* b, float* c,
-                   int m, int n, int k, float alpha, float beta,
-                   cudaStream_t stream) {
+void gemm_cp_async(const float* a, const float* b, float* c, int m, int n, int k, float alpha,
+                   float beta, cudaStream_t stream) {
     if (m <= 0 || n <= 0) {
         return;
     }

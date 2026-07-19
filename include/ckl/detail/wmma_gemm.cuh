@@ -32,20 +32,25 @@ constexpr int kBN = 64;
 constexpr int kBK = 16;
 constexpr int kWarpsM = 2;
 constexpr int kWarpsN = 2;
-constexpr int kWarps = kWarpsM * kWarpsN;      // 4
-constexpr int kThreads = kWarps * 32;          // 128
-constexpr int kWarpTileM = kBM / kWarpsM;      // 32
-constexpr int kWarpTileN = kBN / kWarpsN;      // 32
-constexpr int kMFrags = kWarpTileM / kWmmaM;   // 2
-constexpr int kNFrags = kWarpTileN / kWmmaN;   // 2
+constexpr int kWarps = kWarpsM * kWarpsN;     // 4
+constexpr int kThreads = kWarps * 32;         // 128
+constexpr int kWarpTileM = kBM / kWarpsM;     // 32
+constexpr int kWarpTileN = kBN / kWarpsN;     // 32
+constexpr int kMFrags = kWarpTileM / kWmmaM;  // 2
+constexpr int kNFrags = kWarpTileN / kWmmaN;  // 2
 
-__device__ inline float to_float(__half h) { return __half2float(h); }
-__device__ inline float to_float(__nv_bfloat16 h) { return __bfloat162float(h); }
+__device__ inline float to_float(__half h) {
+    return __half2float(h);
+}
+__device__ inline float to_float(__nv_bfloat16 h) {
+    return __bfloat162float(h);
+}
 
 template <typename T>
-__global__ __launch_bounds__(kThreads) void wmma_gemm_kernel(
-    const T* __restrict__ a, const T* __restrict__ b, float* __restrict__ c,
-    int m, int n, int k, float alpha, float beta) {
+__global__ __launch_bounds__(kThreads) void wmma_gemm_kernel(const T* __restrict__ a,
+                                                             const T* __restrict__ b,
+                                                             float* __restrict__ c, int m, int n,
+                                                             int k, float alpha, float beta) {
     __shared__ __align__(16) T as[kBM * kBK];
     __shared__ __align__(16) T bs[kBK * kBN];
 
@@ -73,12 +78,10 @@ __global__ __launch_bounds__(kThreads) void wmma_gemm_kernel(
     const int b_col = (tid % 8) * 8;
 
     for (int kk = 0; kk < k; kk += kBK) {
-        *reinterpret_cast<float4*>(&as[a_row * kBK + a_col]) =
-            *reinterpret_cast<const float4*>(
-                &a[static_cast<long long>(block_row + a_row) * k + kk + a_col]);
-        *reinterpret_cast<float4*>(&bs[b_row * kBN + b_col]) =
-            *reinterpret_cast<const float4*>(
-                &b[static_cast<long long>(kk + b_row) * n + block_col + b_col]);
+        *reinterpret_cast<float4*>(&as[a_row * kBK + a_col]) = *reinterpret_cast<const float4*>(
+            &a[static_cast<long long>(block_row + a_row) * k + kk + a_col]);
+        *reinterpret_cast<float4*>(&bs[b_row * kBN + b_col]) = *reinterpret_cast<const float4*>(
+            &b[static_cast<long long>(kk + b_row) * n + block_col + b_col]);
         __syncthreads();
 
 #pragma unroll
@@ -120,8 +123,8 @@ __global__ __launch_bounds__(kThreads) void wmma_gemm_kernel(
 // within the tolerance while staying correct on odd and degenerate shapes.
 template <typename T>
 __global__ void half_naive_kernel(const T* __restrict__ a, const T* __restrict__ b,
-                                  float* __restrict__ c, int m, int n, int k,
-                                  float alpha, float beta) {
+                                  float* __restrict__ c, int m, int n, int k, float alpha,
+                                  float beta) {
     const int col = blockIdx.x * blockDim.x + threadIdx.x;
     const int row = blockIdx.y * blockDim.y + threadIdx.y;
     if (row >= m || col >= n) {
@@ -137,8 +140,8 @@ __global__ void half_naive_kernel(const T* __restrict__ a, const T* __restrict__
 }
 
 template <typename T>
-void launch_wmma(const T* a, const T* b, float* c, int m, int n, int k,
-                 float alpha, float beta, cudaStream_t stream) {
+void launch_wmma(const T* a, const T* b, float* c, int m, int n, int k, float alpha, float beta,
+                 cudaStream_t stream) {
     if (m <= 0 || n <= 0) {
         return;
     }

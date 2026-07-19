@@ -41,16 +41,19 @@ struct NvmlMonitor::Impl {
         NvmlSample s{};
         s.time_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         unsigned int v = 0;
-        if (nvmlDeviceGetClockInfo(device, NVML_CLOCK_SM, &v) == NVML_SUCCESS) s.sm_clock_mhz = v;
+        if (nvmlDeviceGetClockInfo(device, NVML_CLOCK_SM, &v) == NVML_SUCCESS)
+            s.sm_clock_mhz = v;
         nvmlTemperature_t temp{};
         temp.version = nvmlTemperature_v1;
         temp.sensorType = NVML_TEMPERATURE_GPU;
         if (nvmlDeviceGetTemperatureV(device, &temp) == NVML_SUCCESS) {
             s.temperature_c = static_cast<unsigned int>(temp.temperature);
         }
-        if (nvmlDeviceGetPowerUsage(device, &v) == NVML_SUCCESS) s.power_mw = v;
+        if (nvmlDeviceGetPowerUsage(device, &v) == NVML_SUCCESS)
+            s.power_mw = v;
         nvmlUtilization_t util{};
-        if (nvmlDeviceGetUtilizationRates(device, &util) == NVML_SUCCESS) s.gpu_util_pct = util.gpu;
+        if (nvmlDeviceGetUtilizationRates(device, &util) == NVML_SUCCESS)
+            s.gpu_util_pct = util.gpu;
         unsigned long long reasons = 0;
         if (nvmlDeviceGetCurrentClocksEventReasons(device, &reasons) == NVML_SUCCESS) {
             s.throttle_reasons = reasons;
@@ -59,8 +62,7 @@ struct NvmlMonitor::Impl {
     }
 };
 
-NvmlMonitor::NvmlMonitor(unsigned int sample_interval_ms, int device_index)
-    : impl_(new Impl()) {
+NvmlMonitor::NvmlMonitor(unsigned int sample_interval_ms, int device_index) : impl_(new Impl()) {
     impl_->interval_ms = sample_interval_ms;
     impl_->device_index = device_index;
     if (nvmlInit_v2() != NVML_SUCCESS) {

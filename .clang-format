@@ -1,0 +1,12 @@
+# Style close to what the tree is already written in: Google base, four space
+# indent, 100 column limit, pointers bound to the type. Enforced in CI.
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 100
+PointerAlignment: Left
+DerivePointerAlignment: false
+AccessModifierOffset: -4
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+SortIncludes: false

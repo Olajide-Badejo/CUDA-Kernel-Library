@@ -31,8 +31,10 @@ double residual(const std::vector<float>& a, const std::vector<float>& x,
         for (int i = 0; i < n; ++i) {
             double ax = 0.0;
             for (int j = 0; j < n; ++j) {
-                ax += static_cast<double>(a[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * n]) *
-                      static_cast<double>(x[static_cast<std::size_t>(j) + static_cast<std::size_t>(c) * n]);
+                ax += static_cast<double>(
+                          a[static_cast<std::size_t>(i) + static_cast<std::size_t>(j) * n]) *
+                      static_cast<double>(
+                          x[static_cast<std::size_t>(j) + static_cast<std::size_t>(c) * n]);
             }
             const double bij = b[static_cast<std::size_t>(i) + static_cast<std::size_t>(c) * n];
             num += (ax - bij) * (ax - bij);
@@ -89,8 +91,10 @@ int main() {
             for (int j = 0; j < n; ++j) {
                 double s = 0.0;
                 for (int p = 0; p < n; ++p) {
-                    s += static_cast<double>(bm[static_cast<std::size_t>(p) + static_cast<std::size_t>(i) * n]) *
-                         static_cast<double>(bm[static_cast<std::size_t>(p) + static_cast<std::size_t>(j) * n]);
+                    s += static_cast<double>(
+                             bm[static_cast<std::size_t>(p) + static_cast<std::size_t>(i) * n]) *
+                         static_cast<double>(
+                             bm[static_cast<std::size_t>(p) + static_cast<std::size_t>(j) * n]);
                 }
                 at(a, n, i, j) = static_cast<float>(s);
             }

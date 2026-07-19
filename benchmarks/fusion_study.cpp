@@ -34,7 +34,10 @@ int main(int argc, char** argv) {
     const auto fbias = ckl::random_matrix(n, 1, 3);
     std::vector<__half> a(fa.size());
     std::vector<__half> b(fb.size());
-    for (std::size_t i = 0; i < a.size(); ++i) { a[i] = __float2half(fa[i]); b[i] = __float2half(fb[i]); }
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        a[i] = __float2half(fa[i]);
+        b[i] = __float2half(fb[i]);
+    }
 
     ckl::DeviceBuffer<__half> da(a.size());
     ckl::DeviceBuffer<__half> db(b.size());
@@ -56,8 +59,9 @@ int main(int argc, char** argv) {
         ckl::gemm_mma_opt(da.data(), db.data(), dc.data(), n, n, n, 1.0f, 0.0f, s);
     });
 
-    const double epilogue_flops = 2.0 * n * n;                 // add + relu compare
-    const double epilogue_bytes = 3.0 * static_cast<double>(n) * n * sizeof(float);  // read C, write C, read bias approx
+    const double epilogue_flops = 2.0 * n * n;  // add + relu compare
+    const double epilogue_bytes =
+        3.0 * static_cast<double>(n) * n * sizeof(float);  // read C, write C, read bias approx
     const double epilogue_intensity = epilogue_flops / epilogue_bytes;
     const double saved_ms = unfused.median_ms - fused.median_ms;
     const double sep_pass_ms = unfused.median_ms - gemm_only.median_ms;
@@ -67,8 +71,8 @@ int main(int argc, char** argv) {
     std::printf("  unfused (GEMM + pass): %.4f ms  (separate epilogue pass %.4f ms)\n",
                 unfused.median_ms, sep_pass_ms);
     std::printf("  fused epilogue       : %.4f ms\n", fused.median_ms);
-    std::printf("  saved by fusion      : %.4f ms  (%.1f percent of unfused)\n",
-                saved_ms, unfused.median_ms > 0.0 ? 100.0 * saved_ms / unfused.median_ms : 0.0);
+    std::printf("  saved by fusion      : %.4f ms  (%.1f percent of unfused)\n", saved_ms,
+                unfused.median_ms > 0.0 ? 100.0 * saved_ms / unfused.median_ms : 0.0);
     std::printf("  epilogue intensity   : %.3f FLOP/byte (memory bound; ridge is about 113)\n",
                 epilogue_intensity);
     std::printf("Decision: the standalone epilogue is memory bound, so as a separate\n");

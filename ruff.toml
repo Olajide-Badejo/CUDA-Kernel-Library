@@ -1,0 +1,10 @@
+# Ruff configuration for the Python tooling (sweep driver, plot and report asset
+# scripts). Enforced in CI via `ruff check`.
+line-length = 100
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+# E402: the plot script must call matplotlib.use("Agg") before importing pyplot,
+# which is a deliberate module level statement before an import.
+ignore = ["E402"]

@@ -73,8 +73,7 @@ __device__ inline void ldmatrix_x2_trans(uint32_t (&r)[2], const void* p) {
                  : "r"(smem_u32(p)));
 }
 
-__device__ inline void mma_m16n8k16(float (&d)[4], const uint32_t (&a)[4],
-                                    const uint32_t (&b)[2]) {
+__device__ inline void mma_m16n8k16(float (&d)[4], const uint32_t (&a)[4], const uint32_t (&b)[2]) {
     asm volatile(
         "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
         "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
@@ -86,9 +85,11 @@ __device__ inline void mma_m16n8k16(float (&d)[4], const uint32_t (&a)[4],
 // accumulator is still in registers, so no extra pass over C is needed. The
 // default (false) path is the plain kernel used everywhere else.
 template <bool FUSE_BIAS>
-__global__ __launch_bounds__(kThreads) void gemm_mma_opt_kernel(
-    const __half* __restrict__ a, const __half* __restrict__ b, float* __restrict__ c,
-    int m, int n, int k, float alpha, float beta, const float* __restrict__ bias) {
+__global__ __launch_bounds__(kThreads) void gemm_mma_opt_kernel(const __half* __restrict__ a,
+                                                                const __half* __restrict__ b,
+                                                                float* __restrict__ c, int m, int n,
+                                                                int k, float alpha, float beta,
+                                                                const float* __restrict__ bias) {
     __shared__ __align__(16) __half as[2][kBM * kBK];  // [buf][row][kk]
     __shared__ __align__(16) __half bs[2][kBK * kBN];  // [buf][kk][col]
 
@@ -107,20 +108,18 @@ __global__ __launch_bounds__(kThreads) void gemm_mma_opt_kernel(
     auto stage = [&](int buf, int kk) {
 #pragma unroll
         for (int i = 0; i < 2; ++i) {
-            const int fa = tid + i * kThreads;      // 0..511
-            const int a_row = fa / (kBK / 8);       // kBK/8 = 4 float4 per row
+            const int fa = tid + i * kThreads;  // 0..511
+            const int a_row = fa / (kBK / 8);   // kBK/8 = 4 float4 per row
             const int a_col = (fa % (kBK / 8)) * 8;
-            __pipeline_memcpy_async(
-                &as[buf][swz(a_row, a_col, kBK, kSwzA)],
-                &a[static_cast<long long>(block_row + a_row) * k + kk + a_col],
-                sizeof(float4));
+            __pipeline_memcpy_async(&as[buf][swz(a_row, a_col, kBK, kSwzA)],
+                                    &a[static_cast<long long>(block_row + a_row) * k + kk + a_col],
+                                    sizeof(float4));
             const int fb = tid + i * kThreads;
-            const int b_row = fb / (kBN / 8);       // kBN/8 = 16 float4 per row
+            const int b_row = fb / (kBN / 8);  // kBN/8 = 16 float4 per row
             const int b_col = (fb % (kBN / 8)) * 8;
-            __pipeline_memcpy_async(
-                &bs[buf][swz(b_row, b_col, kBN, kSwzB)],
-                &b[static_cast<long long>(kk + b_row) * n + block_col + b_col],
-                sizeof(float4));
+            __pipeline_memcpy_async(&bs[buf][swz(b_row, b_col, kBN, kSwzB)],
+                                    &b[static_cast<long long>(kk + b_row) * n + block_col + b_col],
+                                    sizeof(float4));
         }
         __pipeline_commit();
     };
@@ -144,8 +143,9 @@ __global__ __launch_bounds__(kThreads) void gemm_mma_opt_kernel(
 #pragma unroll
             for (int mi = 0; mi < kMTiles; ++mi) {
                 const int row_base = warp_m * kWarpM + mi * 16;
-                ldmatrix_x4(a_frag[mi],
-                            &as[cur][swz(row_base + (lane % 16), k_off + (lane / 16) * 8, kBK, kSwzA)]);
+                ldmatrix_x4(
+                    a_frag[mi],
+                    &as[cur][swz(row_base + (lane % 16), k_off + (lane / 16) * 8, kBK, kSwzA)]);
             }
 #pragma unroll
             for (int ni = 0; ni < kNTiles; ++ni) {
@@ -196,8 +196,8 @@ __global__ __launch_bounds__(kThreads) void gemm_mma_opt_kernel(
 
 // Standalone bias plus ReLU epilogue, the unfused path: reads C, adds the column
 // bias, applies ReLU, writes C. A separate memory bound pass over C.
-__global__ void bias_relu_kernel(float* __restrict__ c, const float* __restrict__ bias,
-                                 int m, int n) {
+__global__ void bias_relu_kernel(float* __restrict__ c, const float* __restrict__ bias, int m,
+                                 int n) {
     const long long idx = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx < static_cast<long long>(m) * n) {
         const float v = c[idx] + bias[idx % n];
@@ -211,9 +211,8 @@ bool aligned(int m, int n, int k) {
 
 }  // namespace
 
-void gemm_mma_opt(const __half* a, const __half* b, float* c,
-                  int m, int n, int k, float alpha, float beta,
-                  cudaStream_t stream) {
+void gemm_mma_opt(const __half* a, const __half* b, float* c, int m, int n, int k, float alpha,
+                  float beta, cudaStream_t stream) {
     if (m <= 0 || n <= 0) {
         return;
     }
@@ -226,8 +225,8 @@ void gemm_mma_opt(const __half* a, const __half* b, float* c,
     gemm_mma_opt_kernel<false><<<grid, block, 0, stream>>>(a, b, c, m, n, k, alpha, beta, nullptr);
 }
 
-void gemm_mma_opt_bias(const __half* a, const __half* b, float* c, const float* bias,
-                       int m, int n, int k, float alpha, cudaStream_t stream) {
+void gemm_mma_opt_bias(const __half* a, const __half* b, float* c, const float* bias, int m, int n,
+                       int k, float alpha, cudaStream_t stream) {
     if (m <= 0 || n <= 0 || !aligned(m, n, k)) {
         return;  // fusion study drives aligned shapes only
     }

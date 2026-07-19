@@ -31,8 +31,7 @@ public:
     DeviceBuffer(const DeviceBuffer&) = delete;
     DeviceBuffer& operator=(const DeviceBuffer&) = delete;
 
-    DeviceBuffer(DeviceBuffer&& other) noexcept
-        : ptr_(other.ptr_), count_(other.count_) {
+    DeviceBuffer(DeviceBuffer&& other) noexcept : ptr_(other.ptr_), count_(other.count_) {
         other.ptr_ = nullptr;
         other.count_ = 0;
     }
@@ -57,9 +56,7 @@ public:
         CKL_CUDA_CHECK(cudaMemcpy(ptr_, host, count * sizeof(T), cudaMemcpyHostToDevice));
     }
 
-    void copy_from_host(const std::vector<T>& host) {
-        copy_from_host(host.data(), host.size());
-    }
+    void copy_from_host(const std::vector<T>& host) { copy_from_host(host.data(), host.size()); }
 
     void copy_to_host(T* host, std::size_t count) const {
         CKL_CUDA_CHECK(cudaMemcpy(host, ptr_, count * sizeof(T), cudaMemcpyDeviceToHost));

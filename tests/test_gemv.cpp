@@ -13,8 +13,8 @@
 
 namespace {
 
-using LaunchFn = std::function<void(const float*, const float*, float*, int, int,
-                                    float, float, cudaStream_t)>;
+using LaunchFn =
+    std::function<void(const float*, const float*, float*, int, int, float, float, cudaStream_t)>;
 
 struct NamedVariant {
     const char* name;
@@ -30,8 +30,8 @@ struct Shape {
 constexpr double kTolerance = 1e-4;
 
 std::vector<double> gemv_reference(const std::vector<float>& a, const std::vector<float>& x,
-                                   const std::vector<float>& y0, int m, int n,
-                                   float alpha, float beta) {
+                                   const std::vector<float>& y0, int m, int n, float alpha,
+                                   float beta) {
     std::vector<double> y(static_cast<std::size_t>(m));
     for (int i = 0; i < m; ++i) {
         double acc = 0.0;
@@ -45,14 +45,17 @@ std::vector<double> gemv_reference(const std::vector<float>& a, const std::vecto
 }
 
 std::vector<float> run(const LaunchFn& launch, const std::vector<float>& a,
-                       const std::vector<float>& x, const std::vector<float>& y0,
-                       int m, int n, float alpha, float beta) {
+                       const std::vector<float>& x, const std::vector<float>& y0, int m, int n,
+                       float alpha, float beta) {
     ckl::DeviceBuffer<float> da(a.size());
     ckl::DeviceBuffer<float> dx(x.size());
     ckl::DeviceBuffer<float> dy(y0.size());
-    if (!a.empty()) da.copy_from_host(a);
-    if (!x.empty()) dx.copy_from_host(x);
-    if (!y0.empty()) dy.copy_from_host(y0);
+    if (!a.empty())
+        da.copy_from_host(a);
+    if (!x.empty())
+        dx.copy_from_host(x);
+    if (!y0.empty())
+        dy.copy_from_host(y0);
     launch(da.data(), dx.data(), dy.data(), m, n, alpha, beta, nullptr);
     CKL_CUDA_CHECK(cudaDeviceSynchronize());
     return y0.empty() ? std::vector<float>{} : dy.to_host();
@@ -68,8 +71,8 @@ bool run_case(const Shape& s) {
     const auto y_cublas = run(ckl::gemv_cublas, a, x, y0, s.m, s.n, alpha, beta);
     const std::vector<double> cublas_ref(y_cublas.begin(), y_cublas.end());
     const auto cpu_ref = gemv_reference(a, x, y0, s.m, s.n, alpha, beta);
-    const double err_oracle = y_cublas.empty() ? 0.0
-        : ckl::relative_frobenius_error(y_cublas, cpu_ref);
+    const double err_oracle =
+        y_cublas.empty() ? 0.0 : ckl::relative_frobenius_error(y_cublas, cpu_ref);
 
     std::printf("  %-16s m=%-6d n=%-6d cublas_vs_cpu=%.3e\n", s.label, s.m, s.n, err_oracle);
     bool ok = err_oracle < kTolerance;
@@ -93,12 +96,8 @@ bool run_case(const Shape& s) {
 
 int main() {
     const std::vector<Shape> shapes = {
-        {1024, 1024, "square"},
-        {4096, 512, "tall"},
-        {512, 4096, "wide"},
-        {777, 333, "non multiple of 4"},
-        {1, 2048, "single row"},
-        {2048, 0, "zero n"},
+        {1024, 1024, "square"},          {4096, 512, "tall"},     {512, 4096, "wide"},
+        {777, 333, "non multiple of 4"}, {1, 2048, "single row"}, {2048, 0, "zero n"},
     };
     std::printf("GEMV correctness (tolerance %.0e)\n", kTolerance);
     bool all_ok = true;

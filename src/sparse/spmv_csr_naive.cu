@@ -11,9 +11,8 @@ namespace {
 
 __global__ void spmv_csr_naive_kernel(const int* __restrict__ row_ptr,
                                       const int* __restrict__ col_idx,
-                                      const float* __restrict__ values,
-                                      const float* __restrict__ x, float* __restrict__ y,
-                                      int m, float alpha, float beta) {
+                                      const float* __restrict__ values, const float* __restrict__ x,
+                                      float* __restrict__ y, int m, float alpha, float beta) {
     const int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= m) {
         return;
@@ -29,9 +28,8 @@ __global__ void spmv_csr_naive_kernel(const int* __restrict__ row_ptr,
 
 }  // namespace
 
-void spmv_csr_naive(const int* row_ptr, const int* col_idx, const float* values,
-                    const float* x, float* y, int m, int n, int nnz,
-                    float alpha, float beta, cudaStream_t stream) {
+void spmv_csr_naive(const int* row_ptr, const int* col_idx, const float* values, const float* x,
+                    float* y, int m, int n, int nnz, float alpha, float beta, cudaStream_t stream) {
     (void)n;
     (void)nnz;
     if (m <= 0) {
@@ -39,8 +37,8 @@ void spmv_csr_naive(const int* row_ptr, const int* col_idx, const float* values,
     }
     constexpr int kBlock = 128;
     const int grid = (m + kBlock - 1) / kBlock;
-    spmv_csr_naive_kernel<<<grid, kBlock, 0, stream>>>(row_ptr, col_idx, values, x, y,
-                                                       m, alpha, beta);
+    spmv_csr_naive_kernel<<<grid, kBlock, 0, stream>>>(row_ptr, col_idx, values, x, y, m, alpha,
+                                                       beta);
 }
 
 }  // namespace ckl

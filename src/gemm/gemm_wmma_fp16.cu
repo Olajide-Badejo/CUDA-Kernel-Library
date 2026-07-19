@@ -5,9 +5,8 @@
 
 namespace ckl {
 
-void gemm_wmma_fp16(const __half* a, const __half* b, float* c,
-                    int m, int n, int k, float alpha, float beta,
-                    cudaStream_t stream) {
+void gemm_wmma_fp16(const __half* a, const __half* b, float* c, int m, int n, int k, float alpha,
+                    float beta, cudaStream_t stream) {
     detail::launch_wmma<__half>(a, b, c, m, n, k, alpha, beta, stream);
 }
 

@@ -31,8 +31,8 @@ cublasHandle_t handle() {
 
 }  // namespace
 
-void gemv_cublas(const float* a, const float* x, float* y,
-                 int m, int n, float alpha, float beta, cudaStream_t stream) {
+void gemv_cublas(const float* a, const float* x, float* y, int m, int n, float alpha, float beta,
+                 cudaStream_t stream) {
     if (m <= 0) {
         return;
     }

@@ -15,7 +15,8 @@
 namespace ckl {
 
 [[noreturn]] inline void fail(const char* what, const char* expr, const char* file, int line) {
-    std::string msg = std::string(what) + " failed: " + expr + " at " + file + ":" + std::to_string(line);
+    std::string msg =
+        std::string(what) + " failed: " + expr + " at " + file + ":" + std::to_string(line);
     throw std::runtime_error(msg);
 }
 
@@ -36,11 +37,11 @@ inline void check_cuda(cudaError_t status, const char* expr, const char* file, i
 // Check for asynchronous kernel launch errors. Pass true to also synchronize,
 // which is what tests and single-shot timing want; the sweep leaves it false
 // on the hot path and synchronizes explicitly through events.
-#define CKL_CUDA_LAST_ERROR(sync)                                                  \
-    do {                                                                           \
-        ::ckl::check_cuda(cudaGetLastError(), "kernel launch", __FILE__, __LINE__); \
-        if (sync) {                                                                \
-            ::ckl::check_cuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize",    \
-                              __FILE__, __LINE__);                                 \
-        }                                                                          \
+#define CKL_CUDA_LAST_ERROR(sync)                                                         \
+    do {                                                                                  \
+        ::ckl::check_cuda(cudaGetLastError(), "kernel launch", __FILE__, __LINE__);       \
+        if (sync) {                                                                       \
+            ::ckl::check_cuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize", __FILE__, \
+                              __LINE__);                                                  \
+        }                                                                                 \
     } while (0)
