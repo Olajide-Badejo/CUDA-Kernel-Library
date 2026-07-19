@@ -169,3 +169,46 @@ ceiling far above the FP32 CUDA core peak that both this kernel and cuBLAS SGEMM
 are bounded by. The FP32 cp.async kernel is accepted as the top hand written FP32
 variant at 73 percent of cuBLAS, with its gap diagnosed here as an occupancy and
 register pressure wall.
+
+## Round 4: WMMA tensor core kernel, tensor cores present but starved
+
+Date: 2026-07-19. Artifacts: `experiments/results/ncu/round04/`
+(wmma_fp16 at 4096 cubed).
+
+Result (4096 cubed, FP16): the WMMA kernel runs at 36308 GFLOP/s, versus the FP32
+cp.async kernel at 16174 GFLOP/s, so moving the inner product onto tensor cores
+more than doubles throughput in one step. Against the FP16 cuBLAS tensor oracle
+(60810 GFLOP/s) it sits at about 60 percent; the compute bound gate and the 90
+percent target are not met yet, and the round says why.
+
+Metric snapshot at 4096 cubed:
+
+| metric | value |
+|---|---|
+| Achieved GFLOP/s | 36308 |
+| Percent of FP16 cuBLAS | 59.7 |
+| Speed of Light, memory (percent) | 92.4 |
+| L1 / TEX pipe throughput (percent) | 94.4 |
+| Speed of Light, compute (percent) | 53.7 |
+| Tensor pipe utilization (percent) | 53.7 |
+| DRAM throughput (percent) | 10.0 |
+| L2 hit rate (percent) | 96.2 |
+| Achieved occupancy (percent) | 32.9 |
+| Registers per thread | 114 |
+| Warp cycles per issued instruction | 68.3 |
+| Top warp stall | MIO throttle, 26.7 cyc |
+
+Top limiter, named: the L1 / TEX (shared memory read) pipe at 94.4 percent, with
+MIO throttle as the dominant stall. The tensor pipe is only 53.7 percent utilized,
+so the tensor cores are not the bottleneck; they are starved. The generic WMMA
+`load_matrix_sync` issues many shared memory transactions to assemble each 16 by
+16 fragment, and at a 64 by 64 block tile there is not enough tensor work per
+fragment load to hide them, so warp cycles per issued instruction balloon to 68.3.
+DRAM is only 10 percent, so this is a shared feeding problem, not a global one.
+
+Single change to apply next: the mma.sync PTX path with ldmatrix. ldmatrix loads a
+full 16 by 16 fragment per warp with one wide, swizzled shared transaction instead
+of the many scalar loads the WMMA abstraction emits, which directly relieves the
+L1 / TEX pipe and feeds the tensor cores. Larger block tiles and cp.async double
+buffering are the further levers for the top kernel on the way to the compute
+bound gate.

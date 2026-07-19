@@ -33,9 +33,23 @@ cuBLAS is the baseline for every rung.
 
 FP32 correctness gate: relative Frobenius error under 1e-4 versus cuBLAS,
 verified on square, non square, non tile aligned, sub tile, and zero dimension
-shapes (`tests/test_gemm.cpp`). The FP16 and BF16 tolerances are derived
-empirically from the error distribution when the tensor variants land and are
-written here then.
+shapes (`tests/test_gemm.cpp`).
+
+Tensor tolerances, derived from the measured error distribution over the test
+shapes (`tests/test_gemm_tensor.cpp`):
+
+- Hand written kernel versus the cuBLAS tensor oracle of the same precision:
+  about 1e-7 relative Frobenius. The two agree to FP32 accumulate rounding, so
+  the kernel is numerically the same computation as cuBLAS, not an approximation
+  of it.
+- FP16 versus an FP32 CPU reference: about 2.6e-4. This is the honest accuracy of
+  FP16 storage with FP32 accumulate on these shapes.
+- BF16 versus an FP32 CPU reference: about 2.1e-3, larger than FP16 as expected
+  from BF16's shorter mantissa (8 bits versus 10).
+
+The correctness gate for the tensor kernels is 5e-2 relative Frobenius against the
+oracle, which the measured 1e-7 clears by five orders of magnitude while leaving
+headroom for larger shapes.
 
 ## Baseline result
 

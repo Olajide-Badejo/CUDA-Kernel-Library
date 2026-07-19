@@ -14,6 +14,8 @@
 // (column major) is wrapped so it produces the identical row major C, letting
 // every performance claim be a same shape, same process comparison.
 
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 namespace ckl {
@@ -64,5 +66,30 @@ void gemm_cp_async(const float* a, const float* b, float* c,
 void gemm_cublas(const float* a, const float* b, float* c,
                  int m, int n, int k, float alpha, float beta,
                  cudaStream_t stream = nullptr);
+
+// Tensor core rungs. Inputs are FP16 or BF16 storage, accumulate is FP32, and
+// the output C is FP32. WMMA 16x16x16 fragments; aligned fast path (m by 64,
+// n by 64, k by 16) with a scalar half input fallback for other shapes.
+void gemm_wmma_fp16(const __half* a, const __half* b, float* c,
+                    int m, int n, int k, float alpha, float beta,
+                    cudaStream_t stream = nullptr);
+void gemm_wmma_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, float* c,
+                    int m, int n, int k, float alpha, float beta,
+                    cudaStream_t stream = nullptr);
+
+// mma.sync PTX tensor core variant (FP16 storage, FP32 accumulate) with ldmatrix
+// fragment loads. Same alignment contract as the WMMA fast path.
+void gemm_mma_ptx(const __half* a, const __half* b, float* c,
+                  int m, int n, int k, float alpha, float beta,
+                  cudaStream_t stream = nullptr);
+
+// cuBLAS tensor core oracles (cublasGemmEx, FP16 or BF16 in, FP32 accumulate),
+// producing the same row major C. Baseline for the tensor path per precision.
+void gemm_cublas_fp16(const __half* a, const __half* b, float* c,
+                      int m, int n, int k, float alpha, float beta,
+                      cudaStream_t stream = nullptr);
+void gemm_cublas_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, float* c,
+                      int m, int n, int k, float alpha, float beta,
+                      cudaStream_t stream = nullptr);
 
 }  // namespace ckl

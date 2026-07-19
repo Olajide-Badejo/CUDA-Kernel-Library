@@ -7,7 +7,10 @@ add_library(ckl_gemm STATIC
     gemm_tiled.cu
     gemm_register.cu
     gemm_cp_async.cu
+    gemm_wmma_fp16.cu
+    gemm_wmma_bf16.cu
     cublas_gemm.cpp
+    cublas_gemm_ex.cpp
 )
 
 target_link_libraries(ckl_gemm

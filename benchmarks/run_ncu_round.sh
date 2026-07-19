@@ -58,7 +58,12 @@ sections=(
 for pair in "$@"; do
     variant="${pair%%:*}"
     size="${pair##*:}"
-    kernel="gemm_${variant}_kernel"
+    # The tensor kernels share one templated implementation, wmma_gemm_kernel;
+    # the FP32 rungs each have their own gemm_<variant>_kernel.
+    case "$variant" in
+        wmma_fp16|wmma_bf16) kernel="wmma_gemm_kernel" ;;
+        *) kernel="gemm_${variant}_kernel" ;;
+    esac
     base="${out_dir}/${variant}_${size}"
     echo "profiling ${variant} at ${size} cubed (kernel ${kernel})"
 

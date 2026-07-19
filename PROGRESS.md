@@ -240,7 +240,41 @@ at one block per SM and 16.7 percent occupancy. Accepted as the top hand written
 FP32 variant at 73 percent of cuBLAS, gap diagnosed. Next: tensor cores (Phase 5)
 to lift the compute ceiling toward the compute bound gate.
 
-## Phase 5 to 11
+## Phase 5: tensor core GEMM (in progress)
 
-Status: pending. Phase 5 (WMMA FP16 and BF16, mma.sync PTX, CUTLASS reference,
-rounds to the compute bound gate) is next.
+Status: WMMA FP16 and BF16 built, correct, benchmarked, and profiled (Round 4).
+mma.sync PTX and CUTLASS reference still to come, then rounds to the compute
+bound gate.
+
+### Built so far
+
+- `include/ckl/detail/wmma_gemm.cuh`: templated WMMA kernel (64 by 64 block, K
+  step 16, four warps, FP32 accumulate) plus a scalar half input fallback for
+  non aligned shapes; instantiated by `gemm_wmma_fp16.cu` and `gemm_wmma_bf16.cu`.
+- `src/gemm/cublas_gemm_ex.cpp`: cublasGemmEx tensor oracles (FP16 and BF16 in,
+  FP32 accumulate) producing the same row major C.
+- `tests/test_gemm_tensor.cpp`, `benchmarks/bench_gemm_tensor.cpp`.
+
+### Verified output
+
+Correctness: all shapes pass. Kernel versus cuBLAS tensor oracle about 1e-7;
+kernel versus FP32 CPU reference about 2.6e-4 (FP16) and 2.1e-3 (BF16). Tolerances
+recorded in `docs/gemm.md`.
+
+Benchmark (this machine), WMMA versus the cuBLAS tensor oracle per precision:
+
+| size | fp16 wmma GFLOP/s | fp16 percent of cuBLAS | bf16 wmma GFLOP/s | bf16 percent of cuBLAS |
+|---|---|---|---|---|
+| 2048 | 35815 | 56.1 | 33061 | 51.6 |
+| 4096 | 36308 | 59.7 | 33582 | 53.6 |
+| 8192 | 34149 | 52.4 | 31891 | 48.4 |
+
+WMMA at 4096 (36.3 TFLOP/s FP16) is 2.2 times the top FP32 kernel (16.2 TFLOP/s),
+confirming tensor cores lift the ceiling. Round 4 (see DIAGNOSTIC_LOG): the kernel
+is shared read (L1 / TEX) pipe bound at 92 percent with the tensor pipe only 53.7
+percent utilized, so the cores are starved by the generic load_matrix_sync
+fragment loads. Next single change: mma.sync PTX with ldmatrix.
+
+## Phases 6 to 11
+
+Status: pending.
