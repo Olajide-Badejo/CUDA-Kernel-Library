@@ -1,4 +1,4 @@
-# CUDA Kernel Lab
+# CUDA Kernel Library
 
 A CUDA kernel library whose GEMM path is driven, through explicit optimization
 steps and Nsight Compute diagnostic rounds, from a naive baseline to a compute

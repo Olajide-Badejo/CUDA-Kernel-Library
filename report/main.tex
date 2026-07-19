@@ -9,7 +9,8 @@
 
 \graphicspath{{figures/}}
 
-\title{CUDA Kernel Lab: Driving a GEMM from Naive to Compute Bound on an RTX 5070}
+\title{CUDA Kernel Library\\[4pt]
+\large Driving a GEMM from naive to compute bound on an RTX 5070}
 \author{Olajide Badejo}
 \date{2026}
 
@@ -28,6 +29,8 @@ ladder the library carries GEMV, TRSM, CSR SpMV, and a cuSOLVER wrapper, all
 verified against the vendor library, with a measured roofline that places each
 kernel against the machine's limits.
 \end{abstract}
+
+\newpage
 
 \section{Introduction}
 
@@ -97,8 +100,12 @@ measured on the RTX 5070.}
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=0.9\textwidth]{ladder.pdf}
-\caption{GEMM ladder throughput at 4096 cubed. FP32 rungs in blue, tensor rungs in
-amber, the top kernel in green.}
+\caption{GEMM ladder at 4096 cubed. Bar length is the absolute achieved throughput
+(GFLOP/s). The percent in each label is of cuBLAS \emph{at the same precision},
+which is why a shorter FP32 bar can show a higher percent than a longer tensor bar:
+the FP32 kernels (blue) are measured against cuBLAS SGEMM (about 23 TFLOP/s) and the
+tensor kernels (amber, top kernel green) against cuBLAS FP16 or BF16 (about 65
+TFLOP/s).}
 \label{fig:ladder}
 \end{figure}
 

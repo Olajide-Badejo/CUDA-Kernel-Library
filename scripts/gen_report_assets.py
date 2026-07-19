@@ -66,7 +66,7 @@ def write_gemm_ladder(rows, size: int) -> list[tuple[str, float, float]]:
         g = float(r["gflops"])
         pct = float(r["pct_baseline"])
         lines.append(f"{latex_escape(label)} & {dtype} & {g:.0f} & {pct:.1f} \\\\")
-        plotted.append((label, g, pct))
+        plotted.append((label, dtype, g, pct))
     lines += [r"\bottomrule", r"\end{tabular}", ""]
     out.write_text("\n".join(lines), encoding="utf-8")
     return plotted
@@ -99,41 +99,78 @@ def write_families(rows) -> None:
     out.write_text("\n".join(lines), encoding="utf-8")
 
 
-def plot_ladder(plotted: list[tuple[str, float, float]]) -> None:
+def plot_ladder(plotted: list[tuple[str, str, float, float]]) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    ink = "#222222"
+    muted = "#6A6A6A"
+    # Colors carry both the compute path and the baseline the percent is measured
+    # against: FP32 kernels versus cuBLAS SGEMM, tensor kernels versus cuBLAS FP16
+    # or BF16. The top kernel is called out in green.
+    fp32_c, tensor_c, top_c = "#0072B2", "#E69F00", "#009E73"
 
     labels = [p[0] for p in plotted]
-    gflops = [p[1] for p in plotted]
-    # Okabe-Ito, FP32 rungs cool, tensor rungs warm; the top kernel highlighted.
+    gflops = [p[2] for p in plotted]
     colors = []
-    for label, _g, _pct in plotted:
+    for label, dtype, _g, _pct in plotted:
         if "swizzle" in label:
-            colors.append("#009E73")
-        elif any(t in label for t in ("WMMA", "mma")):
-            colors.append("#E69F00")
+            colors.append(top_c)
+        elif dtype in ("fp16", "bf16"):
+            colors.append(tensor_c)
         else:
-            colors.append("#0072B2")
+            colors.append(fp32_c)
 
-    fig, ax = plt.subplots(figsize=(8.4, 4.6))
-    y = range(len(labels))
-    ax.barh(list(y), gflops, color=colors, edgecolor="white", height=0.7)
-    ax.set_yticks(list(y))
-    ax.set_yticklabels(labels, fontsize=9)
+    fig, ax = plt.subplots(figsize=(9.2, 5.2))
+    y = list(range(len(labels)))
+    ax.barh(y, gflops, color=colors, edgecolor="white", height=0.72, zorder=3)
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=9.5, color=ink)
     ax.invert_yaxis()
-    ax.set_xlabel("GFLOP/s at 4096 cubed (higher is better)", fontsize=10)
-    ax.set_title("GEMM ladder throughput", fontsize=12)
-    for i, (_l, g, pct) in enumerate(plotted):
-        ax.text(g, i, f"  {g:.0f}  ({pct:.0f}% cuBLAS)", va="center", fontsize=8.5)
-    ax.grid(True, axis="x", color="#E2E2E2", linewidth=0.6)
+
+    # Bar end labels: absolute throughput (the bar length) and the percent of the
+    # same precision cuBLAS baseline (the color says which baseline).
+    for i, (_l, _dt, g, pct) in enumerate(plotted):
+        ax.text(g, i, f"  {g:,.0f} GFLOP/s   ({pct:.0f}% of cuBLAS)", va="center",
+                fontsize=8.5, color=ink)
+
+    ax.set_xlabel("achieved throughput at $4096^3$  (bar length, higher is better)",
+                  fontsize=10, color=ink)
+    # Title plus a subtitle that resolves the apparent paradox (a lower GFLOP/s bar
+    # can be a higher percent, because the baseline differs by precision).
+    ax.set_title("GEMM optimization ladder on the RTX 5070", fontsize=14,
+                 fontweight="bold", color=ink, pad=26)
+    ax.text(0.0, 1.03,
+            "each rung is one attributable step; percent is of cuBLAS at the same precision",
+            transform=ax.transAxes, fontsize=9.5, color=muted, va="bottom")
+
+    handles = [
+        Patch(facecolor=fp32_c, edgecolor="white",
+              label="FP32 kernel  (percent of cuBLAS SGEMM, about 23 TFLOP/s)"),
+        Patch(facecolor=tensor_c, edgecolor="white",
+              label="tensor core kernel  (percent of cuBLAS FP16 or BF16, about 65 TFLOP/s)"),
+        Patch(facecolor=top_c, edgecolor="white", label="top kernel"),
+    ]
+    # Legend in its own space below the x-axis label, left aligned, so it never
+    # covers a bar or a data label.
+    ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(0.0, -0.16),
+              frameon=True, framealpha=0.95, edgecolor="#DDDDDD", fontsize=8.5,
+              ncol=1, borderaxespad=0.0)
+
+    ax.grid(True, axis="x", color="#E6E6E6", linewidth=0.6, zorder=0)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
-    ax.set_xlim(0, max(gflops) * 1.35)
+    for spine in ("left", "bottom"):
+        ax.spines[spine].set_color(muted)
+    ax.tick_params(colors=muted, labelcolor=ink)
+    ax.set_xlim(0, max(gflops) * 1.5)
     fig.tight_layout()
-    fig.savefig(FIGURES / "ladder.pdf")
-    fig.savefig(FIGURES / "ladder.png", dpi=150)
+    # bbox_inches tight so the legend placed below the axes is included in the file.
+    fig.savefig(FIGURES / "ladder.pdf", bbox_inches="tight")
+    fig.savefig(FIGURES / "ladder.png", dpi=150, bbox_inches="tight")
 
 
 def main() -> int:

@@ -131,8 +131,8 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    std::printf("CUDA Kernel Lab device probe\n");
-    std::printf("============================\n");
+    std::printf("CUDA Kernel Library device probe\n");
+    std::printf("================================\n");
     std::printf("Device                 : %s\n", p.name);
     std::printf("Compute capability     : %d.%d (sm_%d%d)\n", p.major, p.minor, p.major, p.minor);
     std::printf("SM count               : %d\n", p.multiProcessorCount);
