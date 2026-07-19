@@ -73,3 +73,25 @@ now returns no `ERR_NVGPUCTRPERM` and a populated table (DRAM throughput 86
 percent, SM throughput 1.76 percent, the expected memory bound signature of a
 copy kernel). Round 1 (tiled versus naive) ran cleanly afterward; see
 `docs/DIAGNOSTIC_LOG.md`.
+
+## 2026-07-19: three stage cp.async pipeline made the top tensor kernel slower, reverted
+
+Symptom: hypothesizing that the top tensor kernel's residual latency exposure
+(warp cycles per issued 40.6 at 32.6 percent occupancy) came from too shallow a
+software pipeline, I deepened the cp.async pipeline from two stages to three.
+Correctness held, but performance dropped: 4096 cubed fell from 79.8 to 74.5
+percent of cuBLAS, 8192 from 79.4 to 73.9 percent.
+
+Root cause: the third shared buffer raised shared memory use from 32 KB to 48 KB
+per block, which cut how many blocks fit per SM and lowered occupancy further. On
+this kernel the occupancy loss outweighed the extra latency hiding, because the
+two stage pipeline was already covering most of the global load latency (DRAM only
+13 percent at 4096). The bottleneck is the shared read pipe and register pressure,
+not global load latency, so adding pipeline depth spent shared memory on the wrong
+problem.
+
+Fix: reverted to the two stage kernel (`git checkout` of `gemm_mma_opt.cu`),
+confirmed back at 79.7 percent with correctness intact. Recorded as a failed round
+(Round 8 hypothesis) rather than kept. The genuine remaining levers are the ones
+named in DIAGNOSTIC_LOG Round 7: a swizzled shared layout, more register reuse, or
+split K for the large shapes, not a deeper pipeline.
