@@ -123,6 +123,12 @@ int main() {
     for (const auto& s : shapes) {
         all_ok = run_case<__half>(s, "ptx", ckl::gemm_mma_ptx, ckl::gemm_cublas_fp16) && all_ok;
     }
+    for (const auto& s : shapes) {
+        all_ok = run_case<__half>(s, "ldm", ckl::gemm_mma_ldm, ckl::gemm_cublas_fp16) && all_ok;
+    }
+    for (const auto& s : shapes) {
+        all_ok = run_case<__half>(s, "opt", ckl::gemm_mma_opt, ckl::gemm_cublas_fp16) && all_ok;
+    }
     std::printf("%s\n", all_ok ? "all tensor GEMM cases passed" : "tensor GEMM cases FAILED");
     return all_ok ? 0 : 1;
 }

@@ -1,0 +1,5 @@
+round: round06
+date: 2026-07-19T14:13:23+02:00
+commit: e2f0f7055e77e2be2c5e8d549912a06942b126c5
+nvcc: Build cuda_13.3.r13.3/compiler.38244171_0
+driver: 610.62

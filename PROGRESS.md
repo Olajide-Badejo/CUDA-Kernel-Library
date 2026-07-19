@@ -283,9 +283,21 @@ fragment loads.
   the bottleneck; the scalar fragment loads are. The single change that would move
   the number is ldmatrix (plus a larger tile and cp.async double buffering).
 
-Still to do in Phase 5: the ldmatrix backed, larger tile, double buffered top
-tensor kernel to chase the compute bound gate; the CUTLASS reference
-instantiation; and the roofline based compute bound gate check.
+- `src/gemm/gemm_mma_ldmatrix.cu`: ldmatrix at the 64 by 64 tile. Round 6: no
+  change (still L1 / TEX bound at 95 percent), because the small tile's bytes to
+  MAC ratio is the real limiter, not the load instruction.
+- `src/gemm/gemm_mma_opt.cu`: the top tensor kernel. 128 by 128 tile, K step 32,
+  ldmatrix, cp.async double buffering. Correct on all shapes. Round 7: 48.6
+  TFLOP/s at 4096 (79.8 percent of cuBLAS) and 51.3 TFLOP/s at 8192 (79.4
+  percent), 3.0 times the top FP32 kernel. The Speed of Light flipped from clearly
+  memory bound to co limited (compute 72.5, memory 75.6; Tensor named the highest
+  utilized pipeline). Reported honestly as co limited, not a clean compute bound
+  gate pass; the gap to 90 percent is attributed in DIAGNOSTIC_LOG Round 7 to the
+  shared read pipe, 33 percent occupancy latency exposure, and L2 spill at 8192.
+
+Still to do in Phase 5: optional further rounds on the top kernel (multistage
+pipeline, shared swizzle, split K) to chase a clean gate pass; the CUTLASS
+reference instantiation; and the roofline based gate figure (Phase 8).
 
 ## Phases 6 to 11
 

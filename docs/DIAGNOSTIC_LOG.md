@@ -239,3 +239,89 @@ one swizzled shared transaction and is the specific relief for the L1 / TEX pipe
 Combined with a larger block tile and cp.async double buffering, this is the route
 toward the compute bound gate. The mma.sync kernel is kept as the honest PTX rung
 that proves the instruction path was not the problem.
+
+## Round 6: ldmatrix at 64 by 64, why the load path fix needs a bigger tile
+
+Date: 2026-07-19. Artifacts: `experiments/results/ncu/round06/` (mma_ldm at 4096).
+
+Change from Round 5: swap the scalar fragment loads for ldmatrix.x4 (A) and
+ldmatrix.x2.trans (B), keeping the 64 by 64 tile so the round isolates ldmatrix.
+Correctness holds (kernel versus oracle about 1e-7 on every shape).
+
+Result: essentially unchanged, about 36.4 TFLOP/s at 4096 (60 percent of cuBLAS),
+the same as the manual mma kernel. The metric snapshot explains why: memory Speed
+of Light 91.1 percent, L1 / TEX pipe 95.1 percent, compute 52.5 percent, DRAM 11
+percent, occupancy 32.9 percent, warp cycles per issued 77.2.
+
+Reading: ldmatrix cut the instruction count for fragment assembly, but the L1 / TEX
+pipe is still at 95 percent, so the kernel did not move. At a 64 by 64 tile the
+kernel stages about 2048 halves of A and B to do a 64 by 64 by 16 block of MACs;
+the ratio of bytes moved to fused multiply adds is too high, so the shared and
+staging traffic saturates the pipe regardless of how efficiently each fragment is
+loaded. The fix is not a better load instruction, it is a larger tile that reuses
+each staged value more before restaging.
+
+Single change to apply next: a 128 by 128 tile with K step 32 and cp.async double
+buffering. That stages about 8192 halves to do a 128 by 128 by 32 block of MACs,
+roughly a fourfold better bytes to MAC ratio, and cp.async overlaps the next
+stage's global load with the current stage's math.
+
+## Round 7: top kernel, 128 by 128 tile with ldmatrix and double buffering
+
+Date: 2026-07-19. Artifacts: `experiments/results/ncu/round07/` (mma_opt at 4096)
+and `round07b/` (at 8192).
+
+Change: 128 by 128 block tile, K step 32, eight warps in a 2 by 4 layout (each warp
+a 4 by 4 grid of 16 by 8 mma tiles), ldmatrix fragment loads, cp.async double
+buffering. Correctness holds on every shape (kernel versus oracle about 1e-7).
+
+Result: a large step. At 4096 cubed the kernel reaches 48.6 TFLOP/s, 79.8 percent
+of cuBLAS, up from 36.4 TFLOP/s and 60 percent for the 64 by 64 kernels. At 8192 it
+reaches 51.3 TFLOP/s, 79.4 percent. The FP16 top kernel is now 3.0 times the top
+FP32 kernel (16.2 TFLOP/s).
+
+Metric snapshot at 4096 cubed, versus the 64 by 64 ldmatrix kernel from Round 6:
+
+| metric | ldmatrix 64x64 | top 128x128 |
+|---|---|---|
+| Achieved GFLOP/s | 36411 | 48571 |
+| Percent of FP16 cuBLAS | 60.2 | 79.8 |
+| Speed of Light, memory (percent) | 91.1 | 75.6 |
+| L1 / TEX pipe throughput (percent) | 95.1 | 79.9 |
+| Speed of Light, compute (percent) | 52.5 | 72.5 |
+| DRAM throughput (percent) | 11.0 | 13.2 |
+| Achieved occupancy (percent) | 32.9 | 32.6 |
+| Warp cycles per issued instruction | 77.2 | 40.6 |
+
+Compute bound gate assessment (honest): the larger tile did what the roofline
+predicted. The Speed of Light flipped from clearly memory bound (compute 52.5,
+memory 91.1) to co limited (compute 72.5, memory 75.6), and Nsight now names the
+Tensor pipe as the highest utilized pipeline. Warp cycles per issued instruction
+nearly halved (77.2 to 40.6), so the double buffering is hiding much more latency.
+But the gate as defined in Section 5 asks for SM or tensor utilization clearly
+above memory system utilization, and at 72.5 versus 75.6 it is not clearly above:
+the kernel is compute and memory co limited, not clearly compute bound. I report it
+that way rather than overclaiming a passed gate.
+
+Remaining gap to a clean gate pass and to 90 percent of cuBLAS, attributed to named
+causes with evidence:
+
+1. L1 / TEX pipe at about 80 percent is now the shared read (ldmatrix) traffic, not
+   the global path (DRAM is 13 percent at 4096). Reducing it further needs more
+   register reuse per shared read, which the 4 by 4 warp fragment grid already
+   pushes near the register budget (104 registers per thread, 32.6 percent
+   occupancy), or a swizzled shared layout to cut any residual bank conflicts.
+2. Occupancy is 32.6 percent and warp cycles per issued is still 40.6, so there is
+   residual latency exposure. A three or four stage cp.async pipeline (this kernel
+   uses two) would hide more of the ldmatrix to mma dependency.
+3. At 8192 cubed the FP16 operands (128 MB each) exceed the 48 MB L2, so DRAM rises
+   to 64 percent (memory Speed of Light 79.6, compute 77.6); there the kernel is
+   closer to bandwidth co limited and would benefit from L2 aware tiling or split K,
+   which is where cuBLAS's per shape tuning pulls ahead.
+
+Named levers for further rounds (multistage pipeline, shared swizzle, split K,
+per shape tile selection) are the difference between this hand written kernel at 80
+percent and cuBLAS. The kernel is accepted here as the top tensor variant at about
+80 percent of cuBLAS with a co limited roofline; the gap to 90 percent and to a
+clean compute bound gate is documented above with metric evidence, per the Section
+8.1 stop condition's diagnosis branch.

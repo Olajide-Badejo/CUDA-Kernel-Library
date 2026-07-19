@@ -62,6 +62,7 @@ for pair in "$@"; do
     # the FP32 rungs each have their own gemm_<variant>_kernel.
     case "$variant" in
         wmma_fp16|wmma_bf16) kernel="wmma_gemm_kernel" ;;
+        mma_ldm) kernel="gemm_mma_ldmatrix_kernel" ;;
         *) kernel="gemm_${variant}_kernel" ;;
     esac
     base="${out_dir}/${variant}_${size}"

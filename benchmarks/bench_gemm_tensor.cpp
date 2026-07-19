@@ -86,5 +86,11 @@ int main(int argc, char** argv) {
     for (int sz : sizes) {
         bench_precision<__half>("ptx", sz, ckl::gemm_mma_ptx, ckl::gemm_cublas_fp16);
     }
+    for (int sz : sizes) {
+        bench_precision<__half>("ldm", sz, ckl::gemm_mma_ldm, ckl::gemm_cublas_fp16);
+    }
+    for (int sz : sizes) {
+        bench_precision<__half>("opt", sz, ckl::gemm_mma_opt, ckl::gemm_cublas_fp16);
+    }
     return 0;
 }

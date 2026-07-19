@@ -83,6 +83,18 @@ void gemm_mma_ptx(const __half* a, const __half* b, float* c,
                   int m, int n, int k, float alpha, float beta,
                   cudaStream_t stream = nullptr);
 
+// mma.sync with ldmatrix fragment loads: the optimized tensor variant that
+// replaces scalar shared loads with one swizzled ldmatrix per fragment.
+void gemm_mma_ldm(const __half* a, const __half* b, float* c,
+                  int m, int n, int k, float alpha, float beta,
+                  cudaStream_t stream = nullptr);
+
+// Top tensor kernel: 128x128 tile, ldmatrix, cp.async double buffering. The FP16
+// kernel driven toward the compute bound gate.
+void gemm_mma_opt(const __half* a, const __half* b, float* c,
+                  int m, int n, int k, float alpha, float beta,
+                  cudaStream_t stream = nullptr);
+
 // cuBLAS tensor core oracles (cublasGemmEx, FP16 or BF16 in, FP32 accumulate),
 // producing the same row major C. Baseline for the tensor path per precision.
 void gemm_cublas_fp16(const __half* a, const __half* b, float* c,
