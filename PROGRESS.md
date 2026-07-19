@@ -440,6 +440,38 @@ bound region, so as a separate pass it is pure bandwidth cost; folding it into t
 compute bound GEMM removes that pass. This is the roofline justified fusion
 decision. See `docs/benchmarking.md`.
 
-## Phases 10 to 11
+## Phase 10: reports, docs, CI, style tooling
 
-Status: pending.
+Status: complete and verified.
+
+### Built
+
+- `scripts/gen_report_assets.py`: idempotent generation of the booktabs tables
+  (`report/tables/`) and figures (`report/figures/`) from `summary.csv`, plus the
+  GEMM ladder bar chart. Nothing hand copied into the report.
+- `report/main.tex` plus `report/refs.bib`: the main report (introduction,
+  background, methodology, GEMM optimization narrative, supporting families,
+  roofline analysis, results, discussion, conclusion), building the ladder table
+  and figure and the roofline figure from generated assets. Compiles to
+  `report/build/main.pdf` with resolved citations and cross references.
+- `report_debug/debug_report.tex`: the debug report from the engineering log,
+  grouped by theme (toolchain, the ncu permission fight, the failed pipeline
+  round). Compiles to `report_debug/build/debug_report.pdf`.
+- Style tooling: `.clang-format`, `.clang-tidy`, `ruff.toml`; the whole tree
+  formatted and verified clang-format clean and ruff clean.
+- `.github/workflows/ci.yml`: style job (dash gate, ruff, clang-format), build job
+  (CUDA toolkit, sm_120 compile, host only tests), report job. GPU steps skip in
+  the cloud.
+- `CONTRIBUTING.md`, `requirements.txt`.
+
+### Verified output
+
+Both PDFs build through `make report` (asset regeneration first, dash check last):
+main.pdf about 169 KB, debug_report.pdf about 80 KB, zero undefined references,
+figures and tables rendered from live data. texlive and latexmk installed;
+recorded here.
+
+## Phase 11: final QA
+
+Status: pending. Remaining: the CUTLASS reference (deferred, off the critical
+path), a clean `make clean && make all` from scratch, and the v1.0.0 tag.

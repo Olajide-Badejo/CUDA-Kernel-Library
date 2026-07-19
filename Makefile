@@ -48,9 +48,17 @@ check-style: dash
 dash:
 	python3 scripts/check_no_dashes.py .
 
-# `all` is the reproduction target. It gains the sweep and the report as those
-# phases land; today it builds, tests, and runs the style gate.
-all: build test check-style
+# Regenerate figures and tables from the canonical results, then build both PDFs.
+# Dash check runs last so a stray dash in the prose fails the report build.
+report: build
+	python3 scripts/gen_report_assets.py
+	cd report && latexmk -pdf -interaction=nonstopmode -output-directory=build main.tex
+	cd report_debug && latexmk -pdf -interaction=nonstopmode -output-directory=build debug_report.tex
+	python3 scripts/check_no_dashes.py .
+
+# `all` is the reproduction target: build, test, sweep, report, style gate, from a
+# clean tree. The sweep needs a GPU; the report builds from the committed summary.
+all: build test sweep report check-style
 
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf $(BUILD_DIR) report/build report_debug/build

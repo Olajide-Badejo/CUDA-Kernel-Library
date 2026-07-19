@@ -1,0 +1,15 @@
+\begin{tabular}{llrr}
+\toprule
+rung & precision & GFLOP/s & percent of cuBLAS \\
+\midrule
+naive & fp32 & 1908 & 8.7 \\
+shared tiled & fp32 & 1584 & 7.4 \\
+register blocked & fp32 & 10390 & 47.1 \\
+cp.async double buffered & fp32 & 16210 & 73.5 \\
+WMMA & fp16 & 36333 & 59.3 \\
+mma.sync PTX & fp16 & 36343 & 59.5 \\
+mma.sync + ldmatrix & fp16 & 36550 & 59.8 \\
+mma.sync + ldmatrix + swizzle & fp16 & 54985 & 89.9 \\
+WMMA (BF16) & bf16 & 33563 & 53.4 \\
+\bottomrule
+\end{tabular}

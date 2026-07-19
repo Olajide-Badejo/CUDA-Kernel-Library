@@ -1,0 +1,12 @@
+\begin{tabular}{llrr}
+\toprule
+kernel & shape & GFLOP/s & percent of vendor \\
+\midrule
+GEMV warp & 8192 sq & 304.0 & 99.9 \\
+GEMV vectorized & 8192 sq & 308.1 & 101.6 \\
+CSR SpMV warp & 131072 & 93.6 & 127.5 \\
+CSR SpMV naive & 131072 & 57.5 & 86.1 \\
+TRSM blocked & 2048 & 381.3 & 31.8 \\
+TRSM naive & 2048 & 7.8 & 0.7 \\
+\bottomrule
+\end{tabular}
