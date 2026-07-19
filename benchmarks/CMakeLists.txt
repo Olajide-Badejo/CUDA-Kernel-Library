@@ -24,3 +24,12 @@ if(TARGET ckl_sparse)
     target_link_libraries(bench_spmv PRIVATE ckl_sparse ckl_headers)
     ckl_set_warnings(bench_spmv)
 endif()
+
+# The unified sweep binary needs every family plus telemetry.
+if(TARGET ckl_gemm AND TARGET ckl_gemv AND TARGET ckl_sparse AND TARGET ckl_trsm
+        AND TARGET ckl_telemetry)
+    add_executable(bench_all bench_all.cpp)
+    target_link_libraries(bench_all PRIVATE
+        ckl_gemm ckl_gemv ckl_sparse ckl_trsm ckl_telemetry ckl_headers)
+    ckl_set_warnings(bench_all)
+endif()

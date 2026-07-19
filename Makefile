@@ -36,6 +36,13 @@ roofline: build
 	./$(BUILD_DIR)/src/profiler/roofline
 	python3 scripts/plot_roofline.py
 
+# Full resumable sweep across every family; refreshes the canonical summary.csv.
+sweep: build
+	python3 benchmarks/sweep.py
+
+sweep-quick: build
+	python3 benchmarks/sweep.py --quick
+
 check-style: dash
 
 dash:

@@ -403,6 +403,32 @@ matplotlib 3.10.7 and numpy 2.3.5 installed (via apt `python3-matplotlib`,
 the reproducibility rule. `requirements.txt` lists the pip floors as the
 alternative.
 
-## Phases 9 to 11
+## Phase 9: full sweep and fusion study
+
+Status: sweep complete and verified; fusion study next.
+
+### Built
+
+- `benchmarks/bench_all.cpp`: one configuration to one JSON row. Runs a single
+  (family, variant, dtype, shape) with NVML sampling on, times the kernel and its
+  vendor baseline in the same process, and prints a JSON object with timing,
+  GFLOP/s, percent of baseline, the NVML summary, toolkit and driver versions, and
+  the commit.
+- `benchmarks/sweep.py`: resolves the sweep matrix (60 configurations across the
+  four families), runs bench_all per config with a tqdm bar (plain line fallback),
+  skips configs whose row already exists (resumable), refreshes the canonical
+  `experiments/results/summary.csv`, and reports any throttled rows.
+
+### Verified output
+
+Full sweep of all 60 configurations completed in under a minute, no throttled
+rows, all clocks near boost (2.7 to 2.9 GHz), temperatures 42 to 60 C. Canonical
+`summary.csv` committed (60 rows). Spot check: mma_opt FP16 at 4096 and 8192 lands
+near 90 percent of cuBLAS (89.9 and 88.9 in the sweep's inline baseline timing,
+consistent with the 90.3 percent gate measurement in DIAGNOSTIC_LOG Round 9); the
+SpMV warp kernel beats cuSPARSE on L2 resident sizes. Resumability verified (a
+second run skipped the finished rows).
+
+## Phases 10 to 11
 
 Status: pending.
