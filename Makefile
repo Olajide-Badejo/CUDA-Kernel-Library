@@ -7,7 +7,10 @@ BUILD_TYPE ?= Release
 GENERATOR ?= Ninja
 CTEST_LABELS ?=
 
-.PHONY: all setup configure build test bench check-style dash clean help
+# report, roofline, sweep collide with directory names, so they must be phony or
+# make treats the directory as an up to date target and does nothing.
+.PHONY: all setup configure build test bench roofline sweep sweep-quick report \
+        check-style dash clean help
 
 help:
 	@echo "Targets:"
@@ -49,8 +52,10 @@ dash:
 	python3 scripts/check_no_dashes.py .
 
 # Regenerate figures and tables from the canonical results, then build both PDFs.
-# Dash check runs last so a stray dash in the prose fails the report build.
-report: build
+# Does not depend on the CUDA build: it works from the committed summary.csv and
+# figures, so it runs on a machine without a GPU or toolkit (and in CI). Dash
+# check runs last so a stray dash in the prose fails the report build.
+report:
 	python3 scripts/gen_report_assets.py
 	cd report && latexmk -pdf -interaction=nonstopmode -output-directory=build main.tex
 	cd report_debug && latexmk -pdf -interaction=nonstopmode -output-directory=build debug_report.tex

@@ -45,6 +45,10 @@ string(APPEND CMAKE_CUDA_FLAGS " -lineinfo")
 # ---------------------------------------------------------------------------
 option(CKL_BUILD_TESTS "Build correctness tests (need a GPU to run)" ON)
 option(CKL_BUILD_BENCH "Build benchmark binaries (need a GPU to run)" ON)
+# Warnings are errors locally (a phase gate). CI compiles sm_120 with a different
+# host GCC than this machine, whose warning set differs, so CI turns this off to
+# get a real compile check without failing on cross toolchain warning noise.
+option(CKL_WERROR "Treat compiler warnings as errors" ON)
 
 # ---------------------------------------------------------------------------
 # Header-only interface for the ckl public headers

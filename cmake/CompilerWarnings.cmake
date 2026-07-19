@@ -13,6 +13,12 @@ function(ckl_set_warnings target)
     target_compile_options(${target} PRIVATE
         $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -Wshadow -Wconversion>
         $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra>
-        $<$<COMPILE_LANGUAGE:CUDA>:--Werror=all-warnings>
     )
+    # Warnings as errors on device code, gated so CI can compile with a different
+    # toolchain without the zero warning gate tripping on cross compiler noise.
+    if(CKL_WERROR)
+        target_compile_options(${target} PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:--Werror=all-warnings>
+        )
+    endif()
 endfunction()
