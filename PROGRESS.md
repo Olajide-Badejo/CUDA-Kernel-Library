@@ -287,17 +287,43 @@ fragment loads.
   change (still L1 / TEX bound at 95 percent), because the small tile's bytes to
   MAC ratio is the real limiter, not the load instruction.
 - `src/gemm/gemm_mma_opt.cu`: the top tensor kernel. 128 by 128 tile, K step 32,
-  ldmatrix, cp.async double buffering. Correct on all shapes. Round 7: 48.6
-  TFLOP/s at 4096 (79.8 percent of cuBLAS) and 51.3 TFLOP/s at 8192 (79.4
-  percent), 3.0 times the top FP32 kernel. The Speed of Light flipped from clearly
-  memory bound to co limited (compute 72.5, memory 75.6; Tensor named the highest
-  utilized pipeline). Reported honestly as co limited, not a clean compute bound
-  gate pass; the gap to 90 percent is attributed in DIAGNOSTIC_LOG Round 7 to the
-  shared read pipe, 33 percent occupancy latency exposure, and L2 spill at 8192.
+  ldmatrix, cp.async double buffering, and a shared memory swizzle. Correct on all
+  shapes. Optimization loop across Rounds 7 to 9:
+  - Round 7 (128 by 128 plus double buffering): 48.6 TFLOP/s at 4096 (79.8 percent
+    of cuBLAS), Speed of Light co limited (compute 72.5, memory 75.6).
+  - Round 8 (three stage pipeline): slower, reverted (occupancy loss). Failed round
+    recorded in ENGINEERING_LOG.
+  - Round 9 (shared swizzle): a bank conflict counter showed 219 million shared
+    load conflicts driving the shared pipe; the swizzle cut them to 33.7 million,
+    collapsing memory Speed of Light from 75.6 to 30.2 percent and lifting compute
+    to 82.7 percent.
 
-Still to do in Phase 5: optional further rounds on the top kernel (multistage
-pipeline, shared swizzle, split K) to chase a clean gate pass; the CUTLASS
-reference instantiation; and the roofline based gate figure (Phase 8).
+  Result: 54.9 TFLOP/s at 4096 (90.3 percent of cuBLAS) and 58.4 TFLOP/s at 8192
+  (90.1 percent), 3.4 times the top FP32 kernel.
+
+  COMPUTE BOUND GATE: PASSED. Compute utilization (82.7 percent) is clearly above
+  memory utilization (30.2 percent), the Tensor pipe is the highest utilized
+  pipeline, and the operating point is right of the roofline ridge. Section 8.1
+  stop condition met: gate passes AND at least 90 percent of cuBLAS at both 4096
+  and 8192 for FP16. Nine rounds, one change each, every step backed by an ncu
+  artifact. Split K was considered and correctly not applied (these shapes already
+  saturate the SMs; see DIAGNOSTIC_LOG Round 9).
+
+### Ladder summary (this machine, 4096 cubed, versus same precision cuBLAS)
+
+| variant | precision | GFLOP/s | percent of cuBLAS |
+|---|---|---|---|
+| naive | FP32 | 1905 | 8.6 |
+| tiled | FP32 | 1589 | 7.2 |
+| register | FP32 | 10380 | 47.1 |
+| cp_async | FP32 | 16174 | 73.4 |
+| wmma_fp16 | FP16 | 36308 | 59.7 |
+| mma_ptx | FP16 | 36360 | 59.8 |
+| mma_ldm | FP16 | 36416 | 60.2 |
+| mma_opt (top) | FP16 | 54931 | 90.3 |
+
+Still to do in Phase 5: the CUTLASS reference instantiation (open source upper
+reference), and the roofline based gate figure (Phase 8).
 
 ## Phases 6 to 11
 

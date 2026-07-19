@@ -321,7 +321,69 @@ causes with evidence:
 
 Named levers for further rounds (multistage pipeline, shared swizzle, split K,
 per shape tile selection) are the difference between this hand written kernel at 80
-percent and cuBLAS. The kernel is accepted here as the top tensor variant at about
-80 percent of cuBLAS with a co limited roofline; the gap to 90 percent and to a
-clean compute bound gate is documented above with metric evidence, per the Section
-8.1 stop condition's diagnosis branch.
+percent and cuBLAS. Rounds 8 and 9 test two of them.
+
+## Round 8 (failed, reverted): three stage cp.async pipeline
+
+Date: 2026-07-19. Hypothesis: the residual latency exposure (warp cycles per issued
+40.6 at 32.6 percent occupancy) is a too shallow software pipeline, so deepen
+cp.async from two stages to three. Result: slower, 74.5 percent of cuBLAS at 4096
+(down from 79.8). Root cause: the third shared buffer raised shared use to 48 KB
+and cut occupancy, and the two stage pipeline was already hiding the global latency
+(DRAM only 13 percent), so depth was spent on the wrong bottleneck. Reverted. Full
+write up in `docs/ENGINEERING_LOG.md`. This is why the next round targeted the
+shared read pipe directly instead.
+
+## Round 9: shared memory swizzle, the gate passes
+
+Date: 2026-07-19. Artifacts: `experiments/results/ncu/round09/` (mma_opt at 4096).
+
+Measurement that motivated it: a bank conflict counter on the Round 7 kernel showed
+`l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` at 219 million against
+269 million shared load wavefronts, about 0.8 conflicts per wavefront. The plain
+row major shared tile makes ldmatrix collide: consecutive rows are 64 bytes (A) or
+256 bytes apart, so lanes reading a column of the tile pile onto the same banks.
+
+Change: swizzle the eight half (sixteen byte) chunk position within each shared
+row by the row index (XOR), applied identically to the cp.async store and the
+ldmatrix load, so it is a per row bijection and correctness is unconditional. Only
+the bank mapping changes.
+
+Result (4096 cubed): 54.9 TFLOP/s, 90.3 percent of cuBLAS, up from 48.6 TFLOP/s and
+79.8 percent. At 8192 cubed: 58.4 TFLOP/s, 90.1 percent. Correctness holds on all
+shapes (kernel versus oracle about 1e-7).
+
+Metric snapshot at 4096 cubed, before and after the swizzle:
+
+| metric | Round 7 (row major) | Round 9 (swizzled) |
+|---|---|---|
+| Achieved GFLOP/s | 48571 | 54931 |
+| Percent of FP16 cuBLAS | 79.8 | 90.3 |
+| Shared load bank conflicts | 219 million | 33.7 million |
+| Shared load wavefronts | 269 million | 84 million |
+| Speed of Light, compute (percent) | 72.5 | 82.7 |
+| Speed of Light, memory (percent) | 75.6 | 30.2 |
+| L1 / TEX pipe throughput (percent) | 79.9 | 31.8 |
+| DRAM throughput (percent) | 13.2 | 14.5 |
+| Warp cycles per issued instruction | 40.6 | 31.2 |
+
+Compute bound gate: PASSES. The swizzle cut both the conflicts (219 to 33.7
+million) and the total shared load wavefronts (269 to 84 million), which collapsed
+the L1 / TEX pipe from 79.9 to 31.8 percent and the memory Speed of Light from 75.6
+to 30.2 percent, while compute rose to 82.7 percent. Compute utilization (82.7) is
+now clearly above memory utilization (30.2), and Nsight names the Tensor pipe the
+highest utilized pipeline. The kernel's operating point is firmly right of the
+roofline ridge (arithmetic intensity far above the measured ridge of about 60
+FLOP per byte, DRAM at 14.5 percent). This is unambiguously compute bound.
+
+Stop condition (Section 8.1): met. The compute bound gate passes AND the kernel is
+at least 90 percent of cuBLAS at both 4096 cubed (90.3) and 8192 cubed (90.1) for
+FP16. The optimization loop for the top kernel stops here, at round 9, one change
+per round throughout, every step backed by an ncu artifact.
+
+On split K (the other candidate lever): it is not needed here and would not help
+these shapes. Split K raises parallelism when there are too few output tiles to
+fill the SMs; at 4096 and 8192 with 128 by 128 tiles there are 1024 and 4096
+output blocks against 48 SMs, so the machine is already saturated and the kernel is
+compute bound. Split K is the right tool for small output, large K shapes, and is
+noted for that case rather than applied where it cannot help.

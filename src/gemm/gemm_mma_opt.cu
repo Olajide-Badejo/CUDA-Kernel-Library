@@ -43,6 +43,24 @@ __device__ inline uint32_t smem_u32(const void* p) {
     return static_cast<uint32_t>(__cvta_generic_to_shared(p));
 }
 
+// Shared memory swizzle. Round 7 left the kernel co limited by the shared read
+// pipe, and the bank conflict counter confirmed the cause: the plain row major
+// tile makes ldmatrix collide, about 0.8 conflicts per shared load wavefront.
+// Permuting the eight half (sixteen byte) chunk position within each row by the
+// row index spreads consecutive rows across banks. The same permutation is used
+// on the cp.async store and the ldmatrix load, so it is a per row bijection and
+// the data read back is always correct; only the bank mapping changes. The mask
+// is NCHUNK-1 for A (four chunks per row) and 7 for B (a 128 byte bank window is
+// eight chunks wide).
+__device__ inline int swz(int row, int col, int stride_halves, int mask) {
+    const int chunk = col >> 3;
+    const int swz_chunk = chunk ^ (row & mask);
+    return row * stride_halves + (swz_chunk << 3) + (col & 7);
+}
+
+constexpr int kSwzA = (kBK / 8) - 1;  // 3
+constexpr int kSwzB = 7;
+
 __device__ inline void ldmatrix_x4(uint32_t (&r)[4], const void* p) {
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
                  : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
@@ -89,14 +107,14 @@ __global__ __launch_bounds__(kThreads) void gemm_mma_opt_kernel(
             const int a_row = fa / (kBK / 8);       // kBK/8 = 4 float4 per row
             const int a_col = (fa % (kBK / 8)) * 8;
             __pipeline_memcpy_async(
-                &as[buf][a_row * kBK + a_col],
+                &as[buf][swz(a_row, a_col, kBK, kSwzA)],
                 &a[static_cast<long long>(block_row + a_row) * k + kk + a_col],
                 sizeof(float4));
             const int fb = tid + i * kThreads;
             const int b_row = fb / (kBN / 8);       // kBN/8 = 16 float4 per row
             const int b_col = (fb % (kBN / 8)) * 8;
             __pipeline_memcpy_async(
-                &bs[buf][b_row * kBN + b_col],
+                &bs[buf][swz(b_row, b_col, kBN, kSwzB)],
                 &b[static_cast<long long>(kk + b_row) * n + block_col + b_col],
                 sizeof(float4));
         }
@@ -123,13 +141,13 @@ __global__ __launch_bounds__(kThreads) void gemm_mma_opt_kernel(
             for (int mi = 0; mi < kMTiles; ++mi) {
                 const int row_base = warp_m * kWarpM + mi * 16;
                 ldmatrix_x4(a_frag[mi],
-                            &as[cur][(row_base + (lane % 16)) * kBK + k_off + (lane / 16) * 8]);
+                            &as[cur][swz(row_base + (lane % 16), k_off + (lane / 16) * 8, kBK, kSwzA)]);
             }
 #pragma unroll
             for (int ni = 0; ni < kNTiles; ++ni) {
                 const int col_base = warp_n * kWarpN + ni * 8;
                 uint32_t b_frag[2];
-                ldmatrix_x2_trans(b_frag, &bs[cur][(k_off + (lane % 16)) * kBN + col_base]);
+                ldmatrix_x2_trans(b_frag, &bs[cur][swz(k_off + (lane % 16), col_base, kBN, kSwzB)]);
 #pragma unroll
                 for (int mi = 0; mi < kMTiles; ++mi) {
                     mma_m16n8k16(acc[mi][ni], a_frag[mi], b_frag);
