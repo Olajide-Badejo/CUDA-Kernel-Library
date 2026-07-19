@@ -473,5 +473,21 @@ recorded here.
 
 ## Phase 11: final QA
 
-Status: pending. Remaining: the CUTLASS reference (deferred, off the critical
-path), a clean `make clean && make all` from scratch, and the v1.0.0 tag.
+Status: reproduction verified; release pending owner sign off.
+
+- Clean tree reproduction checked: `make clean` then `make build` compiles all 119
+  targets from scratch, `make test` passes all 7 GPU test suites, `make report`
+  regenerates the assets and both PDFs and ends on a clean dash check. The full
+  sweep runs via `make sweep` (verified earlier, 60 rows, no throttle).
+- Zero compiler warnings; clang-format clean; ruff clean; dash gate clean.
+
+Remaining (owner actions, outward facing):
+
+- CUTLASS sm_120 reference: the one spec component not built. It is an upper
+  reference and technique source, not required for the compute bound gate (which
+  the hand written kernel already passes), so it was deferred. Can be added via
+  CMake FetchContent when wanted; note the slow fetch over `/mnt/c`.
+- `v1.0.0` tag and GitHub publication (topics, description, both PDFs attached as
+  release assets), to be done with the owner's go ahead since it is outward facing.
+  Attribution is already disabled; history is clean of co-author and assistant
+  trailers.
