@@ -8,6 +8,10 @@ cmake-build-*/
 _deps/
 /third_party/
 
+# Generated API documentation. `doxygen Doxyfile` rebuilds it from the headers,
+# so the tree carries the source of truth and not the render.
+/docs/api/
+
 # Experiment outputs. The canonical results are committed: summary.csv, the sweep
 # JSONL, the roofline CSVs, and the ncu diagnostic text pages and round metadata.
 # A clean clone has to be able to rebuild every figure and table from what is in

@@ -1,0 +1,45 @@
+# Editor defaults that match the committed .clang-format and ruff.toml, so an
+# editor that has never heard of either still produces the right whitespace.
+# scripts/check_no_dashes.py reads this file too, which is why it stays ASCII.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# C, C++ and CUDA: four spaces and a 100 column limit, per .clang-format.
+[*.{c,h,cc,cpp,hpp,cu,cuh}]
+indent_size = 4
+max_line_length = 100
+
+# Python: four spaces and the same 100 columns ruff.toml sets.
+[*.py]
+indent_size = 4
+max_line_length = 100
+
+# YAML will not parse with tabs, and two spaces is the convention every GitHub
+# Actions file in this repo already uses.
+[*.{yml,yaml}]
+indent_size = 2
+
+[*.{json,toml}]
+indent_size = 2
+
+[{CMakeLists.txt,*.cmake}]
+indent_size = 4
+
+[*.f90]
+indent_size = 4
+
+# Markdown uses trailing double spaces for a hard line break, so trimming them
+# would silently change the rendered output.
+[*.md]
+trim_trailing_whitespace = false
+
+[Makefile]
+indent_style = tab

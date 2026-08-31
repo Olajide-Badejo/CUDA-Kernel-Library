@@ -1,0 +1,44 @@
+name: Question
+description: Ask about the API, a measurement, or a design decision.
+title: "[question] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Questions about a number are welcome. Every figure in this repository
+        traces back to a results file and a commit, and where a published claim
+        did not survive its own audit that is written down in
+        `docs/CORRECTIONS.md`. Check there first if the question is "why does
+        this percent look wrong".
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: What is this about
+      options:
+        - Using the library (integration, CMake, pkg-config, the C ABI)
+        - Building it (toolchain, presets, WSL2)
+        - A benchmark number or a claim in the report
+        - A kernel or a design decision
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: The question
+      description: What you are trying to do and where the docs left you stuck.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: >-
+        Optional, but a version, a GPU, or the code you are looking at usually
+        turns a long thread into a short one.
+    validations:
+      required: false

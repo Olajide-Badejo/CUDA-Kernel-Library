@@ -17,6 +17,26 @@
 
 ---
 
+## Using the library
+
+Install it once, then four lines of CMake:
+
+```cmake
+find_package(CKL REQUIRED)
+
+add_executable(my_app main.cpp)
+target_link_libraries(my_app PRIVATE ckl::ckl)
+```
+
+`add_subdirectory` and pkg-config work too, and there is a C99 ABI with no CUDA
+headers in it for callers who do not want the toolkit. Integration, a complete
+first program, and the load-bearing contracts (synchronous versus asynchronous,
+thread safety, alignment, aliasing, error handling, both layout conventions) are
+in [`docs/using.md`](docs/using.md). Toolchain and build options are in
+[`docs/building.md`](docs/building.md); calling it from Fortran is in
+[`docs/fortran.md`](docs/fortran.md). Four runnable programs live in
+[`examples/`](examples/).
+
 ## What this project demonstrates
 
 - A GEMM kernel taken from a fair naive baseline to **compute bound** on the
@@ -174,7 +194,9 @@ reports. See [`docs/`](docs/) for per-component notes,
 ## Target machine
 
 RTX 5070 (Blackwell GB205, compute capability 12.0, sm_120, 48 SMs, 12 GB GDDR7),
-CUDA Toolkit 13.3, GCC 15.2, built and run inside WSL2 Ubuntu. Measured ceilings
+CUDA Toolkit 13.3, host compiler g++-14.3, built and run inside WSL2 Ubuntu. The
+system GCC is 15.2, but nvcc 13.3 cannot parse its libstdc++, so the build pins
+g++-14; [`docs/building.md`](docs/building.md) has the detail. Measured ceilings
 are captured at build time by `./build/tools/ckl_device_probe` and used everywhere
 in place of the datasheet.
 

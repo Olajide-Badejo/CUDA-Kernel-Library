@@ -1,0 +1,80 @@
+# Doxygen configuration for the public API of the CUDA Kernel Library.
+#
+# Only the settings that differ from the defaults are listed, so a doxygen
+# upgrade that retires an option does not turn this file into a wall of
+# warnings. Run it from the repository root:
+#
+#   doxygen Doxyfile
+#
+# It has to finish with zero warnings. WARN_IF_UNDOCUMENTED is on and
+# EXTRACT_ALL is off, so an undocumented public declaration under include/ckl is
+# a build failure in spirit and a visible warning in fact.
+#
+# The generated tree lands in docs/api and is not committed.
+
+PROJECT_NAME           = "CUDA Kernel Library"
+PROJECT_NUMBER         = 1.1.0
+PROJECT_BRIEF          = "Hand written CUDA linear algebra, naive GEMM to compute bound tensor core"
+
+OUTPUT_DIRECTORY       = docs/api
+CREATE_SUBDIRS         = NO
+
+# docs/ is in the input because the README and the component notes link to each
+# other; a markdown link doxygen cannot resolve is a warning, and the gate here
+# is zero warnings. docs/api is the output directory and is excluded so a second
+# run does not read its own first run.
+INPUT                  = include/ckl docs README.md
+EXCLUDE                = docs/api
+FILE_PATTERNS          = *.h *.hpp *.md
+RECURSIVE              = YES
+USE_MDFILE_AS_MAINPAGE = README.md
+
+# Only what is documented is published, and anything public that is not
+# documented is reported.
+EXTRACT_ALL            = NO
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = NO
+HIDE_UNDOC_MEMBERS     = NO
+HIDE_UNDOC_CLASSES     = NO
+
+# Members inherited from std::runtime_error are not this project's to document.
+INLINE_INHERITED_MEMB  = NO
+SHOW_USED_FILES        = NO
+
+MARKDOWN_SUPPORT       = YES
+# The markdown here is read on GitHub first and in the generated site second, so
+# heading anchors have to be the ones GitHub mints. Without this the in-page
+# table of contents in using.md resolves on GitHub and warns here.
+MARKDOWN_ID_STYLE      = GITHUB
+AUTOLINK_SUPPORT       = YES
+BUILTIN_STL_SUPPORT    = YES
+SORT_MEMBER_DOCS       = NO
+TAB_SIZE               = 4
+
+# CKL_EXPORT is a visibility attribute, and CUDA's half types are opaque to a
+# documentation pass. Expanding the first to nothing keeps every signature
+# parseable; predefining __CUDACC__ is not wanted, so the CUDA headers are simply
+# never opened.
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = YES
+SEARCH_INCLUDES        = NO
+PREDEFINED             = CKL_EXPORT= \
+                         CKL_NO_EXPORT= \
+                         CKL_DEPRECATED= \
+                         __cplusplus
+
+QUIET                  = YES
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_DOC_ERROR      = YES
+WARN_IF_INCOMPLETE_DOC = YES
+WARN_NO_PARAMDOC       = YES
+WARN_AS_ERROR          = NO
+
+GENERATE_HTML          = YES
+HTML_OUTPUT            = .
+GENERATE_LATEX         = NO
+GENERATE_TREEVIEW      = YES
+DISABLE_INDEX          = NO
+HAVE_DOT               = NO

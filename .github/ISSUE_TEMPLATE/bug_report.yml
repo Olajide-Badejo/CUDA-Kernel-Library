@@ -1,0 +1,84 @@
+name: Bug report
+description: Something built, ran, or computed the wrong answer.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Almost every bug in a CUDA library comes down to the exact toolkit,
+        driver and architecture it ran on, so please fill the environment fields
+        in even when they feel irrelevant.
+
+  - type: input
+    id: version
+    attributes:
+      label: CKL version or commit
+      description: The output of `ckl_get_version_string()`, or the commit hash you built.
+      placeholder: "1.1.0, or 2613923"
+    validations:
+      required: true
+
+  - type: input
+    id: toolkit
+    attributes:
+      label: CUDA Toolkit version
+      description: The last two lines of `nvcc --version`.
+      placeholder: "13.3.73"
+    validations:
+      required: true
+
+  - type: input
+    id: driver
+    attributes:
+      label: Driver version
+      description: From `nvidia-smi`. On WSL2 this is the Windows side driver.
+      placeholder: "610.62"
+    validations:
+      required: true
+
+  - type: input
+    id: arch
+    attributes:
+      label: GPU and compute capability
+      description: The card and its sm_ number, plus the CMAKE_CUDA_ARCHITECTURES you built.
+      placeholder: "RTX 5070, sm_120, built with CMAKE_CUDA_ARCHITECTURES=120"
+    validations:
+      required: true
+
+  - type: input
+    id: host
+    attributes:
+      label: Host compiler and OS
+      description: The C++ compiler nvcc used, and where you are running.
+      placeholder: "g++-14.3, Ubuntu 24.04 under WSL2"
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: >-
+        The smallest program, ctest name, or command line that shows it. If a
+        GEMM computes the wrong answer, the shape, the layout, the leading
+        dimensions and the algorithm matter, so include the whole descriptor.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+      description: Include the status code or the error text if there was one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Profiler output, a compile log, or a hypothesis about the cause.
+    validations:
+      required: false

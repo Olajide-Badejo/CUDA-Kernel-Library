@@ -1,8 +1,12 @@
 #pragma once
 
-// Umbrella header: everything the C++ API of the CUDA Kernel Library exposes.
-// Include one family header instead if you only need that family; this one is
-// for callers who would rather not track which is which.
+/**
+ * @file ckl.hpp
+ * @brief Umbrella header: everything the C++ API of the CUDA Kernel Library exposes.
+ *
+ * Include one family header instead if you only need that family; this one is
+ * for callers who would rather not track which is which.
+ */
 
 #include "ckl/context.hpp"
 #include "ckl/cuda_check.hpp"

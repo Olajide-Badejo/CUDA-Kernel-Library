@@ -1,0 +1,44 @@
+CUDA Kernel Library
+Copyright (c) 2026 Olajide Badejo
+
+This product is licensed under the MIT License. See LICENSE for the full text.
+
+The library is my own code. Nothing third party is vendored into this
+repository: the list below is what the build links against or downloads, and it
+is here so a consumer knows exactly what ends up on their link line.
+
+
+Third party components this project uses
+----------------------------------------
+
+NVIDIA CUDA Toolkit: cuBLAS, cuSPARSE, cuSOLVER, the CUDA Runtime (cudart), and
+NVML.
+  Role: cuBLAS and cuSPARSE are the correctness oracles and the performance
+  baselines every claim in this repository is measured against; cuSOLVER backs
+  ckl::DenseSolver; NVML supplies the clock, temperature and throttle telemetry
+  that gates whether a benchmark run is trusted.
+  Posture: not redistributed here. They are installed with the CUDA Toolkit and
+  linked from that installation, under the NVIDIA Software License Agreement and
+  the CUDA Supplement that come with the toolkit. A binary built from this
+  source and shipped onward has to satisfy NVIDIA's redistribution terms for
+  whichever of these libraries it carries.
+  Link: https://docs.nvidia.com/cuda/eula/
+
+GoogleTest, version 1.17.0.
+  Role: the test framework. Test only; no part of it reaches the installed
+  library.
+  Posture: fetched at configure time by CMake FetchContent from
+  https://github.com/google/googletest, pinned to the tag v1.17.0, built inside
+  the build tree and never installed. BSD 3-Clause License.
+
+
+Components named in the design but not yet used
+-----------------------------------------------
+
+These appear in the plan and in the algorithm enum for ABI stability. Nothing in
+release 1.1.0 links or downloads them, and this file will say so plainly on the
+day that changes.
+
+  cuFFT   (NVIDIA CUDA Toolkit, same license posture as the libraries above)
+  CUB     (NVIDIA, BSD 3-Clause; ships inside the CUDA Toolkit as part of CCCL)
+  CUTLASS (NVIDIA, BSD 3-Clause; would be fetched, not vendored)

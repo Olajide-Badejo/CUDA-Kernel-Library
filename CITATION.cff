@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "CUDA Kernel Library"
+abstract: >-
+  A hand written CUDA linear algebra library taken from a naive GEMM to a
+  compute bound tensor core kernel on a single NVIDIA RTX 5070, with every
+  performance claim measured against the vendor library on the same GPU in the
+  same process.
+type: software
+version: 1.1.0
+license: MIT
+repository-code: "https://github.com/Olajide-Badejo/CUDA-Kernel-Library"
+url: "https://github.com/Olajide-Badejo/CUDA-Kernel-Library"
+authors:
+  - family-names: Badejo
+    given-names: Olajide
+keywords:
+  - CUDA
+  - GEMM
+  - tensor cores
+  - GPU
+  - linear algebra
+  - performance engineering
