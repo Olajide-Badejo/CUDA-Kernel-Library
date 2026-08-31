@@ -4,14 +4,26 @@
 // as a column major C transpose = B transpose * A transpose. Feeding cuBLAS our
 // row major B and A unchanged, it reads them as those transposes, and the
 // column major result it writes is exactly our row major C.
+//
+// The handle comes from the process wide default Context rather than from a
+// function local static. The old static was never destroyed and cublasSetStream
+// on it raced across threads; the lock below makes the set-stream plus call pair
+// atomic, and a caller that wants no lock at all creates its own Context and
+// goes through ckl::gemm.
 
+#include <cstdint>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
+#include "ckl/context.hpp"
 #include "ckl/gemm.hpp"
+#include "ckl/status.hpp"
+
+#include "detail/cublas_scal.hpp"
 
 namespace ckl {
 
@@ -46,20 +58,20 @@ const char* cublas_status_string(cublasStatus_t s) {
 
 void check_cublas(cublasStatus_t s, const char* expr) {
     if (s != CUBLAS_STATUS_SUCCESS) {
-        throw std::runtime_error(std::string("cuBLAS error ") + cublas_status_string(s) + ": " +
-                                 expr);
+        Status mapped = Status::kExecutionFailed;
+        if (s == CUBLAS_STATUS_ARCH_MISMATCH) {
+            mapped = Status::kArchMismatch;
+        } else if (s == CUBLAS_STATUS_NOT_INITIALIZED) {
+            mapped = Status::kNotInitialized;
+        } else if (s == CUBLAS_STATUS_ALLOC_FAILED) {
+            mapped = Status::kAllocFailed;
+        } else if (s == CUBLAS_STATUS_INVALID_VALUE) {
+            mapped = Status::kInvalidValue;
+        } else if (s == CUBLAS_STATUS_NOT_SUPPORTED) {
+            mapped = Status::kNotSupported;
+        }
+        throw Error(mapped, std::string("cuBLAS error ") + cublas_status_string(s) + ": " + expr);
     }
-}
-
-// One cached handle for the process. cuBLAS handles are not cheap to create and
-// the sweep calls this thousands of times.
-cublasHandle_t handle() {
-    static cublasHandle_t h = [] {
-        cublasHandle_t created = nullptr;
-        check_cublas(cublasCreate(&created), "cublasCreate");
-        return created;
-    }();
-    return h;
 }
 
 }  // namespace
@@ -69,12 +81,13 @@ void gemm_cublas(const float* a, const float* b, float* c, int m, int n, int k, 
     if (m <= 0 || n <= 0) {
         return;
     }
-    cublasHandle_t h = handle();
+    auto* h = static_cast<cublasHandle_t>(detail::default_context().cublas());
+    std::lock_guard<std::mutex> lock(detail::default_context_mutex());
     check_cublas(cublasSetStream(h, stream), "cublasSetStream");
     if (k <= 0) {
         // Empty contraction: C = beta * C. cuBLAS rejects a zero leading
         // dimension, so scale directly rather than calling SGEMM with lda == 0.
-        check_cublas(cublasSscal(h, m * n, &beta, c, 1), "cublasSscal");
+        detail::scal_all(h, static_cast<std::int64_t>(m) * n, beta, c);
         return;
     }
     // See the file header for the transpose identity. Compute

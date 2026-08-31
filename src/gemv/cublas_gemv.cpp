@@ -1,14 +1,22 @@
 // cuBLAS SGEMV oracle producing the same row major result. cuBLAS is column
 // major, so our row major A (m by n) is a column major (n by m) matrix; asking
 // cuBLAS for op(A) = transpose with dimensions (n, m) computes A_rowmajor times x.
+//
+// The handle comes from the process wide default Context rather than from a
+// function local static. The old static was never destroyed and cublasSetStream
+// on it raced across threads; the lock makes the set-stream plus call pair
+// atomic, and a caller that wants no lock creates its own Context.
 
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
+#include "ckl/context.hpp"
 #include "ckl/gemv.hpp"
+#include "ckl/status.hpp"
 
 namespace ckl {
 
@@ -16,17 +24,10 @@ namespace {
 
 void check(cublasStatus_t s, const char* expr) {
     if (s != CUBLAS_STATUS_SUCCESS) {
-        throw std::runtime_error(std::string("cuBLAS error ") + std::to_string(s) + ": " + expr);
+        throw Error(s == CUBLAS_STATUS_ARCH_MISMATCH ? Status::kArchMismatch
+                                                     : Status::kExecutionFailed,
+                    std::string("cuBLAS error ") + cublasGetStatusName(s) + ": " + expr);
     }
-}
-
-cublasHandle_t handle() {
-    static cublasHandle_t h = [] {
-        cublasHandle_t created = nullptr;
-        check(cublasCreate(&created), "cublasCreate");
-        return created;
-    }();
-    return h;
 }
 
 }  // namespace
@@ -36,7 +37,8 @@ void gemv_cublas(const float* a, const float* x, float* y, int m, int n, float a
     if (m <= 0) {
         return;
     }
-    cublasHandle_t h = handle();
+    auto* h = static_cast<cublasHandle_t>(detail::default_context().cublas());
+    std::lock_guard<std::mutex> lock(detail::default_context_mutex());
     check(cublasSetStream(h, stream), "cublasSetStream");
     if (n <= 0) {
         check(cublasSscal(h, m, &beta, y, 1), "cublasSscal");

@@ -3,6 +3,7 @@
 // a shfl_down reduction sums the lane partials. This is the coalescing fix over
 // the naive kernel and, being memory bound, it should track achievable bandwidth.
 
+#include "ckl/cuda_check.hpp"
 #include "ckl/gemv.hpp"
 
 namespace ckl {
@@ -31,7 +32,8 @@ __global__ void gemv_warp_kernel(const float* __restrict__ a, const float* __res
     }
     sum = warp_reduce_sum(sum);
     if (lane == 0) {
-        y[warp_id] = alpha * sum + beta * y[warp_id];
+        // y is not read when beta is zero, per the BLAS contract.
+        y[warp_id] = (beta == 0.0f) ? alpha * sum : alpha * sum + beta * y[warp_id];
     }
 }
 
@@ -46,6 +48,7 @@ void gemv_warp(const float* a, const float* x, float* y, int m, int n, float alp
     constexpr int kBlock = kWarpsPerBlock * 32;
     const int grid = (m + kWarpsPerBlock - 1) / kWarpsPerBlock;
     gemv_warp_kernel<<<grid, kBlock, 0, stream>>>(a, x, y, m, n, alpha, beta);
+    CKL_CUDA_LAST_ERROR(false);
 }
 
 }  // namespace ckl

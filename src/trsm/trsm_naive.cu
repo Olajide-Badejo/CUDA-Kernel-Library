@@ -4,6 +4,7 @@
 // their contribution. Parallelism is limited to the n columns, which is the
 // weakness the blocked variant addresses by turning most of the work into a GEMM.
 
+#include "ckl/cuda_check.hpp"
 #include "ckl/trsm.hpp"
 
 namespace ckl {
@@ -34,6 +35,7 @@ void trsm_naive(const float* a, float* b, int m, int n, float alpha, cudaStream_
     constexpr int kBlock = 128;
     const int grid = (n + kBlock - 1) / kBlock;
     trsm_naive_kernel<<<grid, kBlock, 0, stream>>>(a, b, m, n, alpha);
+    CKL_CUDA_LAST_ERROR(false);
 }
 
 }  // namespace ckl

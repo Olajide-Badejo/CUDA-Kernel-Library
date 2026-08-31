@@ -4,6 +4,7 @@
 // instruction count and moving wider transactions is the lever that matters.
 // Requires n to be a multiple of 4; other n use the scalar warp kernel.
 
+#include "ckl/cuda_check.hpp"
 #include "ckl/gemv.hpp"
 
 namespace ckl {
@@ -37,7 +38,8 @@ __global__ void gemv_vectorized_kernel(const float* __restrict__ a, const float*
     }
     sum = warp_reduce_sum(sum);
     if (lane == 0) {
-        y[warp_id] = alpha * sum + beta * y[warp_id];
+        // y is not read when beta is zero, per the BLAS contract.
+        y[warp_id] = (beta == 0.0f) ? alpha * sum : alpha * sum + beta * y[warp_id];
     }
 }
 
@@ -56,6 +58,7 @@ void gemv_vectorized(const float* a, const float* x, float* y, int m, int n, flo
     constexpr int kBlock = kWarpsPerBlock * 32;
     const int grid = (m + kWarpsPerBlock - 1) / kWarpsPerBlock;
     gemv_vectorized_kernel<<<grid, kBlock, 0, stream>>>(a, x, y, m, n, alpha, beta);
+    CKL_CUDA_LAST_ERROR(false);
 }
 
 }  // namespace ckl

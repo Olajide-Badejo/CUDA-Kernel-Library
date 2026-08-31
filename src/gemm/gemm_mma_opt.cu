@@ -21,6 +21,8 @@
 #include <cuda_fp16.h>
 #include <cuda_pipeline.h>
 
+#include "ckl/context.hpp"
+#include "ckl/cuda_check.hpp"
 #include "ckl/gemm.hpp"
 
 namespace ckl {
@@ -35,9 +37,19 @@ constexpr int kWarpsN = 4;
 constexpr int kThreads = kWarpsM * kWarpsN * 32;  // 256
 constexpr int kWarpM = kBM / kWarpsM;             // 64
 constexpr int kWarpN = kBN / kWarpsN;             // 32
-constexpr int kMTiles = kWarpM / 16;              // 4
-constexpr int kNTiles = kWarpN / 8;               // 4
-constexpr int kKSub = kBK / 16;                   // 2
+// Used only inside the guarded device body, so below the architecture floor
+// they have no reader and nvcc's unreferenced variable diagnostic, which is an
+// error under CKL_WERROR, would fire.
+[[maybe_unused]] constexpr int kMTiles = kWarpM / 16;  // 4
+[[maybe_unused]] constexpr int kNTiles = kWarpN / 8;   // 4
+[[maybe_unused]] constexpr int kKSub = kBK / 16;       // 2
+// cp.async, ldmatrix and mma.sync.m16n8k16 together: sm_80 is the floor.
+constexpr int kMinArch = 80;
+
+// The PTX and the cp.async intrinsics below only assemble on sm_80 and newer,
+// and an unused device function still reaches ptxas, so the helpers sit inside
+// the same guard as the kernel body that calls them.
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
 
 __device__ inline uint32_t smem_u32(const void* p) {
     return static_cast<uint32_t>(__cvta_generic_to_shared(p));
@@ -81,6 +93,8 @@ __device__ inline void mma_m16n8k16(float (&d)[4], const uint32_t (&a)[4], const
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
 }
 
+#endif  // __CUDA_ARCH__ >= 800
+
 // FUSE_BIAS folds a per column bias add and a ReLU into the epilogue, while the
 // accumulator is still in registers, so no extra pass over C is needed. The
 // default (false) path is the plain kernel used everywhere else.
@@ -90,6 +104,7 @@ __global__ __launch_bounds__(kThreads) void gemm_mma_opt_kernel(const __half* __
                                                                 float* __restrict__ c, int m, int n,
                                                                 int k, float alpha, float beta,
                                                                 const float* __restrict__ bias) {
+#if __CUDA_ARCH__ >= 800
     __shared__ __align__(16) __half as[2][kBM * kBK];  // [buf][row][kk]
     __shared__ __align__(16) __half bs[2][kBK * kBN];  // [buf][kk][col]
 
@@ -184,6 +199,13 @@ __global__ __launch_bounds__(kThreads) void gemm_mma_opt_kernel(const __half* __
                 c[i01] = relu(alpha * acc[mi][ni][1] + bias[c1]);
                 c[i10] = relu(alpha * acc[mi][ni][2] + bias[c0]);
                 c[i11] = relu(alpha * acc[mi][ni][3] + bias[c1]);
+            } else if (beta == 0.0f) {
+                // C is not read when beta is zero, per the BLAS contract, so an
+                // uninitialized or NaN C is legal input.
+                c[i00] = alpha * acc[mi][ni][0];
+                c[i01] = alpha * acc[mi][ni][1];
+                c[i10] = alpha * acc[mi][ni][2];
+                c[i11] = alpha * acc[mi][ni][3];
             } else {
                 c[i00] = alpha * acc[mi][ni][0] + beta * c[i00];
                 c[i01] = alpha * acc[mi][ni][1] + beta * c[i01];
@@ -192,6 +214,20 @@ __global__ __launch_bounds__(kThreads) void gemm_mma_opt_kernel(const __half* __
             }
         }
     }
+#else
+    // cp.async, ldmatrix and mma.sync all need sm_80. The launcher checks the
+    // running device before it reaches the aligned path, so this body is never
+    // launched.
+    (void)a;
+    (void)b;
+    (void)c;
+    (void)m;
+    (void)n;
+    (void)k;
+    (void)alpha;
+    (void)beta;
+    (void)bias;
+#endif
 }
 
 // Standalone bias plus ReLU epilogue, the unfused path: reads C, adds the column
@@ -220,19 +256,32 @@ void gemm_mma_opt(const __half* a, const __half* b, float* c, int m, int n, int 
         gemm_wmma_fp16(a, b, c, m, n, k, alpha, beta, stream);
         return;
     }
+    detail::require_arch(kMinArch, "gemm_mma_opt");
     const dim3 block(kThreads);
     const dim3 grid(n / kBN, m / kBM);
     gemm_mma_opt_kernel<false><<<grid, block, 0, stream>>>(a, b, c, m, n, k, alpha, beta, nullptr);
+    CKL_CUDA_LAST_ERROR(false);
 }
 
 void gemm_mma_opt_bias(const __half* a, const __half* b, float* c, const float* bias, int m, int n,
                        int k, float alpha, cudaStream_t stream) {
-    if (m <= 0 || n <= 0 || !aligned(m, n, k)) {
-        return;  // fusion study drives aligned shapes only
+    if (m <= 0 || n <= 0) {
+        return;  // no output elements, so nothing to write
     }
+    if (!aligned(m, n, k)) {
+        // This used to return without writing C, which reads to the caller as a
+        // successful fused GEMM that produced garbage. The fused epilogue has no
+        // unaligned form; the caller runs an unfused GEMM plus gemm_bias_relu
+        // instead, and the dispatcher routes it that way.
+        throw Error(Status::kNotSupported,
+                    "gemm_mma_opt_bias needs m and n divisible by 128 and k divisible by 32; run "
+                    "an unfused GEMM followed by gemm_bias_relu for other shapes");
+    }
+    detail::require_arch(kMinArch, "gemm_mma_opt_bias");
     const dim3 block(kThreads);
     const dim3 grid(n / kBN, m / kBM);
     gemm_mma_opt_kernel<true><<<grid, block, 0, stream>>>(a, b, c, m, n, k, alpha, 0.0f, bias);
+    CKL_CUDA_LAST_ERROR(false);
 }
 
 void gemm_bias_relu(float* c, const float* bias, int m, int n, cudaStream_t stream) {
@@ -243,6 +292,7 @@ void gemm_bias_relu(float* c, const float* bias, int m, int n, cudaStream_t stre
     const long long total = static_cast<long long>(m) * n;
     const int grid = static_cast<int>((total + kBlock - 1) / kBlock);
     bias_relu_kernel<<<grid, kBlock, 0, stream>>>(c, bias, m, n);
+    CKL_CUDA_LAST_ERROR(false);
 }
 
 }  // namespace ckl

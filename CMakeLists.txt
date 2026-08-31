@@ -9,11 +9,12 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 # CXX is enabled alongside CUDA because the math library wrappers and some tests
-# are plain host translation units.
+# are plain host translation units. C is enabled so the C ABI test compiles as
+# C99 rather than as C++ that happens to parse.
 project(cuda_kernel_lab
     VERSION 1.1.0
     DESCRIPTION "CUDA kernel library driven from naive to compute bound tensor core GEMM"
-    LANGUAGES CXX CUDA)
+    LANGUAGES C CXX CUDA)
 
 # ---------------------------------------------------------------------------
 # Language standards
@@ -26,6 +27,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # accepts C++20 for device code.
 set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+# The C ABI is C99 and the test that exercises it is compiled as C99.
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -164,13 +170,21 @@ if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/telemetry/CMakeLists.txt")
     add_subdirectory(src/telemetry)
 endif()
 
+# Added last because ckl_api links the family libraries. ckl_core, defined in the
+# same directory, sits underneath them instead: the families reference it by name
+# above and CMake resolves that at generate time.
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/api/CMakeLists.txt")
+    add_subdirectory(src/api)
+endif()
+
 # ---------------------------------------------------------------------------
 # Aggregate target: one link line for a consumer that wants the whole library
 # ---------------------------------------------------------------------------
 add_library(ckl INTERFACE)
 add_library(ckl::ckl ALIAS ckl)
 target_link_libraries(ckl INTERFACE
-    ckl_headers ckl_gemm ckl_gemv ckl_sparse ckl_trsm ckl_solver ckl_telemetry)
+    ckl_headers ckl_core ckl_api
+    ckl_gemm ckl_gemv ckl_sparse ckl_trsm ckl_solver ckl_telemetry)
 
 # ---------------------------------------------------------------------------
 # Tools, tests, benchmarks, and the later phase hooks

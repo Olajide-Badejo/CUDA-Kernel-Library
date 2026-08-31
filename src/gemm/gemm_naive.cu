@@ -4,6 +4,7 @@
 // the honest baseline the ladder improves on, and its Nsight profile is the
 // memory bound starting picture the diagnostic rounds move away from.
 
+#include "ckl/cuda_check.hpp"
 #include "ckl/gemm.hpp"
 
 namespace ckl {
@@ -23,7 +24,9 @@ __global__ void gemm_naive_kernel(const float* __restrict__ a, const float* __re
         acc += a[static_cast<long long>(row) * k + p] * b[static_cast<long long>(p) * n + col];
     }
     const long long idx = static_cast<long long>(row) * n + col;
-    c[idx] = alpha * acc + beta * c[idx];
+    // BLAS says C is not read when beta is zero, so an uninitialized or NaN C is
+    // legal input. The branch is uniform across the whole grid.
+    c[idx] = (beta == 0.0f) ? alpha * acc : alpha * acc + beta * c[idx];
 }
 
 }  // namespace
@@ -37,30 +40,7 @@ void gemm_naive(const float* a, const float* b, float* c, int m, int n, int k, f
     const dim3 block(kBlock, kBlock);
     const dim3 grid((n + kBlock - 1) / kBlock, (m + kBlock - 1) / kBlock);
     gemm_naive_kernel<<<grid, block, 0, stream>>>(a, b, c, m, n, k, alpha, beta);
-}
-
-const char* gemm_variant_name(GemmVariant v) {
-    switch (v) {
-        case GemmVariant::kNaive:
-            return "naive";
-        case GemmVariant::kTiled:
-            return "tiled";
-        case GemmVariant::kRegister:
-            return "register";
-        case GemmVariant::kCpAsync:
-            return "cp_async";
-        case GemmVariant::kWmmaFp16:
-            return "wmma_fp16";
-        case GemmVariant::kWmmaBf16:
-            return "wmma_bf16";
-        case GemmVariant::kMmaPtx:
-            return "mma_ptx";
-        case GemmVariant::kCutlass:
-            return "cutlass";
-        case GemmVariant::kCublas:
-            return "cublas";
-    }
-    return "unknown";
+    CKL_CUDA_LAST_ERROR(false);
 }
 
 }  // namespace ckl

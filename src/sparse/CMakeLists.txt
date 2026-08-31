@@ -8,7 +8,7 @@ add_library(ckl_sparse
 
 target_link_libraries(ckl_sparse
     PUBLIC ckl_headers
-    PRIVATE CUDA::cusparse
+    PRIVATE ckl_core CUDA::cusparse
 )
 
 ckl_configure_library(ckl_sparse sparse)

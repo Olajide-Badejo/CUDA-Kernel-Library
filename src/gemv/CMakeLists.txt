@@ -9,7 +9,7 @@ add_library(ckl_gemv
 
 target_link_libraries(ckl_gemv
     PUBLIC ckl_headers
-    PRIVATE CUDA::cublas
+    PRIVATE ckl_core CUDA::cublas
 )
 
 ckl_configure_library(ckl_gemv gemv)

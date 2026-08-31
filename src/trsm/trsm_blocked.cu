@@ -9,6 +9,7 @@
 // alpha is applied once by scaling B up front, so the block solves and the update
 // run with alpha folded in.
 
+#include "ckl/cuda_check.hpp"
 #include "ckl/trsm.hpp"
 
 namespace ckl {
@@ -72,6 +73,7 @@ void trsm_blocked(const float* a, float* b, int m, int n, float alpha, cudaStrea
         constexpr int kThreads = 256;
         const int grid = static_cast<int>((count + kThreads - 1) / kThreads);
         scale_kernel<<<grid, kThreads, 0, stream>>>(b, count, alpha);
+        CKL_CUDA_LAST_ERROR(false);
     }
 
     for (int k = 0; k < m; k += kBS) {
@@ -80,12 +82,14 @@ void trsm_blocked(const float* a, float* b, int m, int n, float alpha, cudaStrea
             constexpr int kBlock = 128;
             const int grid = (n + kBlock - 1) / kBlock;
             block_solve_kernel<<<grid, kBlock, 0, stream>>>(a, b, m, n, k, kb);
+            CKL_CUDA_LAST_ERROR(false);
         }
         const int rows_below = m - (k + kb);
         if (rows_below > 0) {
             const dim3 block(32, 8);
             const dim3 grid((n + block.x - 1) / block.x, (rows_below + block.y - 1) / block.y);
             trailing_update_kernel<<<grid, block, 0, stream>>>(a, b, m, n, k, kb);
+            CKL_CUDA_LAST_ERROR(false);
         }
     }
 }

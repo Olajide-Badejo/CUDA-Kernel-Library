@@ -10,10 +10,26 @@ add_library(ckl_test_support INTERFACE)
 target_include_directories(ckl_test_support INTERFACE "${CMAKE_CURRENT_LIST_DIR}/support")
 
 add_executable(test_gemm test_gemm.cpp)
-target_link_libraries(test_gemm PRIVATE ckl_gemm ckl_headers ckl_test_support)
+target_link_libraries(test_gemm PRIVATE ckl_api ckl_gemm ckl_headers ckl_test_support)
 ckl_set_warnings(test_gemm)
 add_test(NAME gemm_correctness COMMAND test_gemm)
 set_tests_properties(gemm_correctness PROPERTIES LABELS "gpu")
+
+# The C ABI test is two translation units on purpose. test_c_abi.c is C99 and
+# includes no CUDA header, which is the property being tested; the device memory
+# it needs comes from a C++ shim that exposes a plain C interface.
+if(TARGET ckl_api)
+    add_executable(test_c_abi test_c_abi.c test_c_abi_support.cpp)
+    set_source_files_properties(test_c_abi.c PROPERTIES LANGUAGE C)
+    set_target_properties(test_c_abi PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON)
+    target_include_directories(test_c_abi PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
+    target_link_libraries(test_c_abi PRIVATE ckl_api ckl_headers CUDA::cudart)
+    target_compile_options(test_c_abi PRIVATE
+        $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Wpedantic -Wshadow -Wconversion>)
+    ckl_set_warnings(test_c_abi)
+    add_test(NAME c_abi COMMAND test_c_abi)
+    set_tests_properties(c_abi PROPERTIES LABELS "gpu")
+endif()
 
 add_executable(test_gemm_tensor test_gemm_tensor.cpp)
 target_link_libraries(test_gemm_tensor PRIVATE ckl_gemm ckl_headers ckl_test_support)

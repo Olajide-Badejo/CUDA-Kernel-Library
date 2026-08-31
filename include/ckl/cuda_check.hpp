@@ -4,6 +4,12 @@
 // Every CUDA call in this project goes through one of these macros so a
 // failure surfaces at the call site with file and line rather than as a
 // silent wrong answer three kernels later.
+//
+// The exception carries a ckl::Status, so the C ABI shim can map a failure to a
+// code without parsing the message. The mapping that matters most is
+// cudaErrorNoKernelImageForDevice, which is what a fatbin with no SASS for the
+// running device produces: that is an architecture mismatch, not an internal
+// error, and the caller needs to be told so.
 
 #include <cstdio>
 #include <cstdlib>
@@ -12,12 +18,51 @@
 
 #include <cuda_runtime.h>
 
+#include "ckl/status.hpp"
+
 namespace ckl {
+
+// Header only, so no translation unit picks up a link dependency just for
+// checking a CUDA call.
+inline Status status_from_cuda(cudaError_t e) {
+    switch (e) {
+        case cudaSuccess:
+            return Status::kSuccess;
+        case cudaErrorNoKernelImageForDevice:
+        case cudaErrorInvalidDeviceFunction:
+        case cudaErrorUnsupportedPtxVersion:
+        case cudaErrorJitCompilationDisabled:
+            return Status::kArchMismatch;
+        case cudaErrorMemoryAllocation:
+            return Status::kAllocFailed;
+        case cudaErrorNoDevice:
+        case cudaErrorInsufficientDriver:
+        case cudaErrorInitializationError:
+        case cudaErrorDevicesUnavailable:
+            return Status::kNotInitialized;
+        case cudaErrorNotSupported:
+            return Status::kNotSupported;
+        case cudaErrorInvalidValue:
+        case cudaErrorInvalidDevice:
+        case cudaErrorInvalidPitchValue:
+        case cudaErrorInvalidMemcpyDirection:
+            return Status::kInvalidValue;
+        case cudaErrorLaunchFailure:
+        case cudaErrorLaunchTimeout:
+        case cudaErrorLaunchOutOfResources:
+        case cudaErrorIllegalAddress:
+        case cudaErrorIllegalInstruction:
+        case cudaErrorMisalignedAddress:
+            return Status::kExecutionFailed;
+        default:
+            return Status::kInternal;
+    }
+}
 
 [[noreturn]] inline void fail(const char* what, const char* expr, const char* file, int line) {
     std::string msg =
         std::string(what) + " failed: " + expr + " at " + file + ":" + std::to_string(line);
-    throw std::runtime_error(msg);
+    throw Error(Status::kInternal, msg);
 }
 
 inline void check_cuda(cudaError_t status, const char* expr, const char* file, int line) {
@@ -25,7 +70,7 @@ inline void check_cuda(cudaError_t status, const char* expr, const char* file, i
         std::string msg = std::string("CUDA error ") + cudaGetErrorName(status) + " (" +
                           cudaGetErrorString(status) + "): " + expr + " at " + file + ":" +
                           std::to_string(line);
-        throw std::runtime_error(msg);
+        throw Error(status_from_cuda(status), msg);
     }
 }
 

@@ -12,26 +12,28 @@
 
 #include <cuda_runtime.h>
 
+#include "ckl/ckl_export.h"
+
 namespace ckl {
 
 // One thread per output row, scalar loads across the row. Simple and coalescing
 // poor: adjacent threads read down a column of A, one row apart in memory.
-void gemv_naive(const float* a, const float* x, float* y, int m, int n, float alpha, float beta,
+CKL_EXPORT void gemv_naive(const float* a, const float* x, float* y, int m, int n, float alpha, float beta,
                 cudaStream_t stream = nullptr);
 
 // One warp per output row, each lane strides across the row and the partial sums
 // are combined with a shfl reduction. Adjacent lanes read adjacent A elements, so
 // the row read coalesces.
-void gemv_warp(const float* a, const float* x, float* y, int m, int n, float alpha, float beta,
+CKL_EXPORT void gemv_warp(const float* a, const float* x, float* y, int m, int n, float alpha, float beta,
                cudaStream_t stream = nullptr);
 
 // One warp per row with float4 loads of A and x, quartering the number of memory
 // instructions. Requires n a multiple of 4; other n fall back to the warp kernel.
-void gemv_vectorized(const float* a, const float* x, float* y, int m, int n, float alpha,
+CKL_EXPORT void gemv_vectorized(const float* a, const float* x, float* y, int m, int n, float alpha,
                      float beta, cudaStream_t stream = nullptr);
 
 // cuBLAS SGEMV oracle and baseline, producing the same row major result.
-void gemv_cublas(const float* a, const float* x, float* y, int m, int n, float alpha, float beta,
+CKL_EXPORT void gemv_cublas(const float* a, const float* x, float* y, int m, int n, float alpha, float beta,
                  cudaStream_t stream = nullptr);
 
 }  // namespace ckl

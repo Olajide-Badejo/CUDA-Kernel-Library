@@ -3,6 +3,7 @@
 // assigned the long rows run far longer than their warp neighbors, so the warp
 // retires at the speed of its slowest row. The warp per row variant fixes that.
 
+#include "ckl/cuda_check.hpp"
 #include "ckl/sparse.hpp"
 
 namespace ckl {
@@ -23,7 +24,8 @@ __global__ void spmv_csr_naive_kernel(const int* __restrict__ row_ptr,
     for (int k = start; k < end; ++k) {
         sum += values[k] * x[col_idx[k]];
     }
-    y[row] = alpha * sum + beta * y[row];
+    // y is not read when beta is zero, per the BLAS contract.
+    y[row] = (beta == 0.0f) ? alpha * sum : alpha * sum + beta * y[row];
 }
 
 }  // namespace
@@ -39,6 +41,7 @@ void spmv_csr_naive(const int* row_ptr, const int* col_idx, const float* values,
     const int grid = (m + kBlock - 1) / kBlock;
     spmv_csr_naive_kernel<<<grid, kBlock, 0, stream>>>(row_ptr, col_idx, values, x, y, m, alpha,
                                                        beta);
+    CKL_CUDA_LAST_ERROR(false);
 }
 
 }  // namespace ckl

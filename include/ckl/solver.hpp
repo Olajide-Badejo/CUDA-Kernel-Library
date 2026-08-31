@@ -11,20 +11,28 @@
 // residual norm check in the tests passes, not merely that no CUDA error fired.
 
 #include <cstdint>
+#include <memory>
 
 #include <cuda_runtime.h>
+
+#include "ckl/ckl_export.h"
 
 namespace ckl {
 
 enum class Fill { kLower, kUpper };
 
-class DenseSolver {
+class CKL_EXPORT DenseSolver {
 public:
     DenseSolver();
     ~DenseSolver();
 
     DenseSolver(const DenseSolver&) = delete;
     DenseSolver& operator=(const DenseSolver&) = delete;
+
+    // Movable, so a solver can be returned or stored in a container. A moved
+    // from solver holds no handle; calling a solve on it throws.
+    DenseSolver(DenseSolver&&) noexcept;
+    DenseSolver& operator=(DenseSolver&&) noexcept;
 
     void set_stream(cudaStream_t stream);
 
@@ -39,7 +47,7 @@ public:
 
 private:
     struct Impl;
-    Impl* impl_;
+    std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace ckl

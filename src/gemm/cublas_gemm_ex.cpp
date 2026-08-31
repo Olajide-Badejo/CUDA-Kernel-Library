@@ -3,7 +3,14 @@
 // tensor kernels through the same transpose identity used for SGEMM. These are
 // the per precision baselines the WMMA and mma.sync variants are measured
 // against.
+//
+// The handle comes from the process wide default Context rather than from a
+// function local static. The old static was never destroyed and cublasSetStream
+// on it raced across threads; the lock makes the set-stream plus call pair
+// atomic, and a caller that wants no lock creates its own Context.
 
+#include <cstdint>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
@@ -12,7 +19,11 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include "ckl/context.hpp"
 #include "ckl/gemm.hpp"
+#include "ckl/status.hpp"
+
+#include "detail/cublas_scal.hpp"
 
 namespace ckl {
 
@@ -20,17 +31,10 @@ namespace {
 
 void check(cublasStatus_t s, const char* expr) {
     if (s != CUBLAS_STATUS_SUCCESS) {
-        throw std::runtime_error(std::string("cuBLAS error ") + std::to_string(s) + ": " + expr);
+        throw Error(s == CUBLAS_STATUS_ARCH_MISMATCH ? Status::kArchMismatch
+                                                     : Status::kExecutionFailed,
+                    std::string("cuBLAS error ") + cublasGetStatusName(s) + ": " + expr);
     }
-}
-
-cublasHandle_t handle() {
-    static cublasHandle_t h = [] {
-        cublasHandle_t created = nullptr;
-        check(cublasCreate(&created), "cublasCreate");
-        return created;
-    }();
-    return h;
 }
 
 // Shared body: compute C_transpose(n by m) = B_transpose * A_transpose so the
@@ -41,11 +45,13 @@ void gemm_ex(const void* a, const void* b, float* c, int m, int n, int k, float 
     if (m <= 0 || n <= 0) {
         return;
     }
-    cublasHandle_t h = handle();
+    auto* h = static_cast<cublasHandle_t>(detail::default_context().cublas());
+    std::lock_guard<std::mutex> lock(detail::default_context_mutex());
     check(cublasSetStream(h, stream), "cublasSetStream");
     if (k <= 0) {
-        // Empty contraction: C = beta * C. Scale the FP32 output directly.
-        check(cublasSscal(h, m * n, &beta, c, 1), "cublasSscal");
+        // Empty contraction: C = beta * C. Scale the FP32 output directly, with
+        // the element count in 64 bits.
+        detail::scal_all(h, static_cast<std::int64_t>(m) * n, beta, c);
         return;
     }
     check(cublasGemmEx(h, CUBLAS_OP_N, CUBLAS_OP_N, n, m, k, &alpha, b, in_type, n, a, in_type, k,

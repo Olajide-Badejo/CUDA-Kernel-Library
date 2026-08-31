@@ -13,6 +13,7 @@
 // problem; the dispatcher below falls back to the tiled kernel for shapes that
 // do not align, which keeps correctness on odd and degenerate sizes.
 
+#include "ckl/cuda_check.hpp"
 #include "ckl/gemm.hpp"
 
 namespace ckl {
@@ -93,6 +94,20 @@ __global__ __launch_bounds__(kThreads) void gemm_register_kernel(const float* __
         __syncthreads();
     }
 
+    // C is not read when beta is zero, so the whole epilogue splits on it once
+    // rather than multiplying a possibly NaN C by zero 64 times per thread.
+    if (beta == 0.0f) {
+#pragma unroll
+        for (int i = 0; i < kTM; ++i) {
+            const int row = block_row + thread_row + i;
+#pragma unroll
+            for (int j = 0; j < kTN; ++j) {
+                const int col = block_col + thread_col + j;
+                c[static_cast<long long>(row) * n + col] = alpha * acc[i][j];
+            }
+        }
+        return;
+    }
 #pragma unroll
     for (int i = 0; i < kTM; ++i) {
         const int row = block_row + thread_row + i;
@@ -125,6 +140,7 @@ void gemm_register(const float* a, const float* b, float* c, int m, int n, int k
     const dim3 block(kThreads);
     const dim3 grid(n / kBN, m / kBM);
     gemm_register_kernel<<<grid, block, 0, stream>>>(a, b, c, m, n, k, alpha, beta);
+    CKL_CUDA_LAST_ERROR(false);
 }
 
 }  // namespace ckl

@@ -4,6 +4,7 @@
 // apart, so the loads do not coalesce. This is the honest baseline the warp and
 // vectorized variants improve on.
 
+#include "ckl/cuda_check.hpp"
 #include "ckl/gemv.hpp"
 
 namespace ckl {
@@ -21,7 +22,9 @@ __global__ void gemv_naive_kernel(const float* __restrict__ a, const float* __re
     for (int j = 0; j < n; ++j) {
         sum += a[base + j] * x[j];
     }
-    y[row] = alpha * sum + beta * y[row];
+    // y is not read when beta is zero; BLAS allows an uninitialized or NaN y
+    // in that case.
+    y[row] = (beta == 0.0f) ? alpha * sum : alpha * sum + beta * y[row];
 }
 
 }  // namespace
@@ -34,6 +37,7 @@ void gemv_naive(const float* a, const float* x, float* y, int m, int n, float al
     constexpr int kBlock = 128;
     const int grid = (m + kBlock - 1) / kBlock;
     gemv_naive_kernel<<<grid, kBlock, 0, stream>>>(a, x, y, m, n, alpha, beta);
+    CKL_CUDA_LAST_ERROR(false);
 }
 
 }  // namespace ckl

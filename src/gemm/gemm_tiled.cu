@@ -8,6 +8,7 @@
 // The shared tiles carry one column of padding so the staging loads, which
 // write column adjacent elements, do not collide on shared memory banks.
 
+#include "ckl/cuda_check.hpp"
 #include "ckl/gemm.hpp"
 
 namespace ckl {
@@ -46,7 +47,9 @@ __global__ void gemm_tiled_kernel(const float* __restrict__ a, const float* __re
 
     if (row < m && col < n) {
         const long long idx = static_cast<long long>(row) * n + col;
-        c[idx] = alpha * acc + beta * c[idx];
+        // C is not read when beta is zero: BLAS allows an uninitialized or NaN C
+        // in that case, and the branch is uniform across the grid.
+        c[idx] = (beta == 0.0f) ? alpha * acc : alpha * acc + beta * c[idx];
     }
 }
 
@@ -67,6 +70,7 @@ void gemm_tiled(const float* a, const float* b, float* c, int m, int n, int k, f
     const dim3 block(kTile, kTile);
     const dim3 grid((n + kTile - 1) / kTile, (m + kTile - 1) / kTile);
     gemm_tiled_kernel<<<grid, block, 0, stream>>>(a, b, c, m, n, k, alpha, beta);
+    CKL_CUDA_LAST_ERROR(false);
 }
 
 }  // namespace ckl

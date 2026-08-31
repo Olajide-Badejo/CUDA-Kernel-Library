@@ -4,14 +4,17 @@
 
 #include "ckl/solver.hpp"
 
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <cusolverDn.h>
 
 #include "ckl/cuda_check.hpp"
 #include "ckl/device_buffer.hpp"
+#include "ckl/status.hpp"
 
 namespace ckl {
 
@@ -19,7 +22,9 @@ namespace {
 
 void check(cusolverStatus_t s, const char* expr) {
     if (s != CUSOLVER_STATUS_SUCCESS) {
-        throw std::runtime_error(std::string("cuSOLVER error ") + std::to_string(s) + ": " + expr);
+        throw Error(Status::kExecutionFailed, std::string("cuSOLVER error ") +
+                                                  std::to_string(static_cast<int>(s)) + ": " +
+                                                  expr);
     }
 }
 
@@ -31,12 +36,27 @@ int read_info(const DeviceBuffer<int>& info) {
 
 }  // namespace
 
+// The handle is created and destroyed by Impl itself. The v1 code created it in
+// the DenseSolver constructor after new Impl(), so a throwing cusolverDnCreate
+// leaked the Impl; here the allocation is owned by a unique_ptr before anything
+// can throw, and the members already built unwind normally.
 struct DenseSolver::Impl {
     cusolverDnHandle_t handle = nullptr;
     cudaStream_t stream = nullptr;
     DeviceBuffer<float> workspace;
     DeviceBuffer<int> pivots;
     DeviceBuffer<int> info{1};
+
+    Impl() { check(cusolverDnCreate(&handle), "cusolverDnCreate"); }
+
+    ~Impl() {
+        if (handle != nullptr) {
+            cusolverDnDestroy(handle);
+        }
+    }
+
+    Impl(const Impl&) = delete;
+    Impl& operator=(const Impl&) = delete;
 
     void ensure_workspace(int lwork) {
         if (static_cast<int>(workspace.size()) < lwork) {
@@ -45,25 +65,26 @@ struct DenseSolver::Impl {
     }
 };
 
-DenseSolver::DenseSolver() : impl_(new Impl()) {
-    check(cusolverDnCreate(&impl_->handle), "cusolverDnCreate");
-}
+DenseSolver::DenseSolver() : impl_(std::make_unique<Impl>()) {}
 
-DenseSolver::~DenseSolver() {
-    if (impl_ != nullptr) {
-        if (impl_->handle != nullptr) {
-            cusolverDnDestroy(impl_->handle);
-        }
-        delete impl_;
-    }
-}
+DenseSolver::~DenseSolver() = default;
+
+DenseSolver::DenseSolver(DenseSolver&&) noexcept = default;
+
+DenseSolver& DenseSolver::operator=(DenseSolver&&) noexcept = default;
 
 void DenseSolver::set_stream(cudaStream_t stream) {
+    if (!impl_) {
+        throw Error(Status::kNotInitialized, "DenseSolver used after it was moved from");
+    }
     impl_->stream = stream;
     check(cusolverDnSetStream(impl_->handle, stream), "cusolverDnSetStream");
 }
 
 void DenseSolver::solve_lu(float* a, float* b, int n, int nrhs) {
+    if (!impl_) {
+        throw Error(Status::kNotInitialized, "DenseSolver used after it was moved from");
+    }
     if (n <= 0 || nrhs <= 0) {
         return;
     }
@@ -79,18 +100,22 @@ void DenseSolver::solve_lu(float* a, float* b, int n, int nrhs) {
                            impl_->info.data()),
           "cusolverDnSgetrf");
     if (int info = read_info(impl_->info); info != 0) {
-        throw std::runtime_error("LU factorization failed, U is singular at pivot " +
-                                 std::to_string(info));
+        throw Error(Status::kExecutionFailed,
+                    "LU factorization failed, U is singular at pivot " + std::to_string(info));
     }
     check(cusolverDnSgetrs(impl_->handle, CUBLAS_OP_N, n, nrhs, a, n, impl_->pivots.data(), b, n,
                            impl_->info.data()),
           "cusolverDnSgetrs");
     if (int info = read_info(impl_->info); info != 0) {
-        throw std::runtime_error("LU solve reported invalid argument " + std::to_string(info));
+        throw Error(Status::kInvalidValue,
+                    "LU solve reported invalid argument " + std::to_string(info));
     }
 }
 
 void DenseSolver::solve_cholesky(float* a, float* b, int n, int nrhs, Fill fill) {
+    if (!impl_) {
+        throw Error(Status::kNotInitialized, "DenseSolver used after it was moved from");
+    }
     if (n <= 0 || nrhs <= 0) {
         return;
     }
@@ -106,14 +131,15 @@ void DenseSolver::solve_cholesky(float* a, float* b, int n, int nrhs, Fill fill)
                            impl_->info.data()),
           "cusolverDnSpotrf");
     if (int info = read_info(impl_->info); info != 0) {
-        throw std::runtime_error("Cholesky factorization failed, leading minor " +
-                                 std::to_string(info) + " is not positive definite");
+        throw Error(Status::kExecutionFailed, "Cholesky factorization failed, leading minor " +
+                                                 std::to_string(info) +
+                                                 " is not positive definite");
     }
     check(cusolverDnSpotrs(impl_->handle, uplo, n, nrhs, a, n, b, n, impl_->info.data()),
           "cusolverDnSpotrs");
     if (int info = read_info(impl_->info); info != 0) {
-        throw std::runtime_error("Cholesky solve reported invalid argument " +
-                                 std::to_string(info));
+        throw Error(Status::kInvalidValue,
+                    "Cholesky solve reported invalid argument " + std::to_string(info));
     }
 }
 

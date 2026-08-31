@@ -13,14 +13,18 @@
 // the plan rebuilds when the key changes.
 
 #include <cstddef>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
 #include <cuda_runtime.h>
 #include <cusparse.h>
 
+#include "ckl/context.hpp"
 #include "ckl/cuda_check.hpp"
 #include "ckl/sparse.hpp"
+#include "ckl/status.hpp"
 
 namespace ckl {
 
@@ -28,18 +32,10 @@ namespace {
 
 void check(cusparseStatus_t s, const char* expr) {
     if (s != CUSPARSE_STATUS_SUCCESS) {
-        throw std::runtime_error(std::string("cuSPARSE error ") + cusparseGetErrorString(s) + ": " +
-                                 expr);
+        throw Error(s == CUSPARSE_STATUS_ARCH_MISMATCH ? Status::kArchMismatch
+                                                       : Status::kExecutionFailed,
+                    std::string("cuSPARSE error ") + cusparseGetErrorString(s) + ": " + expr);
     }
-}
-
-cusparseHandle_t handle() {
-    static cusparseHandle_t h = [] {
-        cusparseHandle_t created = nullptr;
-        check(cusparseCreate(&created), "cusparseCreate");
-        return created;
-    }();
-    return h;
 }
 
 // What makes two calls the same problem: the buffers cuSPARSE was handed and the
@@ -145,19 +141,26 @@ void spmv_cusparse(const int* row_ptr, const int* col_idx, const float* values, 
     if (m <= 0) {
         return;
     }
-    cusparseHandle_t h = handle();
+    auto* h = static_cast<cusparseHandle_t>(detail::default_context().cusparse());
 
     const PlanKey key{row_ptr, col_idx, values, x, y, m, n, nnz};
-    // One entry, rebuilt when the problem changes. Deliberately never destroyed
-    // at process exit: the cuSPARSE handle above is a leaked static too, and
-    // releasing descriptors after the CUDA context has been torn down is worse
-    // than not releasing them. The old plan is destroyed only once the new one
-    // exists, so a failed rebuild leaves the previous plan usable.
-    static SpmvPlan* cached = nullptr;
-    if (cached == nullptr || !(cached->key() == key)) {
-        SpmvPlan* fresh = new SpmvPlan(h, key, alpha, beta);
-        delete cached;
-        cached = fresh;
+    // One entry, rebuilt when the problem changes. The plan itself is a
+    // unique_ptr, so a rebuild releases the old descriptors and the workspace,
+    // and SpmvPlan's constructor releases whatever it built if a later step
+    // throws. The cache and the shared handle are process wide, so the whole
+    // sequence runs under the default Context's lock.
+    //
+    // The last plan is deliberately released at process exit rather than at
+    // destruction time: it lives inside a function local static that outlives
+    // nothing, and the alternative, destroying cuSPARSE descriptors after the
+    // CUDA context has begun tearing down, is worse than holding them.
+    static std::unique_ptr<SpmvPlan> cached;
+    std::lock_guard<std::mutex> lock(detail::default_context_mutex());
+    if (!cached || !(cached->key() == key)) {
+        // Built before the old one is released, so a failed rebuild leaves the
+        // previous plan usable.
+        auto fresh = std::make_unique<SpmvPlan>(h, key, alpha, beta);
+        cached = std::move(fresh);
     }
     cached->run(h, alpha, beta, stream);
 }

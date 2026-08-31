@@ -3,18 +3,32 @@
 // Shapes cover square, non square, non tile aligned, smaller than one tile, and
 // a zero dimension, per the Phase 1 gate in Section 10.
 //
+// Two more sections follow the shape table. One asserts that beta zero never
+// reads C, by handing every rung a C full of NaN and requiring a finite result:
+// that is the BLAS contract, and it used to fail here. The other asserts that
+// dispatch is honest, by checking what kAuto picks and that an explicitly named
+// algorithm the shape cannot take is refused instead of quietly rerouted.
+//
 // Exit code 0 means every case passed its tolerance; non zero means at least
 // one failed. No test framework on purpose: this keeps the dependency surface
 // small and the failure output is a plain table.
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <string>
 #include <vector>
 
+#include <cuda_fp16.h>
+
+#include "ckl/context.hpp"
 #include "ckl/cuda_check.hpp"
 #include "ckl/device_buffer.hpp"
 #include "ckl/gemm.hpp"
+#include "ckl/status.hpp"
+#include "ckl/types.hpp"
 #include "reference.hpp"
 
 namespace {
@@ -99,6 +113,153 @@ bool run_case(const Shape& s) {
     return ok;
 }
 
+// beta zero must not read C. BLAS says an uninitialized or NaN C is legal input
+// in that case, and the v1 kernels all computed alpha * acc + 0.0f * c[idx],
+// which propagates the NaN. Every rung gets a C of NaN and has to come back
+// finite and equal to alpha * (A * B).
+bool run_beta_zero_case() {
+    std::printf("beta zero does not read C (C seeded with NaN)\n");
+    const int m = 256;
+    const int n = 256;
+    const int k = 256;
+    const float alpha = 1.0f;
+    const auto a = ckl::random_matrix(m, k, 0xbeef);
+    const auto b = ckl::random_matrix(k, n, 0xcafe);
+    const std::vector<float> nan_c(static_cast<std::size_t>(m) * n,
+                                   std::numeric_limits<float>::quiet_NaN());
+    const std::vector<float> zero_c(static_cast<std::size_t>(m) * n, 0.0f);
+
+    // The reference is the same call with a zero C, which every kernel handles
+    // whether or not it honors the contract.
+    const auto ref = run_device_gemm(ckl::gemm_cublas, a, b, zero_c, m, n, k, alpha, 0.0f);
+    const std::vector<double> ref_d(ref.begin(), ref.end());
+
+    bool ok = true;
+    for (const auto& v : hand_written_variants()) {
+        const auto out = run_device_gemm(v.launch, a, b, nan_c, m, n, k, alpha, 0.0f);
+        bool finite = true;
+        for (float value : out) {
+            if (!std::isfinite(value)) {
+                finite = false;
+                break;
+            }
+        }
+        const double err = finite ? ckl::relative_frobenius_error(out, ref_d) : 1.0;
+        const bool pass = finite && err < kTolerance;
+        ok = ok && pass;
+        std::printf("      %-10s finite=%d  err=%.3e  %s\n", v.name, finite ? 1 : 0, err,
+                    pass ? "PASS" : "FAIL");
+    }
+    return ok;
+}
+
+// A square FP16 descriptor with packed leading dimensions.
+ckl::GemmDesc fp16_desc(int n, ckl::Algo algo) {
+    ckl::GemmDesc d;
+    d.layout = ckl::Layout::kRowMajor;
+    d.m = n;
+    d.n = n;
+    d.k = n;
+    d.dt_a = ckl::DType::kR16F;
+    d.dt_b = ckl::DType::kR16F;
+    d.dt_c = ckl::DType::kR32F;
+    d.lda = n;
+    d.ldb = n;
+    d.ldc = n;
+    d.algo = algo;
+    return d;
+}
+
+// Runs one descriptor over matrices of ones, so every output element should be
+// exactly k. Returns the status and writes the algorithm the dispatcher took.
+ckl::Status run_desc(ckl::Context& ctx, const ckl::GemmDesc& d, ckl::Algo* chosen,
+                     double* max_abs_error) {
+    const std::size_t elems = static_cast<std::size_t>(d.m) * static_cast<std::size_t>(d.k);
+    ckl::DeviceBuffer<__half> da(elems);
+    ckl::DeviceBuffer<__half> db(static_cast<std::size_t>(d.k) * static_cast<std::size_t>(d.n));
+    ckl::DeviceBuffer<float> dc(static_cast<std::size_t>(d.m) * static_cast<std::size_t>(d.n));
+    const std::vector<__half> ones(elems, __float2half(1.0f));
+    da.copy_from_host(ones);
+    db.copy_from_host(ones.data(), db.size());
+    dc.zero();
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    const ckl::Status s = ckl::gemm(ctx, d, &alpha, da.data(), db.data(), &beta, dc.data(), chosen);
+    if (s != ckl::Status::kSuccess) {
+        return s;
+    }
+    CKL_CUDA_CHECK(cudaDeviceSynchronize());
+    double worst = 0.0;
+    for (float value : dc.to_host()) {
+        worst = std::max(worst, std::fabs(static_cast<double>(value) - static_cast<double>(d.k)));
+    }
+    *max_abs_error = worst;
+    return s;
+}
+
+// Dispatch has to say what it did. kAuto on a big aligned FP16 shape should land
+// on the top tensor kernel; the same call on a shape no hand kernel can tile
+// should report the vendor path it actually took; and naming a kernel the shape
+// cannot take is refused rather than rerouted.
+bool run_dispatch_smoke() {
+    std::printf("dispatch honesty\n");
+    ckl::Context ctx;
+    bool ok = true;
+
+    {
+        ckl::Algo chosen = ckl::Algo::kAuto;
+        double err = 0.0;
+        const ckl::Status s = run_desc(ctx, fp16_desc(4096, ckl::Algo::kAuto), &chosen, &err);
+        const bool pass = s == ckl::Status::kSuccess && chosen == ckl::Algo::kMmaOpt && err <= 0.0;
+        ok = ok && pass;
+        std::printf("      kAuto   4096^3 fp16 -> status=%-14s chosen=%-9s err=%.1f  %s\n",
+                    ckl::status_string(s), ckl::algo_name(chosen), err, pass ? "PASS" : "FAIL");
+    }
+    {
+        ckl::Algo chosen = ckl::Algo::kAuto;
+        double err = 0.0;
+        const ckl::Status s = run_desc(ctx, fp16_desc(100, ckl::Algo::kAuto), &chosen, &err);
+        // 100 divides none of the block factors, so no hand kernel can take it.
+        // What matters is that chosen names the path that actually ran.
+        const bool pass = s == ckl::Status::kSuccess && chosen == ckl::Algo::kCublas && err <= 0.0;
+        ok = ok && pass;
+        std::printf("      kAuto   100^3  fp16 -> status=%-14s chosen=%-9s err=%.1f  %s\n",
+                    ckl::status_string(s), ckl::algo_name(chosen), err, pass ? "PASS" : "FAIL");
+    }
+    {
+        ckl::Algo chosen = ckl::Algo::kAuto;
+        double err = 0.0;
+        const ckl::Status s = run_desc(ctx, fp16_desc(100, ckl::Algo::kMmaOpt), &chosen, &err);
+        const bool pass = s == ckl::Status::kNotSupported && chosen == ckl::Algo::kMmaOpt;
+        ok = ok && pass;
+        std::printf("      kMmaOpt 100^3  fp16 -> status=%-14s chosen=%-9s  %s\n",
+                    ckl::status_string(s), ckl::algo_name(chosen), pass ? "PASS" : "FAIL");
+    }
+    {
+        // A leading dimension smaller than the row length is a malformed
+        // descriptor, not an unsupported one.
+        ckl::GemmDesc d = fp16_desc(128, ckl::Algo::kAuto);
+        d.ldc = 1;
+        ckl::Algo chosen = ckl::Algo::kAuto;
+        double err = 0.0;
+        const ckl::Status s = run_desc(ctx, d, &chosen, &err);
+        const bool pass = s == ckl::Status::kInvalidValue;
+        ok = ok && pass;
+        std::printf("      bad ldc             -> status=%-14s  %s\n", ckl::status_string(s),
+                    pass ? "PASS" : "FAIL");
+    }
+    {
+        // gemm_query answers without launching anything.
+        const ckl::Algo q = ckl::gemm_query(ctx, fp16_desc(4096, ckl::Algo::kAuto));
+        const bool pass = q == ckl::Algo::kMmaOpt;
+        ok = ok && pass;
+        std::printf("      gemm_query 4096^3   -> %-9s  %s\n", ckl::algo_name(q),
+                    pass ? "PASS" : "FAIL");
+    }
+    return ok;
+}
+
 }  // namespace
 
 int main() {
@@ -114,6 +275,8 @@ int main() {
     for (const auto& s : shapes) {
         all_ok = run_case(s) && all_ok;
     }
+    all_ok = run_beta_zero_case() && all_ok;
+    all_ok = run_dispatch_smoke() && all_ok;
     std::printf("%s\n", all_ok ? "all GEMM cases passed" : "GEMM cases FAILED");
     return all_ok ? 0 : 1;
 }

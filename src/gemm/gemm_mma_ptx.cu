@@ -16,6 +16,8 @@
 
 #include <cuda_fp16.h>
 
+#include "ckl/context.hpp"
+#include "ckl/cuda_check.hpp"
 #include "ckl/gemm.hpp"
 
 namespace ckl {
@@ -30,8 +32,17 @@ constexpr int kWarpsN = 2;
 constexpr int kThreads = kWarpsM * kWarpsN * 32;  // 128
 constexpr int kWarpM = kBM / kWarpsM;             // 32
 constexpr int kWarpN = kBN / kWarpsN;             // 32
-constexpr int kMTiles = kWarpM / 16;              // 2 (m16 per mma)
-constexpr int kNTiles = kWarpN / 8;               // 4 (n8 per mma)
+// Used only inside the guarded device body, so below the architecture floor
+// they have no reader and nvcc's unreferenced variable diagnostic, which is an
+// error under CKL_WERROR, would fire.
+[[maybe_unused]] constexpr int kMTiles = kWarpM / 16;  // 2 (m16 per mma)
+[[maybe_unused]] constexpr int kNTiles = kWarpN / 8;   // 4 (n8 per mma)
+constexpr int kMinArch = 80;                      // mma.sync.aligned.m16n8k16
+
+// The PTX below only assembles on sm_80 and newer, and an unused device
+// function still reaches ptxas, so the helpers sit inside the same guard as
+// the kernel body that calls them.
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
 
 __device__ inline uint32_t pack(__half lo, __half hi) {
     __half2 h = __halves2half2(lo, hi);
@@ -47,10 +58,13 @@ __device__ inline void mma_m16n8k16(float (&d)[4], uint32_t a0, uint32_t a1, uin
         : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
 
+#endif  // __CUDA_ARCH__ >= 800
+
 __global__ __launch_bounds__(kThreads) void gemm_mma_ptx_kernel(const __half* __restrict__ a,
                                                                 const __half* __restrict__ b,
                                                                 float* __restrict__ c, int m, int n,
                                                                 int k, float alpha, float beta) {
+#if __CUDA_ARCH__ >= 800
     __shared__ __align__(16) __half as[kBM * kBK];  // [row][kk]
     __shared__ __align__(16) __half bs[kBK * kBN];  // [kk][col]
 
@@ -127,12 +141,33 @@ __global__ __launch_bounds__(kThreads) void gemm_mma_ptx_kernel(const __half* __
             const long long i01 = static_cast<long long>(r0) * n + c1;
             const long long i10 = static_cast<long long>(r1) * n + c0;
             const long long i11 = static_cast<long long>(r1) * n + c1;
-            c[i00] = alpha * acc[mi][ni][0] + beta * c[i00];
-            c[i01] = alpha * acc[mi][ni][1] + beta * c[i01];
-            c[i10] = alpha * acc[mi][ni][2] + beta * c[i10];
-            c[i11] = alpha * acc[mi][ni][3] + beta * c[i11];
+            // C is not read when beta is zero. The branch is uniform, and it
+            // is what keeps a NaN in an uninitialized C from reaching the output.
+            if (beta == 0.0f) {
+                c[i00] = alpha * acc[mi][ni][0];
+                c[i01] = alpha * acc[mi][ni][1];
+                c[i10] = alpha * acc[mi][ni][2];
+                c[i11] = alpha * acc[mi][ni][3];
+            } else {
+                c[i00] = alpha * acc[mi][ni][0] + beta * c[i00];
+                c[i01] = alpha * acc[mi][ni][1] + beta * c[i01];
+                c[i10] = alpha * acc[mi][ni][2] + beta * c[i10];
+                c[i11] = alpha * acc[mi][ni][3] + beta * c[i11];
+            }
         }
     }
+#else
+    // mma.sync.m16n8k16 needs sm_80. The launcher checks the running device
+    // before it reaches the aligned path, so this body is never launched.
+    (void)a;
+    (void)b;
+    (void)c;
+    (void)m;
+    (void)n;
+    (void)k;
+    (void)alpha;
+    (void)beta;
+#endif
 }
 
 bool aligned(int m, int n, int k) {
@@ -152,9 +187,11 @@ void gemm_mma_ptx(const __half* a, const __half* b, float* c, int m, int n, int 
         gemm_wmma_fp16(a, b, c, m, n, k, alpha, beta, stream);
         return;
     }
+    detail::require_arch(kMinArch, "gemm_mma_ptx");
     const dim3 block(kThreads);
     const dim3 grid(n / kBN, m / kBM);
     gemm_mma_ptx_kernel<<<grid, block, 0, stream>>>(a, b, c, m, n, k, alpha, beta);
+    CKL_CUDA_LAST_ERROR(false);
 }
 
 }  // namespace ckl

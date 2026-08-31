@@ -13,9 +13,16 @@
 //
 // Same alignment contract as the register kernel (m by 128, n by 128, k by 8);
 // the dispatcher falls back to the tiled kernel otherwise.
+//
+// cp.async needs compute capability 8.0, so the device body is compiled only for
+// sm_80 and newer and the launcher refuses on anything older. An empty kernel
+// that launches and writes nothing would be the worst kind of silent fallback,
+// which is why the check is on the host side and returns rather than launching.
 
 #include <cuda_pipeline.h>
 
+#include "ckl/context.hpp"
+#include "ckl/cuda_check.hpp"
 #include "ckl/gemm.hpp"
 
 namespace ckl {
@@ -28,12 +35,14 @@ constexpr int kBK = 8;
 constexpr int kTM = 8;
 constexpr int kTN = 8;
 constexpr int kThreads = (kBM / kTM) * (kBN / kTN);  // 256
+constexpr int kMinArch = 80;                         // cp.async
 
 __global__ __launch_bounds__(kThreads) void gemm_cp_async_kernel(const float* __restrict__ a,
                                                                  const float* __restrict__ b,
                                                                  float* __restrict__ c, int m,
                                                                  int n, int k, float alpha,
                                                                  float beta) {
+#if __CUDA_ARCH__ >= 800
     // Double buffered. A stored [row][e] naturally, B stored [e][col].
     __shared__ __align__(16) float as[2][kBM * kBK];
     __shared__ __align__(16) float bs[2][kBK * kBN];
@@ -100,6 +109,20 @@ __global__ __launch_bounds__(kThreads) void gemm_cp_async_kernel(const float* __
         __syncthreads();
     }
 
+    // C is not read when beta is zero: BLAS allows an uninitialized or NaN C in
+    // that case, and one uniform branch beats 64 multiplications by zero.
+    if (beta == 0.0f) {
+#pragma unroll
+        for (int i = 0; i < kTM; ++i) {
+            const int row = block_row + thread_row + i;
+#pragma unroll
+            for (int j = 0; j < kTN; ++j) {
+                const int col = block_col + thread_col + j;
+                c[static_cast<long long>(row) * n + col] = alpha * acc[i][j];
+            }
+        }
+        return;
+    }
 #pragma unroll
     for (int i = 0; i < kTM; ++i) {
         const int row = block_row + thread_row + i;
@@ -110,6 +133,18 @@ __global__ __launch_bounds__(kThreads) void gemm_cp_async_kernel(const float* __
             c[idx] = alpha * acc[i][j] + beta * c[idx];
         }
     }
+#else
+    // Below sm_80 there is no cp.async, so there is no kernel. The launcher
+    // never gets here: it checks the running device first.
+    (void)a;
+    (void)b;
+    (void)c;
+    (void)m;
+    (void)n;
+    (void)k;
+    (void)alpha;
+    (void)beta;
+#endif
 }
 
 bool aligned(int m, int n, int k) {
@@ -127,9 +162,11 @@ void gemm_cp_async(const float* a, const float* b, float* c, int m, int n, int k
         gemm_tiled(a, b, c, m, n, k, alpha, beta, stream);
         return;
     }
+    detail::require_arch(kMinArch, "gemm_cp_async");
     const dim3 block(kThreads);
     const dim3 grid(n / kBN, m / kBM);
     gemm_cp_async_kernel<<<grid, block, 0, stream>>>(a, b, c, m, n, k, alpha, beta);
+    CKL_CUDA_LAST_ERROR(false);
 }
 
 }  // namespace ckl

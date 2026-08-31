@@ -11,12 +11,21 @@
 // loads read from shared, not global. The fast path needs m and n multiples of
 // 64 and k a multiple of 16; anything else (odd, sub tile, zero k) uses a scalar
 // half input kernel so correctness holds on every shape the tests throw at it.
+//
+// The tensor body is compiled for sm_80 and newer only. BF16 WMMA fragments do
+// not exist below that, and the project's release architecture list starts at
+// sm_80, so the FP16 instantiation carries the same floor rather than a second
+// one nobody builds. The scalar fallback has no floor and runs anywhere, which
+// is why the architecture check sits on the fast path in the launcher instead of
+// at the top of it.
 
 #include <mma.h>
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
+#include "ckl/context.hpp"
+#include "ckl/cuda_check.hpp"
 #include "ckl/gemm.hpp"
 
 namespace ckl {
@@ -36,8 +45,12 @@ constexpr int kWarps = kWarpsM * kWarpsN;     // 4
 constexpr int kThreads = kWarps * 32;         // 128
 constexpr int kWarpTileM = kBM / kWarpsM;     // 32
 constexpr int kWarpTileN = kBN / kWarpsN;     // 32
-constexpr int kMFrags = kWarpTileM / kWmmaM;  // 2
-constexpr int kNFrags = kWarpTileN / kWmmaN;  // 2
+// Used only inside the guarded device body, so below the architecture floor
+// they have no reader and nvcc's unreferenced variable diagnostic, which is an
+// error under CKL_WERROR, would fire.
+[[maybe_unused]] constexpr int kMFrags = kWarpTileM / kWmmaM;  // 2
+[[maybe_unused]] constexpr int kNFrags = kWarpTileN / kWmmaN;  // 2
+constexpr int kMinArch = 80;                  // bf16 WMMA fragments
 
 __device__ inline float to_float(__half h) {
     return __half2float(h);
@@ -51,6 +64,7 @@ __global__ __launch_bounds__(kThreads) void wmma_gemm_kernel(const T* __restrict
                                                              const T* __restrict__ b,
                                                              float* __restrict__ c, int m, int n,
                                                              int k, float alpha, float beta) {
+#if __CUDA_ARCH__ >= 800
     __shared__ __align__(16) T as[kBM * kBK];
     __shared__ __align__(16) T bs[kBK * kBN];
 
@@ -107,20 +121,43 @@ __global__ __launch_bounds__(kThreads) void wmma_gemm_kernel(const T* __restrict
             const int row = block_row + warp_m * kWarpTileM + mi * kWmmaM;
             const int col = block_col + warp_n * kWarpTileN + ni * kWmmaN;
             float* c_tile = &c[static_cast<long long>(row) * n + col];
-            wmma::fragment<wmma::accumulator, kWmmaM, kWmmaN, kWmmaK, float> c_old;
-            wmma::load_matrix_sync(c_old, c_tile, n, wmma::mem_row_major);
+            // When beta is zero C is not an input at all, so the old fragment is
+            // never loaded. That is the BLAS contract, and it also saves a
+            // 16 by 16 global read per fragment.
+            if (beta != 0.0f) {
+                wmma::fragment<wmma::accumulator, kWmmaM, kWmmaN, kWmmaK, float> c_old;
+                wmma::load_matrix_sync(c_old, c_tile, n, wmma::mem_row_major);
 #pragma unroll
-            for (int t = 0; t < acc[mi][ni].num_elements; ++t) {
-                acc[mi][ni].x[t] = alpha * acc[mi][ni].x[t] + beta * c_old.x[t];
+                for (int t = 0; t < acc[mi][ni].num_elements; ++t) {
+                    acc[mi][ni].x[t] = alpha * acc[mi][ni].x[t] + beta * c_old.x[t];
+                }
+            } else {
+#pragma unroll
+                for (int t = 0; t < acc[mi][ni].num_elements; ++t) {
+                    acc[mi][ni].x[t] = alpha * acc[mi][ni].x[t];
+                }
             }
             wmma::store_matrix_sync(c_tile, acc[mi][ni], n, wmma::mem_row_major);
         }
     }
+#else
+    // No WMMA body below sm_80. The launcher checks the running device before it
+    // reaches the fast path, so this is never launched.
+    (void)a;
+    (void)b;
+    (void)c;
+    (void)m;
+    (void)n;
+    (void)k;
+    (void)alpha;
+    (void)beta;
+#endif
 }
 
 // Scalar half input fallback for shapes the WMMA fast path cannot tile. One
 // thread per output element, FP32 accumulate, so it matches the tensor kernel to
-// within the tolerance while staying correct on odd and degenerate shapes.
+// within the tolerance while staying correct on odd and degenerate shapes. No
+// tensor instructions, so no architecture floor.
 template <typename T>
 __global__ void half_naive_kernel(const T* __restrict__ a, const T* __restrict__ b,
                                   float* __restrict__ c, int m, int n, int k, float alpha,
@@ -136,7 +173,7 @@ __global__ void half_naive_kernel(const T* __restrict__ a, const T* __restrict__
                to_float(b[static_cast<long long>(p) * n + col]);
     }
     const long long idx = static_cast<long long>(row) * n + col;
-    c[idx] = alpha * sum + beta * c[idx];
+    c[idx] = (beta == 0.0f) ? alpha * sum : alpha * sum + beta * c[idx];
 }
 
 template <typename T>
@@ -147,6 +184,7 @@ void launch_wmma(const T* a, const T* b, float* c, int m, int n, int k, float al
     }
     const bool fast = (m % kBM == 0) && (n % kBN == 0) && (k % kBK == 0) && k > 0;
     if (fast) {
+        require_arch(kMinArch, "the WMMA GEMM fast path");
         const dim3 block(kThreads);
         const dim3 grid(n / kBN, m / kBM);
         wmma_gemm_kernel<T><<<grid, block, 0, stream>>>(a, b, c, m, n, k, alpha, beta);
@@ -156,6 +194,7 @@ void launch_wmma(const T* a, const T* b, float* c, int m, int n, int k, float al
         const dim3 grid((n + kB - 1) / kB, (m + kB - 1) / kB);
         half_naive_kernel<T><<<grid, block, 0, stream>>>(a, b, c, m, n, k, alpha, beta);
     }
+    CKL_CUDA_LAST_ERROR(false);
 }
 
 }  // namespace detail

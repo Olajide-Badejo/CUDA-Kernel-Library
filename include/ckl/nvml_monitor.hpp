@@ -8,8 +8,11 @@
 // trusted.
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
+
+#include "ckl/ckl_export.h"
 
 namespace ckl {
 
@@ -36,13 +39,18 @@ struct NvmlSummary {
 
 // Samples NVML on a background thread between start() and stop(). Non copyable;
 // one monitor drives one window at a time.
-class NvmlMonitor {
+class CKL_EXPORT NvmlMonitor {
 public:
     explicit NvmlMonitor(unsigned int sample_interval_ms = 25, int device_index = 0);
     ~NvmlMonitor();
 
     NvmlMonitor(const NvmlMonitor&) = delete;
     NvmlMonitor& operator=(const NvmlMonitor&) = delete;
+
+    // Movable, so a monitor can be handed to whoever owns the timed window. A
+    // moved from monitor holds nothing; calling into it throws.
+    NvmlMonitor(NvmlMonitor&&) noexcept;
+    NvmlMonitor& operator=(NvmlMonitor&&) noexcept;
 
     void start();
     NvmlSummary stop();
@@ -51,7 +59,7 @@ public:
 
 private:
     struct Impl;
-    Impl* impl_;
+    std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace ckl

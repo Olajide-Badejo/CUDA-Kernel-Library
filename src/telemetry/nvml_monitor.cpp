@@ -9,9 +9,14 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <memory>
+#include <stdexcept>
 #include <thread>
+#include <utility>
 
 #include <nvml.h>
+
+#include "ckl/status.hpp"
 
 namespace ckl {
 
@@ -62,7 +67,8 @@ struct NvmlMonitor::Impl {
     }
 };
 
-NvmlMonitor::NvmlMonitor(unsigned int sample_interval_ms, int device_index) : impl_(new Impl()) {
+NvmlMonitor::NvmlMonitor(unsigned int sample_interval_ms, int device_index)
+    : impl_(std::make_unique<Impl>()) {
     impl_->interval_ms = sample_interval_ms;
     impl_->device_index = device_index;
     if (nvmlInit_v2() != NVML_SUCCESS) {
@@ -79,18 +85,24 @@ NvmlMonitor::NvmlMonitor(unsigned int sample_interval_ms, int device_index) : im
 }
 
 NvmlMonitor::~NvmlMonitor() {
-    if (impl_ != nullptr) {
+    if (impl_) {
         if (impl_->running.load()) {
             stop();
         }
         if (impl_->nvml_ok) {
             nvmlShutdown();
         }
-        delete impl_;
     }
 }
 
+NvmlMonitor::NvmlMonitor(NvmlMonitor&&) noexcept = default;
+
+NvmlMonitor& NvmlMonitor::operator=(NvmlMonitor&&) noexcept = default;
+
 void NvmlMonitor::start() {
+    if (!impl_) {
+        throw Error(Status::kNotInitialized, "NvmlMonitor used after it was moved from");
+    }
     if (!impl_->nvml_ok || impl_->running.load()) {
         return;
     }
@@ -106,6 +118,9 @@ void NvmlMonitor::start() {
 }
 
 NvmlSummary NvmlMonitor::stop() {
+    if (!impl_) {
+        throw Error(Status::kNotInitialized, "NvmlMonitor used after it was moved from");
+    }
     NvmlSummary out;
     if (!impl_->nvml_ok) {
         out.available = false;
@@ -144,6 +159,9 @@ NvmlSummary NvmlMonitor::stop() {
 }
 
 const std::vector<NvmlSample>& NvmlMonitor::samples() const {
+    if (!impl_) {
+        throw Error(Status::kNotInitialized, "NvmlMonitor used after it was moved from");
+    }
     return impl_->samples;
 }
 
