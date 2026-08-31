@@ -69,6 +69,30 @@ double measure_bandwidth_gbps(int sm_count) {
     return bytes_per_rep / seconds / 1.0e9;
 }
 
+// FP32 lanes per SM by compute capability. This was a hard coded 128, which is
+// right for the part in this machine and wrong for Volta, Turing, and A100
+// (defect A3). There is no runtime query for it, so it is a table, and an
+// architecture that is not in the table returns 0 so the caller can print
+// "unknown" instead of a confidently wrong theoretical peak.
+int cores_per_sm(int major, int minor) {
+    switch (major * 10 + minor) {
+        case 70:  // Volta
+        case 72:  // Xavier
+        case 75:  // Turing
+        case 80:  // Ampere GA100
+            return 64;
+        case 86:  // Ampere GA10x
+        case 87:  // Orin
+        case 89:  // Ada
+        case 90:  // Hopper
+        case 100:  // Blackwell datacenter
+        case 120:  // Blackwell consumer
+            return 128;
+        default:
+            return 0;
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -101,11 +125,14 @@ int main(int argc, char** argv) {
 
     const double meas_bw_gbps = measure_bandwidth_gbps(p.multiProcessorCount);
 
-    // Peak FP32: cores * 2 (FMA) * boost clock.
+    // Peak FP32: lanes * 2 (FMA) * boost clock. Zero lanes means the architecture
+    // is not in the table, and the theoretical figure is reported as unknown
+    // rather than guessed; the measured bandwidth above stands on its own.
     const double core_clock_hz = static_cast<double>(core_clock_khz) * 1000.0;
-    const int cores_per_sm = 128;  // Blackwell consumer SM; re-verify against whitepaper
-    const double cuda_cores = static_cast<double>(p.multiProcessorCount) * cores_per_sm;
+    const int lanes_per_sm = cores_per_sm(p.major, p.minor);
+    const double cuda_cores = static_cast<double>(p.multiProcessorCount) * lanes_per_sm;
     const double peak_fp32_tflops = cuda_cores * 2.0 * core_clock_hz / 1.0e12;
+    const bool peak_fp32_known = lanes_per_sm > 0;
 
     if (json) {
         std::printf("{\n");
@@ -124,7 +151,12 @@ int main(int argc, char** argv) {
         std::printf("  \"max_threads_per_sm\": %d,\n", p.maxThreadsPerMultiProcessor);
         std::printf("  \"theoretical_bw_gbps\": %.1f,\n", theo_bw_gbps);
         std::printf("  \"measured_bw_gbps\": %.1f,\n", meas_bw_gbps);
-        std::printf("  \"peak_fp32_tflops_estimate\": %.1f,\n", peak_fp32_tflops);
+        std::printf("  \"fp32_lanes_per_sm\": %d,\n", lanes_per_sm);
+        if (peak_fp32_known) {
+            std::printf("  \"peak_fp32_tflops_estimate\": %.1f,\n", peak_fp32_tflops);
+        } else {
+            std::printf("  \"peak_fp32_tflops_estimate\": null,\n");
+        }
         std::printf("  \"runtime_version\": %d,\n", runtime_version);
         std::printf("  \"driver_version\": %d\n", driver_version);
         std::printf("}\n");
@@ -150,7 +182,13 @@ int main(int argc, char** argv) {
     std::printf("----------------------------\n");
     std::printf("Theoretical BW (clk*bus): %.1f GB/s\n", theo_bw_gbps);
     std::printf("Measured stream BW      : %.1f GB/s\n", meas_bw_gbps);
-    std::printf("Peak FP32 (est, non-TC) : %.1f TFLOP/s\n", peak_fp32_tflops);
+    if (peak_fp32_known) {
+        std::printf("FP32 lanes per SM       : %d\n", lanes_per_sm);
+        std::printf("Peak FP32 (est, non-TC) : %.1f TFLOP/s\n", peak_fp32_tflops);
+    } else {
+        std::printf("FP32 lanes per SM       : unknown for cc %d.%d\n", p.major, p.minor);
+        std::printf("Peak FP32 (est, non-TC) : unknown (measured figures above stand)\n");
+    }
     std::printf("----------------------------\n");
     std::printf("CUDA runtime version   : %d\n", runtime_version);
     std::printf("CUDA driver version    : %d\n", driver_version);

@@ -47,6 +47,17 @@ sections=(
     --section ComputeWorkloadAnalysis
 )
 
+# Explicit metrics on top of the sections. The shared load bank conflict counter
+# is the one that named the cause of the round 9 swizzle win (219 million
+# conflicts down to 33.7 million), and in v1 it was only ever read interactively
+# out of the binary .ncu-rep, which is gitignored. No text page in the repository
+# carries it, so the central causal finding of the whole optimization story has no
+# committed evidence: defect A6 in docs/CORRECTIONS.md. Asking for it here means
+# the re-run dumps it into the .txt page alongside everything else.
+metrics=(
+    --metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum
+)
+
 {
     echo "round: ${round}"
     echo "date: $(date -Is)"
@@ -68,7 +79,7 @@ for pair in "$@"; do
     base="${out_dir}/${variant}_${size}"
     echo "profiling ${variant} at ${size} cubed (kernel ${kernel})"
 
-    ncu "${sections[@]}" \
+    ncu "${sections[@]}" "${metrics[@]}" \
         --kernel-name "regex:${kernel}" \
         --launch-skip 4 --launch-count 1 \
         --force-overwrite \

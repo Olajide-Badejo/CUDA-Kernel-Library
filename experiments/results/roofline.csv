@@ -1,0 +1,7 @@
+label,intensity_flop_per_byte,achieved_gflops,roof_gflops,ceiling,bound,clock_mhz
+gemm_naive,682.6667,1962.2,34922.5,fp32,compute,2842
+gemm_cp_async,682.6667,16757.7,34922.5,fp32,compute,2842
+gemm_wmma_fp16,1365.3333,37723.3,69845.0,tensor,compute,2842
+gemm_mma_opt,1365.3333,58771.6,69845.0,tensor,compute,2842
+gemv_warp,0.4999,305.6,290.5,fp32,memory,2842
+cublas_attainable,2730.6667,67889.7,69845.0,tensor,compute,2842

@@ -1,0 +1,38 @@
+# Known dead commit hashes from the v1 data collection.
+#
+# Why this file exists: the v1 benchmark sweep and the nine Nsight Compute
+# diagnostic rounds recorded the commit they ran on, exactly as the README
+# promises. Then I rewrote the repository history, and every one of those
+# hashes stopped resolving. That is defect A1 in docs/CORRECTIONS.md. The data
+# is real and the hashes were real when they were written; they just point at
+# objects that no longer exist, so nobody can check them any more.
+#
+# scripts/check_provenance.py fails on any recorded hash that git cannot
+# resolve. These seven are listed here so the gate reports the standing debt
+# instead of blocking the build on it. Nothing else belongs in this file: a new
+# unresolvable hash is a real failure, not a legacy one.
+#
+# Every hash below is dead. None of them can be checked out, diffed, or
+# verified. Any number traceable only to one of these hashes is provisional.
+#
+# This file is deleted when I re-run the full sweep and the ncu rounds on
+# current history. At that point check_provenance.py stands on its own and the
+# published figures carry live provenance again.
+#
+# Verified against the tree on 2026-08-31: `git cat-file -t` fails on all seven.
+
+# experiments/results/summary.csv (60 rows) and sweep.jsonl (60 rows)
+42d47e0d90068bd48e3a4d17895beec6287579a6
+
+# experiments/results/ncu/round01/round_meta.txt
+ae42365cb166b3af6bcdc68df1ab6ac4cbb12d9b
+# experiments/results/ncu/round02/round_meta.txt
+fc1f8f801bc0744ce79172d3646569843f21b46d
+# experiments/results/ncu/round03/round_meta.txt
+c2f8c6b40ef6c025089c2ddf31958c77dac750d1
+# experiments/results/ncu/round04/round_meta.txt
+3075ebfe5c814db0e8705c23b11481cad4137c2c
+# experiments/results/ncu/round06, round07, round07b/round_meta.txt
+e2f0f7055e77e2be2c5e8d549912a06942b126c5
+# experiments/results/ncu/round09/round_meta.txt
+2e73d41260e38426b059ef4dec6b057b3cf00920

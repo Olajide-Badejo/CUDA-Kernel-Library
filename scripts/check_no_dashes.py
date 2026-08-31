@@ -24,10 +24,16 @@ EM_DASH = chr(0x2014)
 TEXT_SUFFIXES = {
     ".md", ".tex", ".bib", ".py", ".sh", ".cu", ".cuh", ".cpp", ".hpp",
     ".h", ".c", ".cmake", ".txt", ".yml", ".yaml", ".json", ".toml",
-    ".cfg", ".ini", ".clang-format", ".clang-tidy",
+    ".cfg", ".ini", ".f90",
 }
-# Files without a suffix that we still want scanned.
-TEXT_NAMES = {"Makefile", "CMakeLists.txt", "LICENSE", "CHANGELOG"}
+# Files whose whole name is the identifier: either no suffix at all, or a name
+# that starts with a dot so Path.suffix returns the name itself and never
+# matched the suffix set (.clang-format and .clang-tidy used to sit in
+# TEXT_SUFFIXES and were therefore never scanned).
+TEXT_NAMES = {
+    "Makefile", "CMakeLists.txt", "LICENSE", "CHANGELOG",
+    ".clang-format", ".clang-tidy", ".editorconfig", ".gitignore",
+}
 
 # LaTeX environments where a literal "--" is legitimate (code, urls).
 TEX_VERBATIM_STARTS = ("\\begin{verbatim}", "\\begin{lstlisting}", "\\begin{minted}")

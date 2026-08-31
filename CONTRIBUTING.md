@@ -13,7 +13,7 @@ the GPU tests: `ctest --test-dir build` on a machine with the card.
 
 For the diagnostic rounds, `ncu` needs GPU performance counter access. Under WSL2
 that is a Windows side setting (`RmProfilingAdminOnly = 0`, then reboot); see
-`PROGRESS.md`.
+`docs/ENGINEERING_LOG.md`.
 
 ## Build and check
 

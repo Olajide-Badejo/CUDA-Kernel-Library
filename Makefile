@@ -10,7 +10,7 @@ CTEST_LABELS ?=
 # report, roofline, sweep collide with directory names, so they must be phony or
 # make treats the directory as an up to date target and does nothing.
 .PHONY: all setup configure build test bench roofline sweep sweep-quick report \
-        check-style dash clean help
+        check-style dash provenance clean help
 
 help:
 	@echo "Targets:"
@@ -18,7 +18,7 @@ help:
 	@echo "  build        compile all targets"
 	@echo "  test         run correctness tests (needs a GPU)"
 	@echo "  bench        run the default GEMM benchmark (needs a GPU)"
-	@echo "  check-style  run the dash gate (clang-format, clang-tidy, ruff added later)"
+	@echo "  check-style  run the dash and provenance gates"
 	@echo "  all          build then test then check-style"
 	@echo "  clean        remove the build tree"
 
@@ -46,10 +46,15 @@ sweep: build
 sweep-quick: build
 	python3 benchmarks/sweep.py --quick
 
-check-style: dash
+check-style: dash provenance
 
 dash:
 	python3 scripts/check_no_dashes.py .
+
+# Every commit hash recorded in a results file has to resolve in git, or be
+# listed as a known dead v1 hash in experiments/results/legacy_hashes.txt.
+provenance:
+	python3 scripts/check_provenance.py
 
 # Regenerate figures and tables from the canonical results, then build both PDFs.
 # Does not depend on the CUDA build: it works from the committed summary.csv and

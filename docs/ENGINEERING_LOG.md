@@ -55,7 +55,7 @@ zero warnings; the gate still catches real warnings in our own device code.
 
 Symptom: `ncu` on a trivial kernel returns `ERR_NVGPUCTRPERM` ("user does not
 have permission to access NVIDIA GPU Performance Counters"). Running ncu under
-`sudo` (passwordless sudo confirmed working) returns the same error.
+`sudo` returns the same error.
 
 Root cause: under WSL2 the CUDA driver is the Windows NVIDIA driver reached
 through the GPU paravirtualization layer. GPU performance counter access is

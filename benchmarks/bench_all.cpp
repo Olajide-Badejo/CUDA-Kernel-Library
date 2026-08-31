@@ -212,6 +212,61 @@ Result bench_spmv(const std::string& v, int m, int n) {
             true};
 }
 
+// TRSM overwrites its right hand side, so every rep needs a fresh B. The v1 code
+// did that with a blocking host to device copy inside the timed lambda, which put
+// a PCIe transfer between the two event records and inflated both the kernel and
+// the cuBLAS baseline (defect A2). Here the restore is a device to device
+// cudaMemcpyAsync enqueued on the same stream *before* the start event, so stream
+// ordering guarantees it has finished by the time the timed region opens. Same
+// protocol for the kernel under test and for the baseline.
+ckl::TimingStats time_with_restore(const std::function<void(cudaStream_t)>& restore,
+                                   const std::function<void(cudaStream_t)>& launch,
+                                   cudaStream_t stream = nullptr, int warmups = 5, int reps = 20) {
+    cudaEvent_t start;
+    cudaEvent_t stop;
+    CKL_CUDA_CHECK(cudaEventCreate(&start));
+    CKL_CUDA_CHECK(cudaEventCreate(&stop));
+
+    for (int i = 0; i < warmups; ++i) {
+        restore(stream);
+        launch(stream);
+    }
+    CKL_CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    std::vector<double> samples;
+    samples.reserve(static_cast<std::size_t>(reps));
+    for (int i = 0; i < reps; ++i) {
+        restore(stream);
+        CKL_CUDA_CHECK(cudaEventRecord(start, stream));
+        launch(stream);
+        CKL_CUDA_CHECK(cudaEventRecord(stop, stream));
+        CKL_CUDA_CHECK(cudaEventSynchronize(stop));
+        float ms = 0.0f;
+        CKL_CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        samples.push_back(static_cast<double>(ms));
+    }
+
+    CKL_CUDA_CHECK(cudaEventDestroy(start));
+    CKL_CUDA_CHECK(cudaEventDestroy(stop));
+
+    std::sort(samples.begin(), samples.end());
+    ckl::TimingStats stats;
+    stats.reps = reps;
+    stats.min_ms = samples.front();
+    const auto q = [&samples](double frac) {
+        double pos = frac * static_cast<double>(samples.size() - 1);
+        auto lo = static_cast<std::size_t>(pos);
+        double rem = pos - static_cast<double>(lo);
+        if (lo + 1 < samples.size()) {
+            return samples[lo] * (1.0 - rem) + samples[lo + 1] * rem;
+        }
+        return samples[lo];
+    };
+    stats.median_ms = q(0.5);
+    stats.iqr_ms = q(0.75) - q(0.25);
+    return stats;
+}
+
 Result bench_trsm(const std::string& v, int m, int n) {
     auto a = ckl::random_matrix(m, m, 71);
     for (int i = 0; i < m; ++i) {
@@ -220,8 +275,10 @@ Result bench_trsm(const std::string& v, int m, int n) {
         a[static_cast<std::size_t>(i) * m + i] = static_cast<float>(m + 1);
     }
     const auto b0 = ckl::random_matrix(m, n, 92);
-    ckl::DeviceBuffer<float> da(a.size()), db(b0.size());
+    ckl::DeviceBuffer<float> da(a.size()), db(b0.size()), db_pristine(b0.size());
     da.copy_from_host(a);
+    // The pristine copy is uploaded once, outside every timed region.
+    db_pristine.copy_from_host(b0);
     std::function<void(const float*, float*, int, int, float, cudaStream_t)> kf;
     if (v == "naive")
         kf = ckl::trsm_naive;
@@ -231,12 +288,14 @@ Result bench_trsm(const std::string& v, int m, int n) {
         return {0, 0, 0, 0, false};
     // TRSM flops approx m*m*n (triangular solve).
     const double flops = static_cast<double>(m) * m * n;
-    ckl::TimingStats ks = ckl::time_stream([&](cudaStream_t s) {
-        db.copy_from_host(b0);
-        kf(da.data(), db.data(), m, n, 1.0f, s);
-    });
-    ckl::TimingStats os = ckl::time_stream([&](cudaStream_t s) {
-        db.copy_from_host(b0);
+    const std::size_t b_bytes = db.bytes();
+    auto restore = [&](cudaStream_t s) {
+        CKL_CUDA_CHECK(cudaMemcpyAsync(db.data(), db_pristine.data(), b_bytes,
+                                       cudaMemcpyDeviceToDevice, s));
+    };
+    ckl::TimingStats ks = time_with_restore(
+        restore, [&](cudaStream_t s) { kf(da.data(), db.data(), m, n, 1.0f, s); });
+    ckl::TimingStats os = time_with_restore(restore, [&](cudaStream_t s) {
         ckl::trsm_cublas(da.data(), db.data(), m, n, 1.0f, s);
     });
     return {ks.median_ms, ks.iqr_ms, gflops_of(flops, ks.median_ms), gflops_of(flops, os.median_ms),

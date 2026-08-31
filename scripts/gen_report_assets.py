@@ -6,6 +6,12 @@ figures. Reads experiments/results/summary.csv, writes LaTeX tables into
 report/tables/ and figures into report/figures/. The roofline figure is rendered
 by plot_roofline.py (from the profiler's CSVs); this script also renders a GEMM
 ladder bar chart. Nothing is hand copied into the report; it all comes from here.
+
+A missing input is a hard error. The v1 script skipped the roofline when the CSV
+was absent and exited 0, so a clean clone (where the CSV was gitignored) rebuilt
+the report around the committed PNG and reported success, in CI included. That is
+defect A7 in docs/CORRECTIONS.md: a report that cannot be regenerated from the
+tree has to fail loudly, not quietly reuse a stale picture.
 """
 
 from __future__ import annotations
@@ -33,9 +39,33 @@ LADDER_ORDER = [
 ]
 
 
+REQUIRED_INPUTS = [
+    (RESULTS / "summary.csv", "the benchmark sweep (make sweep)"),
+    (RESULTS / "roofline.csv", "the roofline profiler (make roofline)"),
+    (RESULTS / "roofline_ceilings.csv", "the roofline profiler (make roofline)"),
+]
+
+
+def require_inputs() -> None:
+    """Stop with a message naming what is missing and how to produce it."""
+    missing = [(p, how) for p, how in REQUIRED_INPUTS if not p.exists()]
+    if not missing:
+        return
+    print("cannot generate report assets: required results are missing.", file=sys.stderr)
+    for path, how in missing:
+        print(f"  {path.relative_to(REPO)} is not there; produce it with {how}", file=sys.stderr)
+    print("The report is generated from the results in the tree. Reusing a committed "
+          "figure whose input is gone would make the report unreproducible.", file=sys.stderr)
+    raise SystemExit(1)
+
+
 def read_summary() -> list[dict[str, str]]:
     with (RESULTS / "summary.csv").open() as f:
-        return list(csv.DictReader(f))
+        rows = list(csv.DictReader(f))
+    if not rows:
+        print(f"{(RESULTS / 'summary.csv').relative_to(REPO)} has no data rows", file=sys.stderr)
+        raise SystemExit(1)
+    return rows
 
 
 def find(rows, family, variant, dtype, m):
@@ -180,6 +210,7 @@ def plot_ladder(plotted: list[tuple[str, str, float, float]]) -> None:
 
 
 def main() -> int:
+    require_inputs()
     TABLES.mkdir(parents=True, exist_ok=True)
     FIGURES.mkdir(parents=True, exist_ok=True)
     rows = read_summary()
@@ -198,9 +229,8 @@ def main() -> int:
         elif step == "families table":
             write_families(rows)
         elif step == "roofline figure":
-            if (RESULTS / "roofline.csv").exists():
-                subprocess.run([sys.executable, str(REPO / "scripts" / "plot_roofline.py")],
-                               check=True)
+            subprocess.run([sys.executable, str(REPO / "scripts" / "plot_roofline.py")],
+                           check=True)
         elif step == "ladder figure":
             plot_ladder(plotted)
 

@@ -53,8 +53,8 @@ headroom for larger shapes.
 
 ## Baseline result
 
-Measured on this machine at Phase 1 (see `PROGRESS.md` for the table with the
-commit hash). The naive kernel plateaus near 2 TFLOP/s and falls to roughly 9
+Measured on this machine at Phase 1 (the sweep rows in
+`experiments/results/summary.csv` carry the commit hash). The naive kernel plateaus near 2 TFLOP/s and falls to roughly 9
 percent of cuBLAS at 2048 and above, because it refetches every A and B element
 from global memory with no reuse and is bandwidth and latency bound once the
 data leaves cache. Closing that gap is what the rest of the ladder does, and the

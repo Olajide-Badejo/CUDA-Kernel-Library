@@ -24,10 +24,14 @@ from a naive baseline to a compute bound tensor core kernel. Every performance
 figure is my kernel measured against the vendor library (cuBLAS, or cuSPARSE for
 sparse matrix vector) on one GPU, an NVIDIA RTX 5070, in the same process. There
 are no cross device comparisons. The top FP16 kernel passes the compute bound gate
-and reaches about 90 percent of cuBLAS at 4096 and 8192 cubed. Alongside the GEMM
-ladder the library carries GEMV, TRSM, CSR SpMV, and a cuSOLVER wrapper, all
-verified against the vendor library, with a measured roofline that places each
-kernel against the machine's limits.
+and reaches 89.9 percent of cuBLAS at 4096 cubed and 88.9 percent at 8192 cubed,
+with a geometric mean of 79.9 percent over the four swept shapes. Alongside the
+GEMM ladder the library carries GEMV, TRSM, CSR SpMV, and a cuSOLVER wrapper, all
+verified against the vendor library, with a roofline whose compute ceilings come
+from the hardware rather than from a vendor library. The figures in this report
+were collected before the benchmark clocks were locked and before two timed region
+defects were fixed; the corrections register in \texttt{docs/CORRECTIONS.md} lists
+what that affects and what is pending re-measurement.
 \end{abstract}
 
 \newpage
@@ -110,7 +114,10 @@ TFLOP/s).}
 \end{figure}
 
 \paragraph{Naive to tiled (Round 1).} The naive kernel reaches about 1.9 TFLOP/s.
-The shared memory tiled kernel is, surprisingly, slightly slower. The round names
+The shared memory tiled kernel, the textbook first optimization, is 17 percent
+slower than the kernel it was supposed to improve on (1584 against 1908 GFLOP/s at
+4096 cubed), and that is the most interesting result in this paper: the move
+everyone reaches for first is a regression on this part. The round names
 the cause: the tiled 32 by 32 block is 1024 threads, so only one block fits per SM
 (about 66 percent occupancy against 100 percent for naive), and its top stall is
 the MIO (shared memory) pipe. Meanwhile the naive kernel is not bandwidth bound at
@@ -128,9 +135,13 @@ of cuBLAS. The FP32 path is now occupancy limited (149 registers per thread, 17
 percent occupancy) and is accepted as the top FP32 variant, its gap diagnosed.
 
 \paragraph{Tensor cores (Rounds 4 and 5).} Moving the inner product onto the tensor
-cores with WMMA doubles throughput to 36 TFLOP/s, but the cores are starved: the
-tensor pipe is only 54 percent utilized while the shared read pipe is at 92
-percent. Dropping to mma.sync PTX with hand placed fragments changes nothing, which
+cores with WMMA doubles throughput to 36 TFLOP/s, but the cores are starved. In the
+Round 4 detail page (\texttt{experiments/results/ncu/round04/wmma\_fp16\_4096.txt})
+the GPU Speed Of Light section reads \texttt{Compute (SM) Throughput} 53.72 percent
+against \texttt{Memory Throughput} 92.40 percent, and the row that actually names
+the culprit is \texttt{L1/TEX Cache Throughput} at 94.38 percent: the fragment loads
+saturate the shared read path while the tensor pipe idles. Dropping to mma.sync PTX
+with hand placed fragments changes nothing, which
 is the informative result: the instruction path was never the bottleneck, the
 fragment loads are.
 
@@ -141,9 +152,11 @@ of cuBLAS and flips the Speed of Light to co limited. A three stage pipeline is
 tried and reverted (it costs occupancy). The bank conflict counter then shows the
 real problem: 219 million shared load conflicts. A shared memory swizzle, applied
 identically to the stores and the loads so correctness is unconditional, cuts them
-to 34 million, collapses the memory Speed of Light from 76 to 30 percent, and lifts
-compute to 83 percent. The kernel now reaches about 90 percent of cuBLAS and passes
-the compute bound gate.
+to 33.7 million, collapses the memory Speed of Light from 76 to 30 percent, and
+lifts compute to 83 percent. The kernel now reaches 89.9 percent of cuBLAS at 4096
+cubed and 88.9 percent at 8192 cubed, and passes the compute bound gate. It is not
+a flat 90 percent across the range: at 1024 cubed it is 63.5 percent and at 2048
+cubed 80.5 percent, because the small shapes do not fill 48 SMs.
 
 \section{Supporting families}
 
@@ -152,11 +165,15 @@ device (Table \ref{tab:families}). GEMV is a bandwidth benchmark in disguise: it
 arithmetic intensity is fixed near 0.5 FLOP per byte, so the warp and vectorized
 kernels reach cuBLAS and the measured streaming bandwidth while the naive kernel is
 coalescing limited. CSR SpMV is tested on a skewed degree matrix, where the warp
-per row kernel is about 1.6 times the thread per row kernel. TRSM reduces most of
-its work to a GEMM style trailing update, and the blocked kernel matches cuBLAS to
-about 1e-7 with a verified residual. The cuSOLVER LU and Cholesky solvers are
-checked by residual (about 5.6e-7 and 4.3e-7), not merely by the absence of an
-error.
+per row kernel is about 1.6 times the thread per row kernel; its percent of
+cuSPARSE is withdrawn, because the cuSPARSE wrapper built its descriptors and its
+workspace inside the timed region, so the denominator included setup my own kernels
+never paid. TRSM reduces most of its work to a GEMM style trailing update. The
+blocked kernel agrees with cuBLAS to about 1e-7, which is a correctness result and
+not a performance one: on speed it reaches 381 GFLOP/s against cuBLAS STRSM's 1200,
+31.8 percent, and closing that gap is open work. The cuSOLVER LU and Cholesky
+solvers are checked by residual (about 5.6e-7 and 4.3e-7), not merely by the
+absence of an error.
 
 \begin{table}[htbp]
 \centering
@@ -167,9 +184,16 @@ error.
 
 \section{Roofline analysis}
 
-Figure \ref{fig:roofline} places the kernels against the measured ceilings. The
+Figure \ref{fig:roofline} places the kernels against the ceilings. The bandwidth
+ceiling is measured on this GPU; the compute roofs are the hardware's, computed as
+48 SMs times the SM clock times 512 FLOP per cycle for FP16 inputs with FP32
+accumulate, and 256 FLOP per cycle for FP32. That distinction matters: setting the
+roof to a cuBLAS measurement, as an earlier version of this profiler did, turns
+every percent of roof into a percent of cuBLAS drawn on log axes. cuBLAS is drawn
+instead as a dashed attainable line, and it reaches 97.2 percent of the tensor roof,
+which is itself the best evidence that 512 FLOP per cycle is the right rate. The
 GEMM variants sit far to the right of both ridges, in the compute bound region; the
-top kernel lands at about 84 percent of the tensor roof. GEMV sits at 0.5 FLOP per
+top kernel lands at 84.1 percent of the tensor roof. GEMV sits at 0.5 FLOP per
 byte, on the bandwidth diagonal in the memory bound region. This is the evidence
 behind the compute bound claim and behind the tile choice. The roofline also
 settles one epilogue fusion decision: a standalone bias plus ReLU pass has an
@@ -180,8 +204,9 @@ saving on the fused shape.
 \begin{figure}[htbp]
 \centering
 \includegraphics[width=0.95\textwidth]{roofline.pdf}
-\caption{Roofline on the RTX 5070 with measured ceilings. GEMM is compute bound;
-GEMV is memory bound.}
+\caption{Roofline on the RTX 5070. The bandwidth ceiling is measured; the compute
+roofs are the hardware's, and cuBLAS is a dashed attainable line rather than a
+ceiling. GEMM is compute bound; GEMV is memory bound.}
 \label{fig:roofline}
 \end{figure}
 
@@ -190,20 +215,23 @@ GEMV is memory bound.}
 The result that most shaped the work is that tiling alone loses to naive on this
 card, because the large cache hierarchy makes the naive kernel's redundant traffic
 cheap. Register blocking, then feeding the tensor cores through a swizzled shared
-layout, are what actually move the number. The remaining ten percent to cuBLAS is
-where its per shape tuning (deeper pipelines, split K for the largest shapes) lives.
-The failed three stage pipeline round is kept in the engineering log as an equal
-rank result: it is the honest record that a plausible change measured worse and was
-reverted.
+layout, are what actually move the number. The remaining ten percent to cuBLAS at
+the large shapes, and the much larger gap at 1024 cubed, is where its per shape
+tuning (deeper pipelines, split K for the small shapes that cannot fill 48 SMs)
+lives. The failed three stage pipeline round is kept in the engineering log as an
+equal rank result: it is the honest record that a plausible change measured worse
+and was reverted.
 
 \section{Conclusion}
 
-A hand written FP16 GEMM on the RTX 5070 reaches about 90 percent of cuBLAS and is
-demonstrably compute bound, arrived at through nine logged diagnostic rounds with
-one change each. The supporting families are correct and benchmarked, the roofline
-is built from measured ceilings, and every number is reproducible from a clean
-clone. The method, one change per round against profiler evidence, is the
-transferable part.
+A hand written FP16 GEMM on the RTX 5070 reaches 89.9 percent of cuBLAS at 4096
+cubed and is demonstrably compute bound, arrived at through nine logged diagnostic
+rounds with one change each. The supporting families are correct and benchmarked,
+the roofline is built on hardware ceilings, and every number is regenerated from
+the results files in the tree. The method, one change per round against profiler
+evidence, is the transferable part. What the corrections register in
+\texttt{docs/CORRECTIONS.md} adds to that method is the step I had skipped:
+auditing my own claims against my own data before publishing them.
 
 \bibliographystyle{plain}
 \bibliography{refs}

@@ -8,12 +8,12 @@ cmake-build-*/
 _deps/
 /third_party/
 
-# Experiment outputs. Generated benchmark rows are not committed, but the ncu
-# diagnostic text pages and round metadata are: the diagnostic log points at
-# them as evidence. The large binary ncu and nsys reports stay out (regenerable).
-experiments/results/**/*.jsonl
+# Experiment outputs. The canonical results are committed: summary.csv, the sweep
+# JSONL, the roofline CSVs, and the ncu diagnostic text pages and round metadata.
+# A clean clone has to be able to rebuild every figure and table from what is in
+# the tree (defect A7). Only the per run scratch summaries and the large binary
+# ncu and nsys reports stay out, because both are regenerable.
 experiments/results/summary_*.csv
-experiments/results/roofline*.csv
 
 # Nsight artifacts
 *.ncu-rep
@@ -44,3 +44,10 @@ venv/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Agent tooling and process files (never published)
+CLAUDE.md
+.claude/
+Cuda-kernel-library V2.md
+tasks/
+BOARD.md

@@ -21,8 +21,8 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Device code standard: the newest the installed nvcc accepts. Probed at
-# Phase 0; recorded in PROGRESS.md. CUDA 13.3 accepts C++20 for device code.
+# Device code standard: the newest the installed nvcc accepts. CUDA 13.3
+# accepts C++20 for device code.
 set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 

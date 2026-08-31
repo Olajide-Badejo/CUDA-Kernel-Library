@@ -17,7 +17,7 @@ namespace ckl {
 struct MachineCeilings {
     double bandwidth_bytes_per_s;  // measured streaming bandwidth
     double fp32_flops_per_s;       // FP32 CUDA core peak
-    double tensor_flops_per_s;     // tensor core peak (empirical, e.g. best cuBLAS FP16)
+    double tensor_flops_per_s;     // hardware tensor roof (SMs x clock x FLOP per cycle)
 };
 
 struct RooflinePoint {
