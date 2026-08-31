@@ -38,6 +38,7 @@
 #include "ckl/device_buffer.hpp"
 #include "ckl/gemm.hpp"
 #include "ckl/status.hpp"
+#include "gemm/detail/gemm_swizzle.hpp"
 #include "gpu_environment.hpp"
 #include "reference.hpp"
 
@@ -715,6 +716,146 @@ TEST_F(TensorStreams, TwoConcurrentStreams) {
         ckl::gemm_reference_scaled(c.a_round, c.b_round, c.c0, s.m, s.n, s.k, 1.25f, 0.5f);
     EXPECT_LT(ckl::max_scaled_residual(out1, ref), ckl::tol(s.k)) << "mma_opt on stream 1";
     EXPECT_LT(ckl::max_scaled_residual(out2, ref), ckl::tol(s.k)) << "mma_ldm on stream 2";
+}
+
+// ---------------------------------------------------------------------------
+// Shared memory swizzle, checked on the host
+// ---------------------------------------------------------------------------
+//
+// The mma_opt mainloop is correct for any map applied identically at the
+// cp.async store and the ldmatrix load, so the GEMM results above say nothing
+// about whether the map does its job. What it has to be is a bijection (nothing
+// overwritten, nothing unread), 16 byte chunk preserving (cp.async and ldmatrix
+// both move eight halves at a time), and conflict free across the eight lanes of
+// an ldmatrix wavefront. All three are integer arithmetic, so they are checked
+// here rather than inferred from a profiler counter.
+//
+// The old A map XOR-ed the four chunk index of a 64 byte row with the row index,
+// which cannot separate eight lanes; its lane bases came out 0, 20, 8, 28, 0,
+// 20, 8, 28, a two way conflict on every A wavefront. The current map packs two
+// rows into one 128 byte line first.
+
+constexpr int kSwzM = ckl::detail::kSwzTileM;
+constexpr int kSwzN = ckl::detail::kSwzTileN;
+constexpr int kSwzK = ckl::detail::kSwzTileK;
+
+// 32 banks of 4 bytes; the offsets the maps return count halves.
+int bank_of(int half_offset) {
+    return (half_offset / 2) % 32;
+}
+
+TEST(GemmOptSwizzle, ATileMapIsABijection) {
+    std::vector<int> seen(static_cast<std::size_t>(kSwzM) * kSwzK, -1);
+    for (int r = 0; r < kSwzM; ++r) {
+        for (int c = 0; c < kSwzK; ++c) {
+            const int o = ckl::detail::swizzle_a(r, c);
+            ASSERT_GE(o, 0) << "row " << r << " col " << c;
+            ASSERT_LT(o, kSwzM * kSwzK) << "row " << r << " col " << c;
+            ASSERT_EQ(seen[static_cast<std::size_t>(o)], -1)
+                << "offset " << o << " is written by two different (row, col) pairs";
+            seen[static_cast<std::size_t>(o)] = r * kSwzK + c;
+        }
+    }
+}
+
+TEST(GemmOptSwizzle, BTileMapIsABijection) {
+    std::vector<int> seen(static_cast<std::size_t>(kSwzK) * kSwzN, -1);
+    for (int r = 0; r < kSwzK; ++r) {
+        for (int c = 0; c < kSwzN; ++c) {
+            const int o = ckl::detail::swizzle_b(r, c);
+            ASSERT_GE(o, 0) << "row " << r << " col " << c;
+            ASSERT_LT(o, kSwzK * kSwzN) << "row " << r << " col " << c;
+            ASSERT_EQ(seen[static_cast<std::size_t>(o)], -1)
+                << "offset " << o << " is written by two different (row, col) pairs";
+            seen[static_cast<std::size_t>(o)] = r * kSwzN + c;
+        }
+    }
+}
+
+// A cp.async of a float4 and an ldmatrix row both move eight contiguous halves
+// from one 16 byte aligned address, so the map has to keep those eight together.
+TEST(GemmOptSwizzle, MapsKeepSixteenByteChunksTogether) {
+    for (int r = 0; r < kSwzM; ++r) {
+        for (int c = 0; c < kSwzK; c += 8) {
+            const int base = ckl::detail::swizzle_a(r, c);
+            ASSERT_EQ(base % 8, 0) << "A chunk at row " << r << " col " << c << " is not aligned";
+            for (int j = 0; j < 8; ++j) {
+                ASSERT_EQ(ckl::detail::swizzle_a(r, c + j), base + j);
+            }
+        }
+    }
+    for (int r = 0; r < kSwzK; ++r) {
+        for (int c = 0; c < kSwzN; c += 8) {
+            const int base = ckl::detail::swizzle_b(r, c);
+            ASSERT_EQ(base % 8, 0) << "B chunk at row " << r << " col " << c << " is not aligned";
+            for (int j = 0; j < 8; ++j) {
+                ASSERT_EQ(ckl::detail::swizzle_b(r, c + j), base + j);
+            }
+        }
+    }
+}
+
+// The eight lane bases of the first wavefront of an A ldmatrix.x4 at the tile
+// origin. The spec fixes this sequence; anything else means the map changed.
+TEST(GemmOptSwizzle, ALdmatrixLaneBasesMatchTheDesignedBanks) {
+    const std::vector<int> expected = {0, 16, 4, 20, 8, 24, 12, 28};
+    for (int lane = 0; lane < 8; ++lane) {
+        EXPECT_EQ(bank_of(ckl::detail::swizzle_a(lane, 0)),
+                  expected[static_cast<std::size_t>(lane)])
+            << "lane " << lane;
+    }
+}
+
+// Every A wavefront the mainloop actually issues: row_base runs over the four
+// 16 row mma tiles of both warp rows, k_off over the two K substeps, and the x4
+// form splits its 32 lanes into four groups of eight, each group one wavefront.
+TEST(GemmOptSwizzle, EveryALdmatrixWavefrontIsConflictFree) {
+    for (int row_base = 0; row_base < kSwzM; row_base += 16) {
+        for (int k_off = 0; k_off < kSwzK; k_off += 16) {
+            for (int group = 0; group < 4; ++group) {
+                std::vector<int> banks;
+                for (int i = 0; i < 8; ++i) {
+                    const int lane = group * 8 + i;
+                    const int r = row_base + (lane % 16);
+                    const int c = k_off + (lane / 16) * 8;
+                    banks.push_back(bank_of(ckl::detail::swizzle_a(r, c)));
+                }
+                for (std::size_t x = 0; x < banks.size(); ++x) {
+                    for (std::size_t y = x + 1; y < banks.size(); ++y) {
+                        ASSERT_NE(banks[x], banks[y])
+                            << "A row_base " << row_base << " k_off " << k_off << " group " << group
+                            << ": lanes " << x << " and " << y << " share bank " << banks[x];
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The same for B, which is now read with ldmatrix.x4.trans: lanes 16 to 31
+// address the next eight columns, so the wavefronts changed and the swizzle has
+// to still separate them.
+TEST(GemmOptSwizzle, EveryBLdmatrixWavefrontIsConflictFree) {
+    for (int col_base = 0; col_base < kSwzN; col_base += 16) {
+        for (int k_off = 0; k_off < kSwzK; k_off += 16) {
+            for (int group = 0; group < 4; ++group) {
+                std::vector<int> banks;
+                for (int i = 0; i < 8; ++i) {
+                    const int lane = group * 8 + i;
+                    const int r = k_off + (lane % 16);
+                    const int c = col_base + (lane / 16) * 8;
+                    banks.push_back(bank_of(ckl::detail::swizzle_b(r, c)));
+                }
+                for (std::size_t x = 0; x < banks.size(); ++x) {
+                    for (std::size_t y = x + 1; y < banks.size(); ++y) {
+                        ASSERT_NE(banks[x], banks[y])
+                            << "B col_base " << col_base << " k_off " << k_off << " group " << group
+                            << ": lanes " << x << " and " << y << " share bank " << banks[x];
+                    }
+                }
+            }
+        }
+    }
 }
 
 }  // namespace

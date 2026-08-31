@@ -387,3 +387,63 @@ fill the SMs; at 4096 and 8192 with 128 by 128 tiles there are 1024 and 4096
 output blocks against 48 SMs, so the machine is already saturated and the kernel is
 compute bound. Split K is the right tool for small output, large K shapes, and is
 noted for that case rather than applied where it cannot help.
+
+## Round 10: mainloop rework for 1.1.0, four changes, measurement pending
+
+Date: 2026-09-01. Artifacts: pending (owner sweep). Nothing in this entry is a
+measured result; the four changes below are structural, they are verified by
+tests and by the sanitizers, and every performance claim about them is a
+hypothesis until the locked clock ladder is re-run.
+
+**A tile swizzle, replaced.** Round 9's map XOR-ed the four chunk index of a
+shared A row with the row index. An A row is 32 halves, 64 bytes, half a bank
+window, so four chunks cannot separate the eight lanes of an `ldmatrix.x4`
+wavefront and the map was a two way conflict on every A read. The new map packs
+two logical A rows into one 128 byte line and permutes the eight chunks of that
+line by the line index, which is the same trick that already worked for B. The
+tile is the same size and the same map is applied at the `cp.async` store and at
+the `ldmatrix` load, so correctness is unconditional. Both maps now live in
+`src/gemm/detail/gemm_swizzle.hpp` and the GEMM tensor suite checks them on the
+host: bijection, 16 byte chunks preserved, and distinct banks across every
+wavefront the mainloop issues. Effect on the conflict counter: measurement
+pending (owner sweep).
+
+**Three stage pipeline, one barrier per K stage.** Round 8 tried a third stage,
+lost on wall clock, and was reverted with the diagnosis that shared memory had
+cut occupancy. Round 9's ncu page says that was arithmetically wrong: the block
+limit was already set by registers. The reason to want a third stage is not
+deeper latency hiding, it is that the buffer written at iteration s was last read
+at iteration s-1 and is therefore already fenced by the iteration-s barrier, so
+the loop needs one `__syncthreads` per K stage instead of two. The loop now
+waits, syncs, issues the stage that is two ahead, and runs the mma, with no
+trailing sync. Three stages exceed the 48 KB static `__shared__` ceiling on plain
+sm_120, so the tile moved to dynamic shared memory and the launcher raises
+`cudaFuncAttributeMaxDynamicSharedMemorySize` once per process after checking
+`sharedMemPerBlockOptin`; a device that cannot give the block its budget gets
+`kNotSupported` rather than a quieter, slower path. Effect on runtime:
+measurement pending (owner sweep).
+
+**Epilogue store width.** The SASS for the round 9 epilogue was scalar `STG.E`,
+one float per store. The `m16n8k16` accumulator hands each lane two adjacent
+columns of two rows per tile, so a `float2` is the widest store the fragment
+layout allows without exchanging accumulators through shared memory first; the
+epilogue now issues that pair explicitly and the SASS is `STG.E.64` throughout.
+The launcher checks that C is eight byte aligned and refuses otherwise, because
+that is a caller error worth naming. A 128 bit epilogue would need a shared
+memory exchange and belongs to the register and epilogue study, not here. Effect
+on runtime: measurement pending (owner sweep).
+
+**B fragments.** B was read with `ldmatrix.x2.trans`, one instruction per 16 by 8
+mma tile. It is now `ldmatrix.x4.trans`, one instruction per two neighbouring
+tiles, which halves the B instruction count per K substep, and the B fragments
+are double buffered in registers so the loads for substep k+1 are in flight while
+the mma of substep k runs. The register file absorbed both without spilling and
+the block limit is unchanged. Effect on runtime: measurement pending (owner
+sweep).
+
+Verification for the round: the full `ctest -L gpu` set is green, including the
+new host side swizzle tests and the existing alpha and beta, non finite C, and
+fusion suites; `memcheck`, `racecheck`, `initcheck` and `synccheck` are all clean
+on the tensor GEMM suite; and racecheck was shown to go red first, by deleting
+the single barrier from the new loop, before it was shown to go green with the
+barrier back.

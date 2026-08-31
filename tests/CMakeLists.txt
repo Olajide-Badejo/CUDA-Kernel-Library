@@ -80,6 +80,11 @@ ckl_register_gtest(ckl_test_gemm)
 
 add_executable(ckl_test_gemm_tensor test_gemm_tensor.cpp)
 target_link_libraries(ckl_test_gemm_tensor PRIVATE ckl_gemm ckl_headers ckl_test_support)
+# The shared memory swizzles of the mma_opt mainloop are integer maps, and their
+# properties (bijection, chunk preserving, conflict free) are cheaper to check on
+# the host than to read off a profiler counter. src/ is on the include path for
+# that one private header; nothing else here reaches into the implementation.
+target_include_directories(ckl_test_gemm_tensor PRIVATE "${PROJECT_SOURCE_DIR}/src")
 ckl_set_warnings(ckl_test_gemm_tensor)
 ckl_register_gtest(ckl_test_gemm_tensor)
 
