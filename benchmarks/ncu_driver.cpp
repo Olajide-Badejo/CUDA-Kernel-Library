@@ -19,7 +19,7 @@
 #include "ckl/cuda_check.hpp"
 #include "ckl/device_buffer.hpp"
 #include "ckl/gemm.hpp"
-#include "ckl/reference.hpp"
+#include "reference.hpp"
 
 namespace {
 

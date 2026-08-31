@@ -20,11 +20,11 @@ circles, tensor kernels triangles, so the split reads in grayscale too.
 
 ## Two modes
 
-- Analytical (`include/ckl/roofline.hpp`): closed form FLOP and byte counts per
+- Analytical (`benchmarks/support/roofline.hpp`): closed form FLOP and byte counts per
   operation. GEMM does `2 m n k` FLOPs and, in the minimum traffic model, moves
   `(m k + k n + m n)` elements; GEMV does `2 m n` FLOPs and moves about `m n`
   elements (A dominates). These give the arithmetic intensity of each operation.
-- Empirical (`src/profiler/roofline.cpp`): measures the ceilings on this GPU rather
+- Empirical (`tools/roofline.cpp`): measures the ceilings on this GPU rather
   than reading the datasheet. Streaming bandwidth from a large device to device
   copy, the FP32 roof from cuBLAS SGEMM at 8192 cubed, the tensor roof from cuBLAS
   FP16 GEMM at 8192 cubed. Then it times the ladder and places each variant, writing

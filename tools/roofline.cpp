@@ -34,12 +34,12 @@
 
 #include "ckl/cuda_check.hpp"
 #include "ckl/device_buffer.hpp"
-#include "ckl/event_timer.hpp"
+#include "event_timer.hpp"
 #include "ckl/gemm.hpp"
 #include "ckl/gemv.hpp"
 #include "ckl/nvml_monitor.hpp"
-#include "ckl/reference.hpp"
-#include "ckl/roofline.hpp"
+#include "reference.hpp"
+#include "roofline.hpp"
 
 namespace {
 

@@ -1,6 +1,6 @@
 # TRSM family library.
 
-add_library(ckl_trsm STATIC
+add_library(ckl_trsm
     trsm_naive.cu
     trsm_blocked.cu
     cublas_trsm.cpp
@@ -11,9 +11,4 @@ target_link_libraries(ckl_trsm
     PRIVATE CUDA::cublas
 )
 
-set_target_properties(ckl_trsm PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    POSITION_INDEPENDENT_CODE ON
-)
-
-ckl_set_warnings(ckl_trsm)
+ckl_configure_library(ckl_trsm trsm)

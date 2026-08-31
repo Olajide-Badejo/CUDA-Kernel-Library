@@ -1,0 +1,14 @@
+#pragma once
+
+// Generated from cmake/version.hpp.in by configure_file. Do not edit the copy in
+// the build tree; the version lives in the root project() call.
+
+#define CKL_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define CKL_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define CKL_VERSION_PATCH @PROJECT_VERSION_PATCH@
+
+#define CKL_VERSION_STRING "@PROJECT_VERSION@"
+
+// Single integer for compile time comparisons: 1.1.0 is 10100.
+#define CKL_VERSION \
+    (10000 * CKL_VERSION_MAJOR + 100 * CKL_VERSION_MINOR + CKL_VERSION_PATCH)

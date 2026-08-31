@@ -1,6 +1,6 @@
 # GEMV family library.
 
-add_library(ckl_gemv STATIC
+add_library(ckl_gemv
     gemv_naive.cu
     gemv_warp.cu
     gemv_vectorized.cu
@@ -12,9 +12,4 @@ target_link_libraries(ckl_gemv
     PRIVATE CUDA::cublas
 )
 
-set_target_properties(ckl_gemv PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    POSITION_INDEPENDENT_CODE ON
-)
-
-ckl_set_warnings(ckl_gemv)
+ckl_configure_library(ckl_gemv gemv)

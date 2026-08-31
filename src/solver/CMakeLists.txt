@@ -1,6 +1,6 @@
 # cuSOLVER dense solver wrapper.
 
-add_library(ckl_solver STATIC
+add_library(ckl_solver
     dense_solver.cpp
 )
 
@@ -9,8 +9,4 @@ target_link_libraries(ckl_solver
     PRIVATE CUDA::cusolver
 )
 
-set_target_properties(ckl_solver PROPERTIES
-    POSITION_INDEPENDENT_CODE ON
-)
-
-ckl_set_warnings(ckl_solver)
+ckl_configure_library(ckl_solver solver)

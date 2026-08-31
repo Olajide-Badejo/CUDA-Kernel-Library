@@ -1,7 +1,7 @@
 // WMMA FP16 GEMM: FP16 storage, FP32 accumulate. The kernel body is the shared
 // templated implementation; this file instantiates it for __half.
 
-#include "ckl/detail/wmma_gemm.cuh"
+#include "detail/wmma_gemm.cuh"
 
 namespace ckl {
 

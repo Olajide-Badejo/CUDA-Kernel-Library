@@ -22,9 +22,9 @@
 
 #include "ckl/cuda_check.hpp"
 #include "ckl/device_buffer.hpp"
-#include "ckl/event_timer.hpp"
+#include "event_timer.hpp"
 #include "ckl/gemm.hpp"
-#include "ckl/reference.hpp"
+#include "reference.hpp"
 
 int main(int argc, char** argv) {
     const int n = argc > 1 ? std::atoi(argv[1]) : 4096;

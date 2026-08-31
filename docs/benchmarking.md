@@ -3,7 +3,7 @@
 ## Timing protocol
 
 Every timed measurement uses CUDA events with the same protocol
-(`include/ckl/event_timer.hpp`): five warmup launches, then twenty timed reps,
+(`benchmarks/support/event_timer.hpp`): five warmup launches, then twenty timed reps,
 reported as the median with the interquartile range so a single slow rep does not
 move the headline. GEMM throughput is `2 m n k` FLOPs over the median time; GEMV
 and SpMV report the same way, and GEMV is also read as effective bandwidth because

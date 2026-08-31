@@ -3,7 +3,7 @@
 // shorter mantissa, so its error distribution differs from FP16; the tolerance is
 // derived per type in docs/gemm.md.
 
-#include "ckl/detail/wmma_gemm.cuh"
+#include "detail/wmma_gemm.cuh"
 
 namespace ckl {
 

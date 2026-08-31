@@ -1,7 +1,7 @@
 # NVML telemetry monitor. Uses the CUDAToolkit NVML target when present, else the
 # FindNVML fallback (stub plus the WSL runtime library).
 
-add_library(ckl_telemetry STATIC
+add_library(ckl_telemetry
     nvml_monitor.cpp
 )
 
@@ -21,5 +21,4 @@ endif()
 find_package(Threads REQUIRED)
 target_link_libraries(ckl_telemetry PRIVATE Threads::Threads)
 
-set_target_properties(ckl_telemetry PROPERTIES POSITION_INDEPENDENT_CODE ON)
-ckl_set_warnings(ckl_telemetry)
+ckl_configure_library(ckl_telemetry telemetry)

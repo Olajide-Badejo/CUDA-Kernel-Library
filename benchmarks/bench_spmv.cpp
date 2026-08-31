@@ -12,8 +12,8 @@
 
 #include "ckl/cuda_check.hpp"
 #include "ckl/device_buffer.hpp"
-#include "ckl/event_timer.hpp"
-#include "ckl/reference.hpp"
+#include "event_timer.hpp"
+#include "reference.hpp"
 #include "ckl/sparse.hpp"
 
 namespace {

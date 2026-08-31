@@ -175,8 +175,8 @@ reports. See [`docs/`](docs/) for per-component notes,
 
 RTX 5070 (Blackwell GB205, compute capability 12.0, sm_120, 48 SMs, 12 GB GDDR7),
 CUDA Toolkit 13.3, GCC 15.2, built and run inside WSL2 Ubuntu. Measured ceilings
-are captured at build time by `./build/device_probe` and used everywhere in place
-of the datasheet.
+are captured at build time by `./build/tools/ckl_device_probe` and used everywhere
+in place of the datasheet.
 
 ## License and how this was built
 

@@ -36,7 +36,7 @@ bench: build
 
 # Measure the roofline (ceilings plus the ladder) and render the figure.
 roofline: build
-	./$(BUILD_DIR)/src/profiler/roofline
+	./$(BUILD_DIR)/tools/ckl_roofline
 	python3 scripts/plot_roofline.py
 
 # Full resumable sweep across every family; refreshes the canonical summary.csv.

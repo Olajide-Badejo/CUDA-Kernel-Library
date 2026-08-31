@@ -12,9 +12,9 @@
 
 #include "ckl/cuda_check.hpp"
 #include "ckl/device_buffer.hpp"
-#include "ckl/event_timer.hpp"
+#include "event_timer.hpp"
 #include "ckl/gemv.hpp"
-#include "ckl/reference.hpp"
+#include "reference.hpp"
 
 namespace {
 

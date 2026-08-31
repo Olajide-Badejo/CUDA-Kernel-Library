@@ -1,0 +1,22 @@
+# Runs during `cmake --install`, not during configure. The pkg-config file has to
+# describe the prefix the files actually landed in, and `cmake --install
+# --prefix <dir>` overrides the configure time CMAKE_INSTALL_PREFIX, so a .pc
+# written at configure time points at the wrong tree. Everything except the
+# prefix is fixed at configure time and baked into this script.
+#
+# The \${prefix} spellings below survive into the generated .pc as literal
+# pkg-config variable references, which is what makes the file relocatable.
+
+set(CKL_PC_LIBDIR "\${prefix}/@CKL_PC_RELATIVE_LIBDIR@")
+set(CKL_PC_INCLUDEDIR "\${prefix}/@CKL_PC_RELATIVE_INCLUDEDIR@")
+set(CKL_PC_CUDA_LIBDIR "@CKL_PC_CUDA_LIBDIR@")
+set(PROJECT_VERSION "@PROJECT_VERSION@")
+set(PROJECT_DESCRIPTION "@PROJECT_DESCRIPTION@")
+
+configure_file(
+    "@PROJECT_SOURCE_DIR@/cmake/ckl.pc.in"
+    "@PROJECT_BINARY_DIR@/ckl.pc"
+    @ONLY)
+
+file(INSTALL "@PROJECT_BINARY_DIR@/ckl.pc"
+    DESTINATION "${CMAKE_INSTALL_PREFIX}/@CKL_PC_RELATIVE_LIBDIR@/pkgconfig")

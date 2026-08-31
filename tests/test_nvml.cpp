@@ -12,7 +12,7 @@
 #include "ckl/device_buffer.hpp"
 #include "ckl/gemm.hpp"
 #include "ckl/nvml_monitor.hpp"
-#include "ckl/reference.hpp"
+#include "reference.hpp"
 
 int main() {
     const int n = 2048;

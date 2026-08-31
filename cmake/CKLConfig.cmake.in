@@ -1,0 +1,21 @@
+@PACKAGE_INIT@
+
+# FindNVML.cmake is installed next to this file, so put our own directory on the
+# module path before anything tries to resolve ckl::nvml.
+list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(CUDAToolkit)
+find_dependency(Threads)
+
+# The vendor libraries are PRIVATE on the six targets. On a static build they
+# survive into the exported interface as $<LINK_ONLY:...>, so the consumer's
+# generate step still has to see the imported targets by name.
+if(NOT TARGET CUDA::nvml AND NOT TARGET ckl::nvml)
+    find_package(NVML QUIET)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/CKLTargets.cmake")
+
+check_required_components(CKL)

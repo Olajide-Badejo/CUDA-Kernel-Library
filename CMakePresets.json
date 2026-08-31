@@ -1,0 +1,86 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "Development build for the local GPU",
+      "description": "Release, Ninja, whatever architecture this machine reports.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CUDA_ARCHITECTURES": "native"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release fat binary",
+      "description": "Every architecture the project ships SASS for, plus PTX for forward compatibility.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CUDA_ARCHITECTURES": "80-real;86-real;89-real;90-real;120-real;120-virtual"
+      }
+    },
+    {
+      "name": "multiarch",
+      "displayName": "Release fat binary with warnings as errors",
+      "description": "The release architecture list under the zero warning gate.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/multiarch",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CUDA_ARCHITECTURES": "80-real;86-real;89-real;90-real;120-real;120-virtual",
+        "CKL_WERROR": "ON"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "Debug with AddressSanitizer on host code",
+      "description": "Host side sanitizer only; device code is not instrumented. The architecture is pinned rather than native because CMake's native detection compiles and runs a probe binary, and the sanitizer linker flags make that probe fail on this setup.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CUDA_ARCHITECTURES": "120",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address -fno-omit-frame-pointer",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address",
+        "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address",
+        "CKL_LINEINFO": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "multiarch",
+      "configurePreset": "multiarch"
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}
