@@ -7,17 +7,40 @@
 // cublasSscal. Count in int64_t and chunk the call, so the only limit left is
 // the allocation itself. Internal to the GEMM library; not installed.
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
 #include <cublas_v2.h>
+#include <cuda_runtime.h>
 
+#include "ckl/cuda_check.hpp"
 #include "ckl/status.hpp"
 
 namespace ckl {
 namespace detail {
 
 inline void scal_all(cublasHandle_t h, std::int64_t count, float beta, float* x) {
+    if (count <= 0) {
+        return;
+    }
+    if (beta == 0.0f) {
+        // Clear rather than scale. BLAS says C is not read when beta is zero, so
+        // a NaN or uninitialized C is legal input here, and scaling it would
+        // give 0 * NaN, which is still NaN. The descriptor path in dispatch.cpp
+        // already clears for the same reason; the free functions used to scale
+        // and propagated the NaN.
+        cudaStream_t stream = nullptr;
+        const cublasStatus_t gs = cublasGetStream(h, &stream);
+        if (gs != CUBLAS_STATUS_SUCCESS) {
+            throw Error(Status::kExecutionFailed,
+                        "cuBLAS error " + std::to_string(static_cast<int>(gs)) +
+                            ": cublasGetStream");
+        }
+        CKL_CUDA_CHECK(cudaMemsetAsync(x, 0, static_cast<std::size_t>(count) * sizeof(float),
+                                       stream));
+        return;
+    }
     constexpr std::int64_t kChunk = 1073741824;  // 2^30 elements per call
     std::int64_t done = 0;
     while (done < count) {

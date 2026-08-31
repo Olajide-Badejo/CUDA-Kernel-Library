@@ -109,10 +109,16 @@ void NvmlMonitor::start() {
     impl_->samples.clear();
     impl_->t0 = std::chrono::steady_clock::now();
     impl_->running.store(true);
-    impl_->worker = std::thread([this] {
-        while (impl_->running.load()) {
-            impl_->poll_once();
-            std::this_thread::sleep_for(std::chrono::milliseconds(impl_->interval_ms));
+    // The worker captures the Impl, not the NvmlMonitor. Impl lives behind a
+    // unique_ptr, so its address survives a move of the monitor, while `this`
+    // does not: a thread that reached back through the moved from monitor found
+    // a null impl_ and took the process down with it, which made the movable
+    // contract this class advertises a lie.
+    Impl* impl = impl_.get();
+    impl_->worker = std::thread([impl] {
+        while (impl->running.load()) {
+            impl->poll_once();
+            std::this_thread::sleep_for(std::chrono::milliseconds(impl->interval_ms));
         }
     });
 }
