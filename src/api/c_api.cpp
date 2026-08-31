@@ -134,6 +134,32 @@ ckl_status_t invalid(const char* message) {
     return CKL_STATUS_INVALID_VALUE;
 }
 
+// A runtime failure carries no ckl::Error, so the detail has to be built here.
+// An allocation failure is reported as such; everything else is an execution
+// failure, which is what a caller can act on.
+ckl_status_t record_cuda(const char* where, cudaError_t e) {
+    ckl::detail::set_last_error(std::string(where) + ": " + cudaGetErrorString(e));
+    if (e == cudaErrorMemoryAllocation) {
+        return CKL_STATUS_ALLOC_FAILED;
+    }
+    return CKL_STATUS_EXECUTION_FAILED;
+}
+
+bool to_memcpy_kind(ckl_memcpy_kind_t v, cudaMemcpyKind* out) {
+    switch (v) {
+        case CKL_MEMCPY_H2D:
+            *out = cudaMemcpyHostToDevice;
+            return true;
+        case CKL_MEMCPY_D2H:
+            *out = cudaMemcpyDeviceToHost;
+            return true;
+        case CKL_MEMCPY_D2D:
+            *out = cudaMemcpyDeviceToDevice;
+            return true;
+    }
+    return false;
+}
+
 // Fills a descriptor from the flat argument list every entry point carries.
 bool build_desc(ckl_layout_t layout, ckl_operation_t opa, ckl_operation_t opb, int64_t m, int64_t n,
                 int64_t k, ckl_datatype_t dta, int64_t lda, ckl_datatype_t dtb, int64_t ldb,
@@ -198,6 +224,87 @@ ckl_status_t ckl_last_error(char* buf, size_t len) {
     std::memcpy(buf, src, n);
     buf[n] = '\0';
     return CKL_STATUS_SUCCESS;
+}
+
+ckl_status_t ckl_device_malloc(void** dptr, size_t bytes) {
+    ckl::detail::clear_last_error();
+    if (dptr == nullptr) {
+        return invalid("ckl_device_malloc: out-param is null");
+    }
+    *dptr = nullptr;
+    if (bytes == 0) {
+        return CKL_STATUS_SUCCESS;
+    }
+    try {
+        const cudaError_t e = cudaMalloc(dptr, bytes);
+        if (e != cudaSuccess) {
+            *dptr = nullptr;
+            return record_cuda("ckl_device_malloc", e);
+        }
+        return CKL_STATUS_SUCCESS;
+    } catch (const std::exception& e) {
+        return record(e);
+    } catch (...) {
+        return CKL_STATUS_INTERNAL;
+    }
+}
+
+ckl_status_t ckl_device_free(void* dptr) {
+    ckl::detail::clear_last_error();
+    if (dptr == nullptr) {
+        return CKL_STATUS_SUCCESS;
+    }
+    try {
+        const cudaError_t e = cudaFree(dptr);
+        if (e != cudaSuccess) {
+            return record_cuda("ckl_device_free", e);
+        }
+        return CKL_STATUS_SUCCESS;
+    } catch (const std::exception& e) {
+        return record(e);
+    } catch (...) {
+        return CKL_STATUS_INTERNAL;
+    }
+}
+
+ckl_status_t ckl_memcpy(void* dst, const void* src, size_t bytes, ckl_memcpy_kind_t kind) {
+    ckl::detail::clear_last_error();
+    if (bytes == 0) {
+        return CKL_STATUS_SUCCESS;
+    }
+    if (dst == nullptr || src == nullptr) {
+        return invalid("ckl_memcpy: source or destination is null");
+    }
+    cudaMemcpyKind k = cudaMemcpyHostToDevice;
+    if (!to_memcpy_kind(kind, &k)) {
+        return invalid("ckl_memcpy: kind is out of range");
+    }
+    try {
+        const cudaError_t e = cudaMemcpy(dst, src, bytes, k);
+        if (e != cudaSuccess) {
+            return record_cuda("ckl_memcpy", e);
+        }
+        return CKL_STATUS_SUCCESS;
+    } catch (const std::exception& e) {
+        return record(e);
+    } catch (...) {
+        return CKL_STATUS_INTERNAL;
+    }
+}
+
+ckl_status_t ckl_device_synchronize(void) {
+    ckl::detail::clear_last_error();
+    try {
+        const cudaError_t e = cudaDeviceSynchronize();
+        if (e != cudaSuccess) {
+            return record_cuda("ckl_device_synchronize", e);
+        }
+        return CKL_STATUS_SUCCESS;
+    } catch (const std::exception& e) {
+        return record(e);
+    } catch (...) {
+        return CKL_STATUS_INTERNAL;
+    }
 }
 
 ckl_status_t ckl_create(ckl_handle_t* h) {

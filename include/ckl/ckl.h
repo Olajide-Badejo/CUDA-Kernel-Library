@@ -45,6 +45,12 @@ typedef enum { CKL_ROW_MAJOR = 0, CKL_COL_MAJOR = 1 } ckl_layout_t;
 typedef enum { CKL_R_32F = 0, CKL_R_16F = 1, CKL_R_16BF = 2 } ckl_datatype_t;
 
 typedef enum {
+    CKL_MEMCPY_H2D = 0,
+    CKL_MEMCPY_D2H = 1,
+    CKL_MEMCPY_D2D = 2
+} ckl_memcpy_kind_t;
+
+typedef enum {
     CKL_ALGO_AUTO = 0,
     CKL_ALGO_NAIVE,
     CKL_ALGO_TILED,
@@ -71,6 +77,21 @@ CKL_EXPORT const char* ckl_status_string(ckl_status_t s);
  * terminated, and valid until the next CKL call on the same thread. Returns
  * CKL_STATUS_INVALID_VALUE when buf is NULL or len is zero. */
 CKL_EXPORT ckl_status_t ckl_last_error(char* buf, size_t len);
+
+/* Device memory, so a consumer without the toolkit can still hold the operands
+ * the GEMM entry points want. A Fortran or C program that links only libckl has
+ * no cudaMalloc to call, and these four are the whole of what it needs.
+ *
+ * ckl_device_malloc writes NULL into *dptr on failure. Zero bytes is a valid
+ * request and yields a NULL pointer with CKL_STATUS_SUCCESS, matching the
+ * runtime. ckl_device_free accepts NULL and does nothing. ckl_memcpy is
+ * synchronous with respect to the host on the default stream, the same
+ * contract cudaMemcpy carries. */
+CKL_EXPORT ckl_status_t ckl_device_malloc(void** dptr, size_t bytes);
+CKL_EXPORT ckl_status_t ckl_device_free(void* dptr);
+CKL_EXPORT ckl_status_t ckl_memcpy(void* dst, const void* src, size_t bytes,
+                                   ckl_memcpy_kind_t kind);
+CKL_EXPORT ckl_status_t ckl_device_synchronize(void);
 
 CKL_EXPORT ckl_status_t ckl_create(ckl_handle_t* h);
 CKL_EXPORT ckl_status_t ckl_destroy(ckl_handle_t h);

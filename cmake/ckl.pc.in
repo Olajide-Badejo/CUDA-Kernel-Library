@@ -9,5 +9,12 @@ Name: ckl
 Description: @PROJECT_DESCRIPTION@
 URL: https://github.com/Olajide-Badejo/CUDA-Kernel-Library
 Version: @PROJECT_VERSION@
-Libs: -L${libdir} -lckl_gemm -lckl_gemv -lckl_sparse -lckl_trsm -lckl_solver -lckl_telemetry -L${cudalibdir} -lcudart -lcublas -lcusparse -lcusolver -lpthread
-Cflags: -I${includedir}
+# The order is the static link order: the Fortran module archive calls the C
+# ABI in ckl_api, the family archives sit under that, and ckl_core sits under
+# all of them. CKL_PC_FORTRAN_LIBS is empty unless the build enabled Fortran.
+# -lstdc++ is here because the library is C++ underneath and a C or gfortran
+# driver does not add it on its own.
+Libs: -L${libdir}@CKL_PC_FORTRAN_LIBS@ -lckl_api -lckl_gemm -lckl_gemv -lckl_sparse -lckl_trsm -lckl_solver -lckl_telemetry -lckl_core -L${cudalibdir} -lcudart -lcublas -lcusparse -lcusolver -lstdc++ -lpthread -lm
+# The second include directory is where the Fortran .mod files land. It is
+# harmless on a build without Fortran, where the directory simply is not there.
+Cflags: -I${includedir} -I${includedir}/ckl/finclude
