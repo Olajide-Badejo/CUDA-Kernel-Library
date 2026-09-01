@@ -12,6 +12,9 @@ add_library(ckl_gemm
     gemm_mma_ptx.cu
     gemm_mma_ldmatrix.cu
     gemm_mma_opt.cu
+    gemm_tile_family.cu
+    gemm_splitk.cu
+    gemm_streamk.cu
     cublas_gemm.cpp
     cublas_gemm_ex.cpp
 )

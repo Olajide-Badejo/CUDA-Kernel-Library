@@ -88,6 +88,21 @@ Result bench_gemm_typed(KFn kernel, OFn oracle, int m, int n, int k) {
             true};
 }
 
+// "tile_128x128x32" back to a family index, or -1 when no shape matches. The
+// name is built from the shape rather than from the index so a row in a
+// committed sweep still means the same tile if the roster is ever reordered.
+int tile_family_index(const std::string& variant) {
+    for (int i = 0; i < ckl::gemm_tile_family_count(); ++i) {
+        const ckl::GemmTile t = ckl::gemm_tile_family_shape(i);
+        const std::string name =
+            "tile_" + std::to_string(t.m) + "x" + std::to_string(t.n) + "x" + std::to_string(t.k);
+        if (variant == name) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 Result bench_gemm(const std::string& v, const std::string& dtype, int m, int n, int k) {
     if (dtype == "fp32") {
         std::function<void(const float*, const float*, float*, int, int, int, float, float,
@@ -117,7 +132,19 @@ Result bench_gemm(const std::string& v, const std::string& dtype, int m, int n, 
             kf = ckl::gemm_mma_ldm;
         else if (v == "mma_opt")
             kf = ckl::gemm_mma_opt;
-        else
+        else if (v.rfind("tile_", 0) == 0) {
+            // One member of the tile family, named by its block shape:
+            // tile_128x128x32. tile_sweep.py drives every instantiation across
+            // the shape matrix under this name, and the dispatch heuristic reads
+            // the same string back out of the committed CSV.
+            const int index = tile_family_index(v);
+            if (index < 0)
+                return {0, 0, 0, 0, false};
+            kf = [index](const __half* a, const __half* b, float* c, int mm, int nn, int kk,
+                         float alpha, float beta, cudaStream_t s) {
+                ckl::gemm_tile_family(a, b, c, mm, nn, kk, alpha, beta, index, s);
+            };
+        } else
             return {0, 0, 0, 0, false};
         return bench_gemm_typed<__half>(kf, ckl::gemm_cublas_fp16, m, n, k);
     }
@@ -290,14 +317,13 @@ Result bench_trsm(const std::string& v, int m, int n) {
     const double flops = static_cast<double>(m) * m * n;
     const std::size_t b_bytes = db.bytes();
     auto restore = [&](cudaStream_t s) {
-        CKL_CUDA_CHECK(cudaMemcpyAsync(db.data(), db_pristine.data(), b_bytes,
-                                       cudaMemcpyDeviceToDevice, s));
+        CKL_CUDA_CHECK(
+            cudaMemcpyAsync(db.data(), db_pristine.data(), b_bytes, cudaMemcpyDeviceToDevice, s));
     };
     ckl::TimingStats ks = time_with_restore(
         restore, [&](cudaStream_t s) { kf(da.data(), db.data(), m, n, 1.0f, s); });
-    ckl::TimingStats os = time_with_restore(restore, [&](cudaStream_t s) {
-        ckl::trsm_cublas(da.data(), db.data(), m, n, 1.0f, s);
-    });
+    ckl::TimingStats os = time_with_restore(
+        restore, [&](cudaStream_t s) { ckl::trsm_cublas(da.data(), db.data(), m, n, 1.0f, s); });
     return {ks.median_ms, ks.iqr_ms, gflops_of(flops, ks.median_ms), gflops_of(flops, os.median_ms),
             true};
 }

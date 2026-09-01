@@ -91,6 +91,15 @@ ckl_register_gtest(ckl_test_gemm_tensor)
 if(TARGET ckl_api)
     add_executable(ckl_test_dispatch test_dispatch.cpp)
     target_link_libraries(ckl_test_dispatch PRIVATE ckl_api ckl_gemm ckl_headers ckl_test_support)
+    # The 9.6 heuristic reads a committed tile sweep when there is one, and the
+    # tree deliberately has none: a sweep is owner work at locked clocks, and a
+    # made up one would be a measurement claim. support/tile_sweep_fixture.csv is
+    # a hand written stand in with obviously synthetic throughput numbers, used
+    # only to prove that a sweep overrides the quantization only rule. It is
+    # fixture data, not a result, which is why it lives here and not under
+    # experiments/results.
+    target_compile_definitions(ckl_test_dispatch PRIVATE
+        CKL_TILE_SWEEP_FIXTURE="${CMAKE_CURRENT_LIST_DIR}/support/tile_sweep_fixture.csv")
     ckl_set_warnings(ckl_test_dispatch)
     ckl_register_gtest(ckl_test_dispatch)
 endif()

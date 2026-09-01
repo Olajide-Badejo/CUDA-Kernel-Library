@@ -8,9 +8,11 @@
 // regression that made everything fall back to cuBLAS would fail more than half
 // of them.
 
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -185,16 +187,9 @@ TEST_P(DispatchAuto, PicksTheDocumentedPathAndSaysSo) {
 
 INSTANTIATE_TEST_SUITE_P(Gemm, DispatchAuto,
                          ::testing::Values(
-                             // FP16 divisible by the 128 by 128 by 32 mma_opt block: the top rung.
-                             AutoCase{"fp16_128_mma_opt", DType::kR16F, 128, Algo::kMmaOpt},
-                             AutoCase{"fp16_1024_mma_opt", DType::kR16F, 1024, Algo::kMmaOpt},
-                             AutoCase{"fp16_2048_mma_opt", DType::kR16F, 2048, Algo::kMmaOpt},
-                             AutoCase{"fp16_4096_mma_opt", DType::kR16F, 4096, Algo::kMmaOpt},
-                             // Divisible by 64 by 64 by 16 but not by the mma_opt block: WMMA.
-                             AutoCase{"fp16_64_wmma", DType::kR16F, 64, Algo::kWmmaFp16},
-                             AutoCase{"fp16_192_wmma", DType::kR16F, 192, Algo::kWmmaFp16},
-                             // Divisible by nothing: the fallback, named as such.
-                             AutoCase{"fp16_100_cublas", DType::kR16F, 100, Algo::kCublas},
+                             // FP16 now goes to the tile family whatever the shape, so its rows
+                             // live in DispatchFamily below, which checks the Section 9.6 rule
+                             // instead of a remembered algorithm name.
                              AutoCase{"bf16_128_wmma", DType::kR16BF, 128, Algo::kWmmaBf16},
                              AutoCase{"bf16_100_cublas", DType::kR16BF, 100, Algo::kCublas},
                              // FP32: large and block aligned goes to the double buffered kernel,
@@ -267,11 +262,14 @@ INSTANTIATE_TEST_SUITE_P(
         RefusalCase{"wmma_fp16_on_bf16", Algo::kWmmaFp16, DType::kR16BF, 128,
                     Status::kNotSupported},
         RefusalCase{"mma_opt_on_fp32", Algo::kMmaOpt, DType::kR32F, 128, Status::kNotSupported},
-        // Declared for ABI stability, not implemented in 1.1.0. Reporting these
+        // The family is FP16 in and FP32 out. Handed FP32 it refuses, the same
+        // way every other precision specific rung does.
+        RefusalCase{"tile_family_on_fp32", Algo::kTileFamily, DType::kR32F, 128,
+                    Status::kNotSupported},
+        RefusalCase{"split_k_on_fp32", Algo::kSplitK, DType::kR32F, 128, Status::kNotSupported},
+        RefusalCase{"stream_k_on_fp32", Algo::kStreamK, DType::kR32F, 128, Status::kNotSupported},
+        // Still declared for ABI stability and not implemented. Reporting this
         // as anything other than kNotSupported would be the worst kind of lie.
-        RefusalCase{"tile_family", Algo::kTileFamily, DType::kR32F, 128, Status::kNotSupported},
-        RefusalCase{"split_k", Algo::kSplitK, DType::kR32F, 128, Status::kNotSupported},
-        RefusalCase{"stream_k", Algo::kStreamK, DType::kR32F, 128, Status::kNotSupported},
         RefusalCase{"cutlass", Algo::kCutlass, DType::kR32F, 128, Status::kNotSupported}),
     refusal_case_name);
 
@@ -647,15 +645,24 @@ TEST_F(Dispatch, QueryLaunchesNothing) {
     // No device memory is allocated at all here: a query that touched the
     // buffers would fault, and one that launched would leave a pending error.
     const GemmDesc d = square_desc(DType::kR16F, 1024, Algo::kAuto);
-    EXPECT_EQ(ckl::gemm_query(ctx, d), Algo::kMmaOpt);
+    const Algo picked = ckl::gemm_query(ctx, d);
+    EXPECT_TRUE(picked == Algo::kTileFamily || picked == Algo::kSplitK || picked == Algo::kStreamK)
+        << "an FP16 square goes to the tile family; the query said " << ckl::algo_name(picked);
+    // The occupancy query the heuristic runs is not a launch, and it must not
+    // leave a pending error behind either.
     EXPECT_EQ(cudaGetLastError(), cudaSuccess);
 }
 
-TEST_F(Dispatch, WorkspaceSizeIsZeroForEveryShippedPath) {
+// The data parallel paths run out of registers and shared memory only. Split-K
+// and stream-K are the two that ask for scratch, and they are covered in
+// DispatchFamily below, which checks the answer against each driver's own query.
+TEST_F(Dispatch, WorkspaceSizeIsZeroForThePathsThatNeedNoScratch) {
     ckl::Context ctx;
     for (std::int64_t n : {64, 128, 1024}) {
         EXPECT_EQ(ckl::gemm_workspace_size(ctx, square_desc(DType::kR32F, n, Algo::kAuto)), 0u);
         EXPECT_EQ(ckl::gemm_workspace_size(ctx, square_desc(DType::kR16F, n, Algo::kMmaOpt)), 0u);
+        EXPECT_EQ(ckl::gemm_workspace_size(ctx, square_desc(DType::kR16F, n, Algo::kTileFamily)),
+                  0u);
     }
 }
 
@@ -963,6 +970,439 @@ TEST(Names, ElementSizesMatchTheFormats) {
     EXPECT_EQ(ckl::dtype_size(DType::kR32F), 4u);
     EXPECT_EQ(ckl::dtype_size(DType::kR16F), 2u);
     EXPECT_EQ(ckl::dtype_size(DType::kR16BF), 2u);
+}
+
+// ---------------------------------------------------------------------------
+// The Section 9.6 tile family heuristic
+// ---------------------------------------------------------------------------
+//
+// Two things are checked here, and they are different in kind. The first is the
+// rule itself: for every FP16 shape the dispatcher has to land in the family,
+// name a tile, and escalate exactly when the grid cannot fill one wave. That is
+// arithmetic on the public accessors, so the test recomputes it rather than
+// asserting a golden algorithm name that would only be right on this GPU.
+//
+// The second is that a committed sweep actually overrides the quantization only
+// fallback. The tree ships no sweep, because a sweep is owner work at locked
+// clocks and an invented one would be a measurement claim; the fixture CSV the
+// build hands over through CKL_TILE_SWEEP_FIXTURE carries obviously synthetic
+// throughput numbers and exists only to prove the override happens.
+
+// Blocks of one output tile the grid needs, divided by the blocks the machine
+// can hold. This is the waves term of the heuristic, recomputed from the public
+// accessors so the test does not repeat the dispatcher's arithmetic by copying
+// it.
+double family_waves(const ckl::Context& ctx, const GemmDesc& d, int tile_index) {
+    const ckl::GemmTile t = ckl::gemm_tile_family_shape(tile_index);
+    const int bps = ckl::gemm_tile_family_blocks_per_sm(tile_index);
+    EXPECT_GT(bps, 0);
+    const double tiles =
+        std::ceil(static_cast<double>(d.m) / t.m) * std::ceil(static_cast<double>(d.n) / t.n);
+    return tiles / (static_cast<double>(ctx.device_properties().multiProcessorCount) *
+                    static_cast<double>(bps));
+}
+
+double quantization(double waves) {
+    return waves > 0.0 ? waves / std::ceil(waves) : 0.0;
+}
+
+// The 128 by 128 by 32 shape, found by its extents so a reordered roster cannot
+// make this test agree with the dispatcher for the wrong reason.
+int reference_tile_index() {
+    for (int i = 0; i < ckl::gemm_tile_family_count(); ++i) {
+        const ckl::GemmTile t = ckl::gemm_tile_family_shape(i);
+        if (t.m == 128 && t.n == 128 && t.k == 32) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// The band boundary of the untuned guard: at or above this many waves of the
+// reference tile, the untuned path keeps that tile instead of asking which shape
+// quantizes best.
+constexpr double kUntunedGuardWaves = 2.0;
+
+// Asserts that a tile is the one the quantization only rule would have picked:
+// nothing scores higher, and nothing of equal score is larger.
+void expect_quantization_rule_choice(const ckl::Context& ctx, const GemmDesc& d, int chosen_index) {
+    const ckl::GemmTile chosen_tile = ckl::gemm_tile_family_shape(chosen_index);
+    const double chosen = quantization(family_waves(ctx, d, chosen_index));
+    const long long chosen_area =
+        static_cast<long long>(chosen_tile.m) * static_cast<long long>(chosen_tile.n);
+    for (int i = 0; i < ckl::gemm_tile_family_count(); ++i) {
+        const double score = quantization(family_waves(ctx, d, i));
+        const ckl::GemmTile t = ckl::gemm_tile_family_shape(i);
+        const long long area = static_cast<long long>(t.m) * static_cast<long long>(t.n);
+        EXPECT_LE(score, chosen + 1e-12) << "tile " << i << " quantizes better than the choice";
+        if (std::fabs(score - chosen) < 1e-12) {
+            EXPECT_LE(area, chosen_area) << "tile " << i << " ties on quantization and is larger";
+        }
+    }
+}
+
+void point_at_sweep(const char* path) {
+#if defined(_WIN32)
+    _putenv_s("CKL_TILE_SWEEP_CSV", path);
+#else
+    setenv("CKL_TILE_SWEEP_CSV", path, 1);
+#endif
+}
+
+struct FamilyCase {
+    const char* label;
+    std::int64_t m;
+    std::int64_t n;
+    std::int64_t k;
+};
+
+class DispatchFamily : public GpuTestWithParam<FamilyCase> {};
+
+std::string family_case_name(const ::testing::TestParamInfo<FamilyCase>& info) {
+    return info.param.label;
+}
+
+TEST_P(DispatchFamily, LandsInTheFamilyAndEscalatesOnTheWaveRule) {
+    // No sweep: this is the quantization only path, which is what the tree
+    // ships until the owner commits one.
+    point_at_sweep("this/path/does/not/exist.csv");
+    const FamilyCase fc = GetParam();
+    ckl::Context ctx;
+    GemmDesc d;
+    d.m = fc.m;
+    d.n = fc.n;
+    d.k = fc.k;
+    d.dt_a = DType::kR16F;
+    d.dt_b = DType::kR16F;
+    d.dt_c = DType::kR32F;
+    d.lda = fc.k;
+    d.ldb = fc.n;
+    d.ldc = fc.n;
+    d.algo = Algo::kAuto;
+
+    const ckl::GemmPlan plan = ckl::gemm_plan(ctx, d);
+    EXPECT_EQ(ckl::gemm_query(ctx, d), plan.algo) << "the short answer and the plan disagree";
+    EXPECT_FALSE(plan.tuned) << "there is no committed sweep, so nothing can be tuned";
+    ASSERT_GE(plan.tile_index, 0) << "an FP16 shape has to name a tile of the family";
+    ASSERT_LT(plan.tile_index, ckl::gemm_tile_family_count());
+    EXPECT_EQ(plan.tile.m, ckl::gemm_tile_family_shape(plan.tile_index).m);
+
+    // The untuned path has two bands, and which one applies is decided by the
+    // reference tile's wave count, so the test asks the same question the
+    // dispatcher does rather than remembering an answer per shape.
+    const int ref_tile = reference_tile_index();
+    ASSERT_GE(ref_tile, 0) << "the family has to contain the 128 by 128 by 32 reference tile";
+    if (family_waves(ctx, d, ref_tile) >= kUntunedGuardWaves) {
+        EXPECT_EQ(plan.tile_index, ref_tile)
+            << "above two waves the untuned guard keeps the reference tile, but the plan chose "
+            << plan.tile.m << "x" << plan.tile.n << "x" << plan.tile.k;
+    } else {
+        expect_quantization_rule_choice(ctx, d, plan.tile_index);
+    }
+
+    // The escalation rule, exactly as Section 9.6 states it.
+    const double waves = family_waves(ctx, d, plan.tile_index);
+    if (waves >= 1.0) {
+        EXPECT_EQ(plan.algo, Algo::kTileFamily)
+            << "a grid that fills a wave has no reason to split K";
+        EXPECT_EQ(plan.splits, 1);
+        EXPECT_EQ(ckl::gemm_workspace_size(ctx, d), 0u);
+    } else {
+        EXPECT_TRUE(plan.algo == Algo::kSplitK || plan.algo == Algo::kStreamK)
+            << "waves is " << waves << " but the plan says " << ckl::algo_name(plan.algo);
+    }
+    if (plan.algo == Algo::kSplitK) {
+        EXPECT_GE(plan.splits, 2) << "split-K with one slice is not split-K";
+        EXPECT_EQ(
+            ckl::gemm_workspace_size(ctx, d),
+            ckl::gemm_split_k_workspace_size(static_cast<int>(d.m), static_cast<int>(d.n),
+                                             static_cast<int>(d.k), plan.splits, plan.tile_index));
+    }
+    if (plan.algo == Algo::kStreamK) {
+        EXPECT_EQ(ckl::gemm_workspace_size(ctx, d),
+                  ckl::gemm_stream_k_workspace_size(static_cast<int>(d.m), static_cast<int>(d.n),
+                                                    static_cast<int>(d.k), plan.tile_index));
+    }
+
+    // And it has to compute the right answer, or picking the right rung means
+    // nothing.
+    const Operand a = make_operand(DType::kR16F, elems(fc.m, fc.k), 2701);
+    const Operand b = make_operand(DType::kR16F, elems(fc.k, fc.n), 2702);
+    const std::vector<float> c0(elems(fc.m, fc.n), 0.25f);
+    const DescRun got = run_desc(ctx, d, a, b, c0, 1.25f, 0.5f);
+    ASSERT_EQ(got.status, Status::kSuccess);
+    EXPECT_EQ(got.chosen, plan.algo) << "chosen has to agree with the plan";
+
+    GemmDesc vendor = d;
+    vendor.algo = Algo::kCublas;
+    const DescRun ref = run_desc(ctx, vendor, a, b, c0, 1.25f, 0.5f);
+    ASSERT_EQ(ref.status, Status::kSuccess);
+    const std::vector<double> ref_d(ref.c.begin(), ref.c.end());
+    EXPECT_LT(ckl::relative_frobenius_error(got.c, ref_d), 1e-5);
+}
+
+INSTANTIATE_TEST_SUITE_P(Gemm, DispatchFamily,
+                         ::testing::Values(FamilyCase{"fp16_64", 64, 64, 64},
+                                           FamilyCase{"fp16_100", 100, 100, 100},
+                                           FamilyCase{"fp16_128", 128, 128, 128},
+                                           FamilyCase{"fp16_192", 192, 192, 192},
+                                           FamilyCase{"fp16_1024", 1024, 1024, 1024},
+                                           FamilyCase{"fp16_2048", 2048, 2048, 2048},
+                                           // Deep K on a small output is the case
+                                           // split-K exists for.
+                                           FamilyCase{"fp16_deep_k", 128, 128, 8192},
+                                           // Skinny, and unaligned in every
+                                           // dimension: the two shapes that used
+                                           // to fall through to the scalar path.
+                                           FamilyCase{"fp16_skinny", 4096, 64, 2048},
+                                           FamilyCase{"fp16_unaligned", 1000, 1000, 1000}),
+                         family_case_name);
+
+class DispatchHeuristic : public GpuTest {};
+
+GemmDesc fp16_square(std::int64_t n) {
+    GemmDesc d;
+    d.m = n;
+    d.n = n;
+    d.k = n;
+    d.dt_a = DType::kR16F;
+    d.dt_b = DType::kR16F;
+    d.dt_c = DType::kR32F;
+    d.lda = n;
+    d.ldb = n;
+    d.ldc = n;
+    return d;
+}
+
+// The untuned guard, at the shape it exists for. Wave quantization on its own
+// prefers the smallest tile in the family at 4096 cubed, which stages far more
+// bytes per multiply add than the reference shape for a fraction of a percent of
+// quantization. Without a sweep to settle that, the untuned path keeps the tile
+// the ladder has always run rather than betting the flagship shape on an
+// unmeasured hypothesis.
+TEST_F(DispatchHeuristic, UntunedGuardKeepsTheReferenceTileWhenTheGridIsDeep) {
+    point_at_sweep("this/path/does/not/exist.csv");
+    ckl::Context ctx;
+    const GemmDesc d = fp16_square(4096);
+    const int ref = reference_tile_index();
+    ASSERT_GE(ref, 0);
+
+    // The precondition the guard keys on. If a future device made 4096 cubed
+    // shallower than two waves this test would be checking the wrong band, so it
+    // says so rather than passing quietly.
+    ASSERT_GE(family_waves(ctx, d, ref), kUntunedGuardWaves)
+        << "4096 cubed is no longer two waves deep on this device";
+
+    const ckl::GemmPlan plan = ckl::gemm_plan(ctx, d);
+    EXPECT_EQ(plan.tile.m, 128);
+    EXPECT_EQ(plan.tile.n, 128);
+    EXPECT_EQ(plan.tile.k, 32);
+    EXPECT_EQ(plan.tile_index, ref);
+    EXPECT_EQ(plan.algo, Algo::kTileFamily) << "a grid this deep fills plenty of waves";
+    EXPECT_EQ(plan.splits, 1);
+    EXPECT_FALSE(plan.tuned) << "a guard is not a measurement";
+
+    // The guard is a band, not a blanket: the smallest tile really does quantize
+    // better here, which is exactly why the guard has to overrule it.
+    bool a_smaller_tile_quantizes_better = false;
+    const double ref_score = quantization(family_waves(ctx, d, ref));
+    for (int i = 0; i < ckl::gemm_tile_family_count(); ++i) {
+        const ckl::GemmTile t = ckl::gemm_tile_family_shape(i);
+        if (static_cast<long long>(t.m) * t.n < 128LL * 128 &&
+            quantization(family_waves(ctx, d, i)) > ref_score + 1e-12) {
+            a_smaller_tile_quantizes_better = true;
+        }
+    }
+    EXPECT_TRUE(a_smaller_tile_quantizes_better)
+        << "the guard is overruling nothing here, so it is not being tested";
+}
+
+// Below the band the rule is unchanged, and the escalation below one wave is
+// unchanged with it.
+TEST_F(DispatchHeuristic, UntunedShallowGridsStillFollowTheQuantizationRule) {
+    point_at_sweep("this/path/does/not/exist.csv");
+    ckl::Context ctx;
+    const GemmDesc d = fp16_square(512);
+    const int ref = reference_tile_index();
+    ASSERT_GE(ref, 0);
+    ASSERT_LT(family_waves(ctx, d, ref), kUntunedGuardWaves)
+        << "512 cubed has to sit below the guard band for this test to mean anything";
+
+    const ckl::GemmPlan plan = ckl::gemm_plan(ctx, d);
+    ASSERT_GE(plan.tile_index, 0);
+    EXPECT_FALSE(plan.tuned);
+    expect_quantization_rule_choice(ctx, d, plan.tile_index);
+
+    // And the escalation rule still reads off the chosen tile, not the reference
+    // one: 512 cubed does not fill a wave for any shape in the family.
+    const double waves = family_waves(ctx, d, plan.tile_index);
+    if (waves < 1.0) {
+        EXPECT_TRUE(plan.algo == Algo::kSplitK || plan.algo == Algo::kStreamK)
+            << "waves is " << waves << " but the plan says " << ckl::algo_name(plan.algo);
+    } else {
+        EXPECT_EQ(plan.algo, Algo::kTileFamily);
+    }
+}
+
+// waves below one is the whole reason split-K and stream-K exist, so the suite
+// has to contain at least one shape that triggers each. If a future change made
+// every shape fill a wave, this fails rather than quietly leaving both paths
+// unreached.
+TEST_F(DispatchHeuristic, BothEscalationsAreReachable) {
+    point_at_sweep("this/path/does/not/exist.csv");
+    ckl::Context ctx;
+    bool saw_split = false;
+    bool saw_stream = false;
+    bool saw_plain = false;
+    const std::vector<std::array<std::int64_t, 3>> shapes = {
+        {64, 64, 64},      {128, 128, 128},    {128, 128, 8192},
+        {256, 256, 16384}, {2048, 2048, 2048}, {4096, 4096, 4096}};
+    for (const auto& s : shapes) {
+        GemmDesc d;
+        d.m = s[0];
+        d.n = s[1];
+        d.k = s[2];
+        d.dt_a = DType::kR16F;
+        d.dt_b = DType::kR16F;
+        d.dt_c = DType::kR32F;
+        d.lda = s[2];
+        d.ldb = s[1];
+        d.ldc = s[1];
+        const ckl::GemmPlan p = ckl::gemm_plan(ctx, d);
+        saw_split = saw_split || p.algo == Algo::kSplitK;
+        saw_stream = saw_stream || p.algo == Algo::kStreamK;
+        saw_plain = saw_plain || p.algo == Algo::kTileFamily;
+    }
+    EXPECT_TRUE(saw_plain) << "no shape in the list filled a wave";
+    EXPECT_TRUE(saw_split) << "no shape in the list escalated to split-K";
+    EXPECT_TRUE(saw_stream) << "no shape in the list escalated to stream-K";
+}
+
+// The five percent throughput filter. The fixture leaves exactly one tile above
+// the bar at each swept shape, so the answer is fixed by the data and not by the
+// occupancy of the machine the test runs on.
+TEST_F(DispatchHeuristic, ACommittedSweepOverridesQuantization) {
+    ckl::Context ctx;
+    auto plan_at = [&ctx](std::int64_t n) {
+        GemmDesc d;
+        d.m = n;
+        d.n = n;
+        d.k = n;
+        d.dt_a = DType::kR16F;
+        d.dt_b = DType::kR16F;
+        d.dt_c = DType::kR32F;
+        d.lda = n;
+        d.ldb = n;
+        d.ldc = n;
+        return ckl::gemm_plan(ctx, d);
+    };
+
+    point_at_sweep(CKL_TILE_SWEEP_FIXTURE);
+    {
+        // Nearest swept shape is 4096 cubed, where the fixture puts only
+        // tile_128x128x32 within five percent of the best.
+        const ckl::GemmPlan p = plan_at(4000);
+        EXPECT_TRUE(p.tuned) << "a readable sweep has to be reported as one";
+        EXPECT_EQ(p.tile.m, 128);
+        EXPECT_EQ(p.tile.n, 128);
+        EXPECT_EQ(p.tile.k, 32);
+    }
+    {
+        // Nearest swept shape is 1024 cubed, where the winner is a tile neither
+        // the quantization rule nor the untuned guard would ever reach, so this
+        // is the case that proves the sweep is what decided. It also checks that
+        // the nearest shape lookup is doing something, since the answer differs
+        // from the 4096 row above.
+        const ckl::GemmPlan p = plan_at(1100);
+        EXPECT_TRUE(p.tuned);
+        EXPECT_EQ(p.tile.m, 256);
+        EXPECT_EQ(p.tile.n, 128);
+        EXPECT_EQ(p.tile.k, 32);
+    }
+
+    // Point it back at nothing and the answer has to go untuned again, which is
+    // also the check that the cache follows the path rather than latching the
+    // first file it ever saw.
+    point_at_sweep("this/path/does/not/exist.csv");
+    EXPECT_FALSE(plan_at(4000).tuned);
+}
+
+// An explicitly named family algorithm is still never rerouted, and the plan
+// fills in the tile the caller did not name.
+TEST_F(DispatchHeuristic, NamedFamilyAlgorithmsRunOnAnyFp16Shape) {
+    point_at_sweep("this/path/does/not/exist.csv");
+    ckl::Context ctx;
+    const std::int64_t m = 129;
+    const std::int64_t n = 257;
+    const std::int64_t k = 193;
+    const Operand a = make_operand(DType::kR16F, elems(m, k), 2711);
+    const Operand b = make_operand(DType::kR16F, elems(k, n), 2712);
+    const std::vector<float> c0(elems(m, n), -1.5f);
+
+    GemmDesc base;
+    base.m = m;
+    base.n = n;
+    base.k = k;
+    base.dt_a = DType::kR16F;
+    base.dt_b = DType::kR16F;
+    base.dt_c = DType::kR32F;
+    base.lda = k;
+    base.ldb = n;
+    base.ldc = n;
+
+    GemmDesc vendor = base;
+    vendor.algo = Algo::kCublas;
+    const DescRun ref = run_desc(ctx, vendor, a, b, c0, 2.5f, -0.75f);
+    ASSERT_EQ(ref.status, Status::kSuccess);
+    const std::vector<double> ref_d(ref.c.begin(), ref.c.end());
+
+    for (Algo named : {Algo::kTileFamily, Algo::kSplitK, Algo::kStreamK}) {
+        SCOPED_TRACE(ckl::algo_name(named));
+        GemmDesc d = base;
+        d.algo = named;
+        const DescRun got = run_desc(ctx, d, a, b, c0, 2.5f, -0.75f);
+        ASSERT_EQ(got.status, Status::kSuccess);
+        EXPECT_EQ(got.chosen, named) << "a named algorithm is never rerouted";
+        EXPECT_LT(ckl::relative_frobenius_error(got.c, ref_d), 1e-5);
+    }
+}
+
+// A workspace the Context already owns keeps the allocation out of the call, and
+// the answer has to be the same either way.
+TEST_F(DispatchHeuristic, AContextWorkspaceIsUsedWhenItIsBigEnough) {
+    point_at_sweep("this/path/does/not/exist.csv");
+    ckl::Context ctx;
+    const std::int64_t n = 256;
+    const std::int64_t k = 8192;
+    GemmDesc d;
+    d.m = n;
+    d.n = n;
+    d.k = k;
+    d.dt_a = DType::kR16F;
+    d.dt_b = DType::kR16F;
+    d.dt_c = DType::kR32F;
+    d.lda = k;
+    d.ldb = n;
+    d.ldc = n;
+
+    const ckl::GemmPlan plan = ckl::gemm_plan(ctx, d);
+    const std::size_t need = ckl::gemm_workspace_size(ctx, d);
+    ASSERT_GT(need, 0u) << "this shape was chosen because it escalates and needs scratch, but the "
+                        << "plan says " << ckl::algo_name(plan.algo);
+
+    const Operand a = make_operand(DType::kR16F, elems(n, k), 2721);
+    const Operand b = make_operand(DType::kR16F, elems(k, n), 2722);
+    const std::vector<float> c0(elems(n, n), 0.5f);
+
+    const DescRun without = run_desc(ctx, d, a, b, c0, 1.25f, 0.5f);
+    ASSERT_EQ(without.status, Status::kSuccess);
+
+    ckl::DeviceBuffer<std::uint8_t> scratch(need);
+    ctx.set_workspace(scratch.data(), scratch.bytes());
+    const DescRun with = run_desc(ctx, d, a, b, c0, 1.25f, 0.5f);
+    ctx.set_workspace(nullptr, 0);
+    ASSERT_EQ(with.status, Status::kSuccess);
+    EXPECT_EQ(without.c, with.c) << "the workspace changed the answer, which it must not";
 }
 
 }  // namespace

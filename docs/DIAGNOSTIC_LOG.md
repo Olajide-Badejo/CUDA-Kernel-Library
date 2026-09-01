@@ -447,3 +447,108 @@ fusion suites; `memcheck`, `racecheck`, `initcheck` and `synccheck` are all clea
 on the tensor GEMM suite; and racecheck was shown to go red first, by deleting
 the single barrier from the new loop, before it was shown to go green with the
 barrier back.
+
+## Round 11: tile family, predicated tails, split-K, stream-K, measurement pending
+
+Date: 2026-09-01. Artifacts: pending (owner sweep). Nothing in this entry is a
+measured throughput result. The four changes below are structural, they are
+verified by the correctness suites and by the four sanitizers, and every
+statement about which one is faster is a hypothesis until the locked clock tile
+sweep is run.
+
+**A tile family, not a tile.** Round 10's mainloop is one block shape. It is now
+a template on `(BM, BN, BK, warps in M, warps in N)` with six instantiations:
+128x128x32, 128x256x32, 256x128x32, 128x64x64, 64x128x64 and 128x128x64. Every
+warp tile is 64 by 32 across the family, so the accumulator stays at 64 registers
+per thread and the shapes differ in shared memory footprint and in how they
+quantize against 48 SMs rather than in register pressure. `nvcc
+--resource-usage` at sm_120 reports 122, 124, 128, 162, 164 and 126 registers for
+the aligned data parallel instantiations and 120, 122, 122, 160, 122 and 124 for
+the predicated ones, and 128, 127, 128, 168, 168 and 160 aligned against 126,
+128, 127, 132, 166 and 128 predicated for the persistent stream-K forms of the
+same six shapes. Every one reports a zero byte stack frame and zero spill loads
+and stores. The constraints each shape has to respect are
+`static_assert`s rather than comments: three stages inside the 99 KB per block
+opt-in, warps inside the 48 an SM carries, the staging work dividing evenly
+across the block, and a warp tile the `m16n8k16` shape divides. Which shape wins
+at which aspect ratio: measurement pending (owner sweep).
+
+**The fallback cliff, closed.** Any shape not divisible by 128, 128, 32 used to
+reroute to the WMMA kernel, and anything not divisible by 64, 64, 16 rerouted
+again to a scalar kernel with one thread per output element. Four of the seven
+tensor test shapes missed the fast path, so those rows were re-testing the
+fallback under different names. The family predicates its edges: global to shared
+uses `cp.async`'s source size field, so a sixteen byte chunk partly past an edge
+copies the bytes that exist and zero fills the rest and one wholly past an edge
+copies nothing, and zeros in the staged tile contribute nothing to the dot
+product. The mainloop itself carries no edge logic at all.
+
+One case defeated `cp.async` outright and was found by the correctness matrix
+rather than by reasoning: a sixteen byte copy needs a sixteen byte aligned
+source, and a row of A begins at a multiple of k, so an odd k puts every second
+row on an odd address. 127 cubed is one of the shapes Section 9.5 names. Those
+shapes stage through plain loads and shared stores under a flag the launcher
+computes from the leading dimensions and the operand base addresses; the pipeline
+barrier that already separates the stage writing a buffer from the iteration
+reading it covers a synchronous store just as well as an asynchronous one. Cost
+of the predicated path against the aligned one: measurement pending (owner
+sweep).
+
+**Split-K, two pass.** The first pass writes raw partial sums, one m by n plane
+per K slice, and never touches C; the second sums the planes, multiplies by alpha
+once and adds beta times C once, so beta zero still does not read C and every
+partial is scaled exactly once. Atomics into C would need no scratch but would
+make the result depend on the order blocks retired, which is not something a
+correctness test can pin down. `gemm_workspace_size` is real now: it answers with
+the partial planes, and a Context holding a workspace that large keeps the
+allocation out of the call. Speedup where waves are scarce: measurement pending
+(owner sweep).
+
+**Stream-K, hybrid.** A bounded number of persistent CTAs take an equal share of
+the K iterations of the tiles that do not fill a whole wave, at most two waves of
+tiles between them, and every remaining tile runs data parallel one CTA per tile.
+A CTA whose share stops before the end of a tile publishes its partial through
+the workspace, fences, and raises a flag; the CTA covering that tile's last K
+iteration waits on every peer whose share ended inside it, sums them in, and
+writes C once.
+
+The first version of this had the direction of the wait the other way round: the
+CTA owning the tile's *first* K iteration waited on higher indexed peers. It is
+correct only if every stream-K CTA is co-resident, which is what the occupancy
+API is supposed to guarantee, but the occupancy the API reports is the
+uninstrumented kernel's, and a profiler that patches the kernel, or a later
+change to its register count, would quietly turn that into a hang rather than a
+wrong answer. Waiting downward instead needs no residency assumption at all:
+blocks are dispatched in increasing index order, so a resident owner implies
+every peer it can wait on is resident or already retired. Speedup on small and
+odd shapes: measurement pending (owner sweep).
+
+**Dispatch.** `Algo::kAuto` on FP16 in and FP32 out now goes to the family for
+every shape it can address, and the Section 9.6 rule decides which tile: maximize
+`waves / ceil(waves)` with `blocksPerSM` from the occupancy API, among the tiles
+within five percent of the best measured throughput at the nearest swept shape,
+escalating to split-K or stream-K when waves is below one. The measured half of
+that rule needs a committed sweep and there is none, so the choice currently
+falls back to quantization alone. That is a hypothesis, and the API says so:
+`ckl::GemmPlan::tuned` is false for a quantization only decision.
+
+Open question for the sweep, recorded here so it is not forgotten: the
+quantization only fallback prefers the tile that leaves the least of the final
+wave idle, which at large square shapes is the smallest tile in the family. That
+is very likely the wrong answer on throughput, because a small tile stages more
+bytes per multiply add, and it is exactly the tradeoff the throughput filter
+exists to settle. Until the sweep is committed, `kAuto` on a large FP16 square
+may pick a slower shape than the 128 by 128 tile the previous release used. The
+first thing to check after the sweep runs is whether the committed table moves
+those shapes back.
+
+Verification for the round: `ctest -L gpu` fully green, including every tile
+instantiation against the cuBLAS oracle at the Section 9.5 unaligned matrix
+(127 cubed, 1000 cubed, 4096 by 4090 by 4096, 129 by 257 by 193, and 8192 by 64
+by 4096), the alpha and beta matrix, a non finite C under beta zero, the
+workspace contract, the templated shared memory maps checked on the host for
+every family shape, and the heuristic checked against a fixture sweep. All four
+compute-sanitizer tools clean on both GEMM suites. Racecheck was shown to go red
+first, by deleting the barrier the stream-K persistent loop puts between one
+tile's reads and the next tile's stores, before it was shown to go green with the
+barrier back.

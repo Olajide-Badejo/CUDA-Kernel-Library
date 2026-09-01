@@ -1,0 +1,13 @@
+family,variant,dtype,m,n,k,median_ms,iqr_ms,gflops,baseline_gflops,pct_baseline,throttled,median_sm_clock_mhz,clock_locked,locked_clock_mhz,max_temp_c,max_power_w,cuda_runtime,cuda_driver,commit
+gemm,tile_128x128x32,fp16,4096,4096,4096,0,0,1000,0,0,false,0,false,,0,0,0,0,fixture
+gemm,tile_128x256x32,fp16,4096,4096,4096,0,0,940,0,0,false,0,false,,0,0,0,0,fixture
+gemm,tile_256x128x32,fp16,4096,4096,4096,0,0,900,0,0,false,0,false,,0,0,0,0,fixture
+gemm,tile_128x64x64,fp16,4096,4096,4096,0,0,500,0,0,false,0,false,,0,0,0,0,fixture
+gemm,tile_64x128x64,fp16,4096,4096,4096,0,0,480,0,0,false,0,false,,0,0,0,0,fixture
+gemm,tile_128x128x64,fp16,4096,4096,4096,0,0,930,0,0,false,0,false,,0,0,0,0,fixture
+gemm,tile_128x128x32,fp16,1024,1024,1024,0,0,560,0,0,false,0,false,,0,0,0,0,fixture
+gemm,tile_128x256x32,fp16,1024,1024,1024,0,0,550,0,0,false,0,false,,0,0,0,0,fixture
+gemm,tile_256x128x32,fp16,1024,1024,1024,0,0,600,0,0,false,0,false,,0,0,0,0,fixture
+gemm,tile_128x64x64,fp16,1024,1024,1024,0,0,300,0,0,false,0,false,,0,0,0,0,fixture
+gemm,tile_64x128x64,fp16,1024,1024,1024,0,0,300,0,0,false,0,false,,0,0,0,0,fixture
+gemm,tile_128x128x64,fp16,1024,1024,1024,0,0,540,0,0,false,0,false,,0,0,0,0,fixture

@@ -46,9 +46,9 @@ enum class DType {
 /**
  * @brief Every rung of the GEMM ladder plus the vendor baseline.
  *
- * @note The four entries after kMmaOpt are declared now and implemented in
- *       later releases; dispatch returns Status::kNotSupported for them rather
- *       than quietly picking something else.
+ * @note kCutlass is declared now and implemented in a later release; dispatch
+ *       returns Status::kNotSupported for it rather than quietly picking
+ *       something else.
  */
 enum class Algo {
     kAuto,      ///< Let the dispatcher choose, and report the choice through the chosen out-param.
@@ -61,11 +61,44 @@ enum class Algo {
     kMmaPtx,    ///< Raw mma.sync PTX with scalar shared reads, FP16 in.
     kMmaLdm,    ///< mma.sync with ldmatrix fragment loads, FP16 in.
     kMmaOpt,    ///< The top tensor kernel: 128x128 tile, ldmatrix, cp.async double buffering.
-    kTileFamily,  ///< Declared for ABI stability; not implemented in 1.1.0.
-    kSplitK,      ///< Declared for ABI stability; not implemented in 1.1.0.
-    kStreamK,     ///< Declared for ABI stability; not implemented in 1.1.0.
+    kTileFamily,  ///< The tile shape family with predicated edges, FP16 in; shape chosen by plan.
+    kSplitK,      ///< The tile family split along K, with a fixup reduction pass.
+    kStreamK,     ///< The tile family as persistent CTAs with a stream-K remainder.
     kCutlass,     ///< Declared for ABI stability; not implemented in 1.1.0.
     kCublas,      ///< The vendor path, which takes every shape the hand written kernels refuse.
+};
+
+/**
+ * @brief One member of the tile shape family.
+ *
+ * @note A shape of all zeros means the path has no block tile, which is the
+ *       answer for every rung outside the family and for the vendor path.
+ */
+struct GemmTile {
+    int m = 0;        ///< Rows of the block tile (BM).
+    int n = 0;        ///< Columns of the block tile (BN).
+    int k = 0;        ///< K step of the mainloop (BK).
+    int warps_m = 0;  ///< Warps along M inside the block.
+    int warps_n = 0;  ///< Warps along N inside the block.
+};
+
+/**
+ * @brief What Algo::kAuto decided, in full.
+ *
+ * ckl::gemm reports the rung through its chosen out-param, which is the answer
+ * a benchmark row prints. The tile family needs one level more detail, because
+ * "kTileFamily" alone does not say which of the six shapes ran, so the whole
+ * decision is available through ckl::gemm_plan.
+ */
+struct GemmPlan {
+    Algo algo = Algo::kAuto;  ///< The rung the dispatcher picked.
+    GemmTile tile;            ///< The block tile, all zeros outside the family.
+    int tile_index = -1;      ///< Index into the family, or -1 outside it.
+    int splits = 1;           ///< K splits for Algo::kSplitK; 1 everywhere else.
+    /// True when a committed tile sweep informed the choice, false when the
+    /// decision was quantization only. A quantization only decision is a
+    /// hypothesis about which shape wins, not a measurement.
+    bool tuned = false;
 };
 
 /**

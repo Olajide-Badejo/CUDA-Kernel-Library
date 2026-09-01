@@ -78,10 +78,11 @@ public:
      * @brief Hands the Context a caller supplied scratch buffer.
      * @param ws Device pointer to the scratch, or nullptr for none.
      * @param bytes Size of the buffer in bytes.
-     * @note Nothing shipped in 1.1.0 needs one; ckl::gemm_workspace_size answers
-     *       zero for every path. The plumbing exists so a split-K or stream-K
-     *       rung can take it later without an ABI break. The Context does not
-     *       own the buffer and never frees it.
+     * @note The split-K and stream-K GEMM paths use it; every other path answers
+     *       zero from ckl::gemm_workspace_size and ignores whatever is here. A
+     *       path that needs scratch and finds none allocates and frees its own
+     *       around the launch, which is correct but puts an allocation inside
+     *       the call. The Context does not own the buffer and never frees it.
      */
     void set_workspace(void* ws, std::size_t bytes);
 

@@ -39,6 +39,8 @@
 #include "ckl/gemm.hpp"
 #include "ckl/status.hpp"
 #include "gemm/detail/gemm_swizzle.hpp"
+#include "gemm/detail/gemm_tile_registry.hpp"
+#include "gemm/detail/gemm_tile_swizzle.hpp"
 #include "gpu_environment.hpp"
 #include "reference.hpp"
 
@@ -51,7 +53,51 @@ using ckl::test::GpuTestWithParam;
 // the launchers get the pointer reinterpreted at the call.
 using Bits = std::vector<std::uint16_t>;
 
-enum class TVariant { kWmmaFp16, kMmaPtx, kMmaLdm, kMmaOpt, kWmmaBf16 };
+// The tile family and its two escalations join the ladder rungs here rather
+// than in a suite of their own, so every property the older kernels are held to
+// (shape sweep, alpha and beta, a non finite C under beta zero, degenerate
+// shapes, tile boundary crossings, large K, zero dimensions) applies to all six
+// instantiations without a second copy of the harness.
+enum class TVariant {
+    kWmmaFp16,
+    kMmaPtx,
+    kMmaLdm,
+    kMmaOpt,
+    kWmmaBf16,
+    kTile0,
+    kTile1,
+    kTile2,
+    kTile3,
+    kTile4,
+    kTile5,
+    kSplitK,
+    kStreamK,
+};
+
+// Family index of a tile variant, or -1 for the rungs that are not one.
+int tile_index_of(TVariant v) {
+    switch (v) {
+        case TVariant::kTile0:
+            return 0;
+        case TVariant::kTile1:
+            return 1;
+        case TVariant::kTile2:
+            return 2;
+        case TVariant::kTile3:
+            return 3;
+        case TVariant::kTile4:
+            return 4;
+        case TVariant::kTile5:
+            return 5;
+        default:
+            return -1;
+    }
+}
+
+// Split count the split-K variant asks for. Four is enough to exercise the
+// second pass and the alpha and beta placement without making the fixup the
+// whole cost of the test.
+constexpr int kTestSplits = 4;
 
 bool is_bf16(TVariant v) {
     return v == TVariant::kWmmaBf16;
@@ -69,6 +115,22 @@ const char* tvariant_name(TVariant v) {
             return "mma_opt";
         case TVariant::kWmmaBf16:
             return "wmma_bf16";
+        case TVariant::kTile0:
+            return "tile0";
+        case TVariant::kTile1:
+            return "tile1";
+        case TVariant::kTile2:
+            return "tile2";
+        case TVariant::kTile3:
+            return "tile3";
+        case TVariant::kTile4:
+            return "tile4";
+        case TVariant::kTile5:
+            return "tile5";
+        case TVariant::kSplitK:
+            return "split_k";
+        case TVariant::kStreamK:
+            return "stream_k";
     }
     return "unknown";
 }
@@ -81,9 +143,20 @@ double storage_roundoff(TVariant v) {
 }
 
 const std::vector<TVariant>& all_tvariants() {
-    static const std::vector<TVariant> v = {TVariant::kWmmaFp16, TVariant::kMmaPtx,
-                                            TVariant::kMmaLdm, TVariant::kMmaOpt,
-                                            TVariant::kWmmaBf16};
+    static const std::vector<TVariant> v = {
+        TVariant::kWmmaFp16, TVariant::kMmaPtx, TVariant::kMmaLdm, TVariant::kMmaOpt,
+        TVariant::kWmmaBf16, TVariant::kTile0,  TVariant::kTile1,  TVariant::kTile2,
+        TVariant::kTile3,    TVariant::kTile4,  TVariant::kTile5,  TVariant::kSplitK,
+        TVariant::kStreamK};
+    return v;
+}
+
+// The family, split-K and stream-K only: the suites that are about the tile
+// family rather than about the ladder.
+const std::vector<TVariant>& family_tvariants() {
+    static const std::vector<TVariant> v = {TVariant::kTile0,  TVariant::kTile1,  TVariant::kTile2,
+                                            TVariant::kTile3,  TVariant::kTile4,  TVariant::kTile5,
+                                            TVariant::kSplitK, TVariant::kStreamK};
     return v;
 }
 
@@ -108,6 +181,17 @@ void launch_kernel(TVariant v, const std::uint16_t* a, const std::uint16_t* b, f
             return;
         case TVariant::kWmmaBf16:
             ckl::gemm_wmma_bf16(ba, bb, c, m, n, k, alpha, beta, stream);
+            return;
+        case TVariant::kSplitK:
+            // No caller workspace: the driver takes one for the duration, which
+            // is the path a caller that never asked gemm_workspace_size gets.
+            ckl::gemm_split_k(ha, hb, c, m, n, k, alpha, beta, kTestSplits, 0, nullptr, 0, stream);
+            return;
+        case TVariant::kStreamK:
+            ckl::gemm_stream_k(ha, hb, c, m, n, k, alpha, beta, 0, nullptr, 0, stream);
+            return;
+        default:
+            ckl::gemm_tile_family(ha, hb, c, m, n, k, alpha, beta, tile_index_of(v), stream);
             return;
     }
 }
@@ -854,6 +938,369 @@ TEST(GemmOptSwizzle, EveryBLdmatrixWavefrontIsConflictFree) {
                     }
                 }
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The tile family: the shapes that used to fall off the ladder
+// ---------------------------------------------------------------------------
+//
+// Section 9.5 of the build spec: any shape not divisible by 128, 128, 32 used to
+// route to gemm_wmma_fp16, and anything not divisible by 64, 64, 16 routed on to
+// a scalar kernel one thread per output element. Four of the seven tensor test
+// shapes missed the fast path, so those rows were re-testing the fallback under
+// different names. The family predicates its edges instead, and this is the
+// matrix the spec names for it.
+//
+// These shapes are too large for a double precision host reference (8192 by 64
+// by 4096 alone is 4.3 billion multiply adds, and 1000 cubed is a billion), so
+// the check here is against the cuBLAS tensor oracle only, at the same 1e-5 gate
+// the rest of the suite uses. The accumulation error against a host reference is
+// measured at the smaller shapes above, where it is affordable.
+
+struct BigShape {
+    int m;
+    int n;
+    int k;
+    const char* label;
+};
+
+// Half precision inputs without the float mirrors make_case keeps. At 8192 by
+// 4096 those mirrors would be half a gigabyte of host memory for a reference
+// nothing computes.
+Bits random_half_bits(int rows, int cols, std::uint64_t stream_id) {
+    return to_storage(TVariant::kMmaOpt,
+                      ckl::random_matrix(rows, cols, ckl::test::seed_stream(stream_id)));
+}
+
+class TileFamilyUnaligned : public GpuTestWithParam<BigShape> {};
+
+std::string big_shape_name(const ::testing::TestParamInfo<BigShape>& info) {
+    return info.param.label;
+}
+
+TEST_P(TileFamilyUnaligned, EveryFamilyMemberMatchesTheOracle) {
+    const BigShape s = GetParam();
+    const float alpha = 1.25f;
+    const float beta = 0.5f;
+
+    const Bits a_bits = random_half_bits(s.m, s.k, 2801);
+    const Bits b_bits = random_half_bits(s.k, s.n, 2802);
+    const std::vector<float> c0 = ckl::random_matrix(s.m, s.n, ckl::test::seed_stream(2803));
+
+    ckl::DeviceBuffer<std::uint16_t> da(a_bits.size());
+    ckl::DeviceBuffer<std::uint16_t> db(b_bits.size());
+    ckl::DeviceBuffer<float> dk(c0.size());
+    ckl::DeviceBuffer<float> doracle(c0.size());
+    da.copy_from_host(a_bits);
+    db.copy_from_host(b_bits);
+    doracle.copy_from_host(c0);
+    launch_oracle(TVariant::kMmaOpt, da.data(), db.data(), doracle.data(), s.m, s.n, s.k, alpha,
+                  beta, nullptr);
+    CKL_CUDA_CHECK(cudaDeviceSynchronize());
+    const auto oracle = doracle.to_host();
+    const std::vector<double> ref(oracle.begin(), oracle.end());
+
+    for (TVariant v : family_tvariants()) {
+        SCOPED_TRACE(tvariant_name(v));
+        dk.copy_from_host(c0);
+        launch_kernel(v, da.data(), db.data(), dk.data(), s.m, s.n, s.k, alpha, beta, nullptr);
+        CKL_CUDA_CHECK(cudaDeviceSynchronize());
+        const auto got = dk.to_host();
+        ASSERT_TRUE(ckl::all_finite(got)) << tvariant_name(v) << " produced a non finite result";
+        const double err = ckl::relative_frobenius_error(got, ref);
+        EXPECT_LT(err, kOracleGate) << tvariant_name(v) << " at " << s.label;
+        ::testing::Test::RecordProperty(std::string("vs_oracle_") + tvariant_name(v),
+                                        ckl::test::sci(err));
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(Tensor, TileFamilyUnaligned,
+                         ::testing::Values(BigShape{127, 127, 127, "127x127x127"},
+                                           BigShape{1000, 1000, 1000, "1000x1000x1000"},
+                                           BigShape{4096, 4090, 4096, "4096x4090x4096"},
+                                           BigShape{129, 257, 193, "129x257x193"},
+                                           BigShape{8192, 64, 4096, "8192x64x4096"}),
+                         big_shape_name);
+
+// ---------------------------------------------------------------------------
+// The workspace contract
+// ---------------------------------------------------------------------------
+
+class FamilyWorkspace : public GpuTest {};
+
+// A caller that asks for the size and hands one in has to get the same answer as
+// a caller that lets the driver allocate. If the two disagreed, the benchmark
+// protocol (ask for the size, allocate outside the timed region) would be
+// measuring a different computation from the one the tests check.
+TEST_F(FamilyWorkspace, SuppliedWorkspaceMatchesTheDriverAllocatedOne) {
+    const Shape s{256, 256, 1024, "workspace"};
+    const Bits a_bits = random_half_bits(s.m, s.k, 2901);
+    const Bits b_bits = random_half_bits(s.k, s.n, 2902);
+    const std::vector<float> c0 = ckl::random_matrix(s.m, s.n, ckl::test::seed_stream(2903));
+    const float alpha = 2.5f;
+    const float beta = -0.75f;
+
+    ckl::DeviceBuffer<std::uint16_t> da(a_bits.size());
+    ckl::DeviceBuffer<std::uint16_t> db(b_bits.size());
+    ckl::DeviceBuffer<float> owned(c0.size());
+    ckl::DeviceBuffer<float> given(c0.size());
+    da.copy_from_host(a_bits);
+    db.copy_from_host(b_bits);
+    const auto* ha = reinterpret_cast<const __half*>(da.data());
+    const auto* hb = reinterpret_cast<const __half*>(db.data());
+
+    for (int tile = 0; tile < ckl::gemm_tile_family_count(); ++tile) {
+        SCOPED_TRACE("tile " + std::to_string(tile));
+        {
+            const std::size_t need =
+                ckl::gemm_split_k_workspace_size(s.m, s.n, s.k, kTestSplits, tile);
+            ASSERT_GT(need, 0u) << "this shape does split, so it needs partial planes";
+            ckl::DeviceBuffer<std::uint8_t> scratch(need);
+            owned.copy_from_host(c0);
+            given.copy_from_host(c0);
+            ckl::gemm_split_k(ha, hb, owned.data(), s.m, s.n, s.k, alpha, beta, kTestSplits, tile,
+                              nullptr, 0, nullptr);
+            ckl::gemm_split_k(ha, hb, given.data(), s.m, s.n, s.k, alpha, beta, kTestSplits, tile,
+                              scratch.data(), scratch.bytes(), nullptr);
+            CKL_CUDA_CHECK(cudaDeviceSynchronize());
+            EXPECT_EQ(owned.to_host(), given.to_host()) << "split-K disagreed with itself";
+        }
+        {
+            const std::size_t need = ckl::gemm_stream_k_workspace_size(s.m, s.n, s.k, tile);
+            ckl::DeviceBuffer<std::uint8_t> scratch(need > 0 ? need : 1);
+            owned.copy_from_host(c0);
+            given.copy_from_host(c0);
+            ckl::gemm_stream_k(ha, hb, owned.data(), s.m, s.n, s.k, alpha, beta, tile, nullptr, 0,
+                               nullptr);
+            ckl::gemm_stream_k(ha, hb, given.data(), s.m, s.n, s.k, alpha, beta, tile,
+                               scratch.data(), scratch.bytes(), nullptr);
+            CKL_CUDA_CHECK(cudaDeviceSynchronize());
+            EXPECT_EQ(owned.to_host(), given.to_host()) << "stream-K disagreed with itself";
+        }
+    }
+}
+
+// A workspace too small for the shape is a caller error, and a caller error that
+// ran anyway would write outside the buffer it was given.
+TEST_F(FamilyWorkspace, TooSmallAWorkspaceIsRefused) {
+    const Shape s{256, 256, 1024, "small_workspace"};
+    ckl::DeviceBuffer<std::uint16_t> da(elems(s.m, s.k));
+    ckl::DeviceBuffer<std::uint16_t> db(elems(s.k, s.n));
+    ckl::DeviceBuffer<float> dc(elems(s.m, s.n));
+    ckl::DeviceBuffer<std::uint8_t> tiny(64);
+    da.zero();
+    db.zero();
+    dc.zero();
+    tiny.zero();
+    const auto* ha = reinterpret_cast<const __half*>(da.data());
+    const auto* hb = reinterpret_cast<const __half*>(db.data());
+
+    try {
+        ckl::gemm_split_k(ha, hb, dc.data(), s.m, s.n, s.k, 1.0f, 0.0f, kTestSplits, 0, tiny.data(),
+                          tiny.bytes(), nullptr);
+        FAIL() << "split-K accepted a workspace far too small for the shape";
+    } catch (const ckl::Error& e) {
+        EXPECT_EQ(e.status(), ckl::Status::kInvalidValue) << e.what();
+    }
+    try {
+        ckl::gemm_stream_k(ha, hb, dc.data(), s.m, s.n, s.k, 1.0f, 0.0f, 0, tiny.data(),
+                           tiny.bytes(), nullptr);
+        FAIL() << "stream-K accepted a workspace far too small for the shape";
+    } catch (const ckl::Error& e) {
+        EXPECT_EQ(e.status(), ckl::Status::kInvalidValue) << e.what();
+    }
+    CKL_CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+TEST_F(FamilyWorkspace, TileIndexOutsideTheFamilyIsRefused) {
+    ckl::DeviceBuffer<std::uint16_t> da(elems(64, 64));
+    ckl::DeviceBuffer<float> dc(elems(64, 64));
+    da.zero();
+    dc.zero();
+    const auto* h = reinterpret_cast<const __half*>(da.data());
+    for (int bad : {-1, ckl::gemm_tile_family_count()}) {
+        EXPECT_THROW(ckl::gemm_tile_family(h, h, dc.data(), 64, 64, 64, 1.0f, 0.0f, bad, nullptr),
+                     ckl::Error);
+        EXPECT_THROW(
+            ckl::gemm_split_k(h, h, dc.data(), 64, 64, 64, 1.0f, 0.0f, 2, bad, nullptr, 0, nullptr),
+            ckl::Error);
+        EXPECT_THROW(
+            ckl::gemm_stream_k(h, h, dc.data(), 64, 64, 64, 1.0f, 0.0f, bad, nullptr, 0, nullptr),
+            ckl::Error);
+        EXPECT_EQ(ckl::gemm_tile_family_shape(bad).m, 0);
+        EXPECT_EQ(ckl::gemm_tile_family_blocks_per_sm(bad), 0);
+    }
+    CKL_CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+// The split count a caller asks for is a request. Reporting back what was
+// actually used is what keeps ckl::GemmPlan::splits from being a guess.
+TEST_F(FamilyWorkspace, SplitCountIsRoundedToWholeKSteps) {
+    for (int tile = 0; tile < ckl::gemm_tile_family_count(); ++tile) {
+        const ckl::GemmTile t = ckl::gemm_tile_family_shape(tile);
+        SCOPED_TRACE("tile " + std::to_string(tile));
+        // A K shorter than two steps cannot be cut in two.
+        EXPECT_EQ(ckl::gemm_split_k_slices(t.k, 4, tile), 1);
+        // Eight steps cut four ways is two steps each, which is exact.
+        EXPECT_EQ(ckl::gemm_split_k_slices(8 * t.k, 4, tile), 4);
+        // A K that is not a multiple of the step still covers the whole range.
+        const int odd = 8 * t.k + 1;
+        const int used = ckl::gemm_split_k_slices(odd, 4, tile);
+        EXPECT_GE(used, 1);
+        EXPECT_LE(used, 4);
+        EXPECT_EQ(
+            ckl::gemm_split_k_workspace_size(16, 16, odd, 4, tile),
+            used > 1 ? static_cast<std::size_t>(used) * 16 * 16 * sizeof(float) : std::size_t{0});
+    }
+}
+
+TEST_F(FamilyWorkspace, EveryShapeInTheFamilyFitsTheHardware) {
+    ASSERT_EQ(ckl::gemm_tile_family_count(), CKL_TILE_FAMILY_COUNT);
+    for (int i = 0; i < ckl::gemm_tile_family_count(); ++i) {
+        const ckl::GemmTile t = ckl::gemm_tile_family_shape(i);
+        SCOPED_TRACE("tile " + std::to_string(i));
+        EXPECT_GT(t.m, 0);
+        EXPECT_GT(t.n, 0);
+        EXPECT_GT(t.k, 0);
+        // Three stages of A and B, inside the per block opt-in this part allows.
+        const std::size_t smem = 3u * static_cast<std::size_t>(t.m * t.k + t.k * t.n) * 2u;
+        EXPECT_LE(smem, 101376u) << "tile " << i << " asks for " << smem << " bytes";
+        EXPECT_LE(t.warps_m * t.warps_n, 48) << "a block cannot hold more warps than an SM";
+        // The occupancy answer is what the dispatch heuristic divides by, so a
+        // zero here would make every wave count infinite.
+        EXPECT_GT(ckl::gemm_tile_family_blocks_per_sm(i), 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The templated shared memory maps
+// ---------------------------------------------------------------------------
+//
+// gemm_tile_swizzle.hpp generalizes the two maps gemm_swizzle.hpp fixes at
+// 128 by 128 by 32. The properties are the ones the fixed maps are held to, and
+// they are checked here for every shape in the family, on the host, because they
+// are integer arithmetic and not something a profiler counter would answer.
+
+int tile_bank_of(int half_offset) {
+    return (half_offset / 2) % 32;
+}
+
+template <int BM, int BK>
+void check_a_map() {
+    std::vector<int> seen(static_cast<std::size_t>(BM) * BK, -1);
+    for (int r = 0; r < BM; ++r) {
+        for (int c = 0; c < BK; ++c) {
+            const int o = ckl::detail::swizzle_a_tile<BK>(r, c);
+            ASSERT_GE(o, 0);
+            ASSERT_LT(o, BM * BK);
+            ASSERT_EQ(seen[static_cast<std::size_t>(o)], -1)
+                << "A offset " << o << " is written twice at BM " << BM << " BK " << BK;
+            seen[static_cast<std::size_t>(o)] = r * BK + c;
+        }
+    }
+    for (int r = 0; r < BM; ++r) {
+        for (int c = 0; c < BK; c += 8) {
+            const int base = ckl::detail::swizzle_a_tile<BK>(r, c);
+            ASSERT_EQ(base % 8, 0);
+            for (int j = 0; j < 8; ++j) {
+                ASSERT_EQ(ckl::detail::swizzle_a_tile<BK>(r, c + j), base + j);
+            }
+        }
+    }
+    // Every A wavefront the mainloop issues: row_base over the 16 row mma tiles,
+    // k_off over the K substeps, and the x4 form's four groups of eight lanes.
+    for (int row_base = 0; row_base < BM; row_base += 16) {
+        for (int k_off = 0; k_off < BK; k_off += 16) {
+            for (int group = 0; group < 4; ++group) {
+                std::vector<int> banks;
+                for (int i = 0; i < 8; ++i) {
+                    const int lane = group * 8 + i;
+                    banks.push_back(tile_bank_of(ckl::detail::swizzle_a_tile<BK>(
+                        row_base + (lane % 16), k_off + (lane / 16) * 8)));
+                }
+                for (std::size_t x = 0; x < banks.size(); ++x) {
+                    for (std::size_t y = x + 1; y < banks.size(); ++y) {
+                        ASSERT_NE(banks[x], banks[y])
+                            << "A conflict at BM " << BM << " BK " << BK << " row_base " << row_base
+                            << " k_off " << k_off << " group " << group;
+                    }
+                }
+            }
+        }
+    }
+}
+
+template <int BN, int BK>
+void check_b_map() {
+    std::vector<int> seen(static_cast<std::size_t>(BK) * BN, -1);
+    for (int r = 0; r < BK; ++r) {
+        for (int c = 0; c < BN; ++c) {
+            const int o = ckl::detail::swizzle_b_tile<BN>(r, c);
+            ASSERT_GE(o, 0);
+            ASSERT_LT(o, BK * BN);
+            ASSERT_EQ(seen[static_cast<std::size_t>(o)], -1)
+                << "B offset " << o << " is written twice at BN " << BN << " BK " << BK;
+            seen[static_cast<std::size_t>(o)] = r * BN + c;
+        }
+    }
+    for (int r = 0; r < BK; ++r) {
+        for (int c = 0; c < BN; c += 8) {
+            const int base = ckl::detail::swizzle_b_tile<BN>(r, c);
+            ASSERT_EQ(base % 8, 0);
+            for (int j = 0; j < 8; ++j) {
+                ASSERT_EQ(ckl::detail::swizzle_b_tile<BN>(r, c + j), base + j);
+            }
+        }
+    }
+    for (int col_base = 0; col_base < BN; col_base += 16) {
+        for (int k_off = 0; k_off < BK; k_off += 16) {
+            for (int group = 0; group < 4; ++group) {
+                std::vector<int> banks;
+                for (int i = 0; i < 8; ++i) {
+                    const int lane = group * 8 + i;
+                    banks.push_back(tile_bank_of(ckl::detail::swizzle_b_tile<BN>(
+                        k_off + (lane % 16), col_base + (lane / 16) * 8)));
+                }
+                for (std::size_t x = 0; x < banks.size(); ++x) {
+                    for (std::size_t y = x + 1; y < banks.size(); ++y) {
+                        ASSERT_NE(banks[x], banks[y])
+                            << "B conflict at BN " << BN << " BK " << BK << " col_base " << col_base
+                            << " k_off " << k_off << " group " << group;
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(TileSwizzle, EveryFamilyShapeIsABijectionAndConflictFree){
+#define CKL_CHECK_TILE_MAPS(IDX, BM, BN, BK, WM, WN) \
+    {                                                \
+        SCOPED_TRACE("tile " #IDX);                  \
+        check_a_map<BM, BK>();                       \
+        check_b_map<BN, BK>();                       \
+    }
+    CKL_TILE_FAMILY_FOR_EACH(CKL_CHECK_TILE_MAPS)
+#undef CKL_CHECK_TILE_MAPS
+}
+
+// The templated maps and the fixed ones in gemm_swizzle.hpp describe the same
+// tile at 128 by 128 by 32. Two copies that drifted apart would put the cp.async
+// store of one kernel and the ldmatrix load of another at different addresses,
+// which is the kind of bug a shared header exists to prevent.
+TEST(TileSwizzle, MatchesTheFixedShapeMapsAt128x128x32) {
+    for (int r = 0; r < ckl::detail::kSwzTileM; ++r) {
+        for (int c = 0; c < ckl::detail::kSwzTileK; ++c) {
+            ASSERT_EQ(ckl::detail::swizzle_a_tile<32>(r, c), ckl::detail::swizzle_a(r, c))
+                << "A map differs at row " << r << " col " << c;
+        }
+    }
+    for (int r = 0; r < ckl::detail::kSwzTileK; ++r) {
+        for (int c = 0; c < ckl::detail::kSwzTileN; ++c) {
+            ASSERT_EQ(ckl::detail::swizzle_b_tile<128>(r, c), ckl::detail::swizzle_b(r, c))
+                << "B map differs at row " << r << " col " << c;
         }
     }
 }

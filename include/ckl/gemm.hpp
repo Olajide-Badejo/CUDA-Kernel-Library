@@ -84,12 +84,28 @@ CKL_EXPORT Status gemm(Context& ctx, const GemmDesc& desc, const void* alpha, co
 CKL_EXPORT Algo gemm_query(const Context& ctx, const GemmDesc& desc);
 
 /**
+ * @brief The whole dispatch decision, including which tile of the family would run.
+ * @param ctx Context whose device capability and SM count feed the heuristic.
+ * @param desc The shape to plan for.
+ * @return The rung, the block tile, the K split count and whether a committed
+ *         tile sweep informed the answer.
+ * @note ckl::gemm_query returns the rung alone and is the stable short answer;
+ *       this is the same decision with the tile family detail attached.
+ * @note Launches nothing and touches no operand.
+ */
+CKL_EXPORT GemmPlan gemm_plan(const Context& ctx, const GemmDesc& desc);
+
+/**
  * @brief Bytes of scratch the descriptor needs.
  * @param ctx Context the call would run on.
  * @param desc The shape to size for.
- * @return Zero for every path shipped in 1.1.0.
- * @note The entry point exists so a later split-K or stream-K rung can ask for
- *       scratch without an ABI break. Hand the answer to Context::set_workspace.
+ * @return The scratch the planned path asks for: the split-K partial planes or
+ *         the stream-K peer buffers when the plan lands on one of those, and
+ *         zero for every other path.
+ * @note Hand the answer to Context::set_workspace. A Context with no workspace,
+ *       or one too small, makes the split-K and stream-K drivers allocate and
+ *       free their own scratch around the launch, which costs an allocation the
+ *       caller could have avoided.
  */
 CKL_EXPORT std::size_t gemm_workspace_size(const Context& ctx, const GemmDesc& desc);
 
@@ -296,8 +312,7 @@ CKL_EXPORT void gemm_mma_opt(const __half* a, const __half* b, float* c, int m, 
  *       epilogue; a misaligned c throws Status::kInvalidValue.
  */
 CKL_EXPORT void gemm_mma_opt_bias(const __half* a, const __half* b, float* c, const float* bias,
-                                  int m, int n, int k, float alpha,
-                                  cudaStream_t stream = nullptr);
+                                  int m, int n, int k, float alpha, cudaStream_t stream = nullptr);
 
 /**
  * @brief The unfused half of the fusion study: a memory bound pass adding bias and applying ReLU.
@@ -309,6 +324,156 @@ CKL_EXPORT void gemm_mma_opt_bias(const __half* a, const __half* b, float* c, co
  */
 CKL_EXPORT void gemm_bias_relu(float* c, const float* bias, int m, int n,
                                cudaStream_t stream = nullptr);
+
+// ---------------------------------------------------------------------------
+// The tile family, split-K and stream-K
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief How many block tile shapes the family carries.
+ * @return The shape count; valid tile indices are 0 to the count minus one.
+ */
+CKL_EXPORT int gemm_tile_family_count();
+
+/**
+ * @brief The block tile at one index of the family.
+ * @param index Family index, 0 to gemm_tile_family_count() minus one.
+ * @return The tile extents and warp layout, or an all zero shape for an index
+ *         outside the family.
+ */
+CKL_EXPORT GemmTile gemm_tile_family_shape(int index);
+
+/**
+ * @brief Blocks of this tile the occupancy API says fit on one SM.
+ * @param index Family index.
+ * @return The occupancy answer, queried once per shape per process and cached,
+ *         or zero when the running device cannot host the shape at all.
+ * @note This is the denominator of the wave quantization term the dispatch
+ *       heuristic maximizes, which is why it comes from the API rather than from
+ *       an assumption about registers.
+ */
+CKL_EXPORT int gemm_tile_family_blocks_per_sm(int index);
+
+/**
+ * @brief One tile shape of the family, run over the whole shape.
+ * @param a Device pointer to A, m by k, row major, half precision.
+ * @param b Device pointer to B, k by n, row major, half precision.
+ * @param c Device pointer to C, m by n, row major, single precision.
+ * @param m Rows of A and C.
+ * @param n Columns of B and C.
+ * @param k Contraction extent.
+ * @param alpha Scale on the product.
+ * @param beta Scale on the incoming C; when zero, C is not read.
+ * @param tile_index Family index naming the block tile to run.
+ * @param stream Stream to enqueue on; nullptr means the default stream.
+ * @throws ckl::Error with Status::kInvalidValue for a tile index outside the
+ *         family, or Status::kArchMismatch below compute capability 8.0.
+ * @note Any shape runs: an m, n or k that does not divide the tile takes the
+ *       predicated path, which masks the edges of the same mainloop rather than
+ *       rerouting to a scalar kernel.
+ * @note Alignment changes which instructions run, never whether the call works.
+ *       The wide path wants both leading dimensions a multiple of 8 elements,
+ *       a and b 16-byte aligned for its cp.async stages, and c 8-byte aligned
+ *       for its 64-bit stores; anything else stages and stores narrower and
+ *       still computes the same C.
+ */
+CKL_EXPORT void gemm_tile_family(const __half* a, const __half* b, float* c, int m, int n, int k,
+                                 float alpha, float beta, int tile_index,
+                                 cudaStream_t stream = nullptr);
+
+/**
+ * @brief Scratch bytes gemm_split_k needs for this shape.
+ * @param m Rows of C.
+ * @param n Columns of C.
+ * @param k Contraction extent.
+ * @param splits Requested K splits.
+ * @param tile_index Family index naming the block tile.
+ * @return Bytes of device scratch, or zero when the request degenerates to one
+ *         split and no partials are needed.
+ */
+CKL_EXPORT std::size_t gemm_split_k_workspace_size(int m, int n, int k, int splits, int tile_index);
+
+/**
+ * @brief K slices gemm_split_k would actually use for this request.
+ * @param k Contraction extent.
+ * @param splits Requested K splits.
+ * @param tile_index Family index naming the block tile.
+ * @return The slice count after each slice is rounded up to a whole number of
+ *         the tile's K steps, which is at most the request and at least one.
+ * @note The request is a request, not a promise: a K that is short relative to
+ *       the tile's K step cannot be cut as finely as asked. Reporting the answer
+ *       is what keeps ckl::GemmPlan::splits honest.
+ */
+CKL_EXPORT int gemm_split_k_slices(int k, int splits, int tile_index);
+
+/**
+ * @brief The tile family split along K, with a fixup reduction applying alpha and beta once.
+ * @param a Device pointer to A, m by k, row major, half precision.
+ * @param b Device pointer to B, k by n, row major, half precision.
+ * @param c Device pointer to C, m by n, row major, single precision.
+ * @param m Rows of A and C.
+ * @param n Columns of B and C.
+ * @param k Contraction extent.
+ * @param alpha Scale on the product.
+ * @param beta Scale on the incoming C; when zero, C is not read.
+ * @param splits Requested K splits; the driver rounds each split's K extent up
+ *        to the tile's K step and may therefore use fewer.
+ * @param tile_index Family index naming the block tile.
+ * @param workspace Device scratch of at least gemm_split_k_workspace_size bytes,
+ *        or nullptr to let the driver allocate and free its own.
+ * @param workspace_bytes Size of workspace; ignored when workspace is null.
+ * @param stream Stream to enqueue on; nullptr means the default stream.
+ * @throws ckl::Error with Status::kInvalidValue for a bad tile index or a
+ *         workspace too small for the shape.
+ * @note The first pass writes raw partial sums, one m by n plane per split, and
+ *       never touches C. The second pass sums the planes and applies alpha and
+ *       beta once, so beta still does not read C when it is zero and every
+ *       partial is scaled exactly once.
+ */
+CKL_EXPORT void gemm_split_k(const __half* a, const __half* b, float* c, int m, int n, int k,
+                             float alpha, float beta, int splits, int tile_index, void* workspace,
+                             std::size_t workspace_bytes, cudaStream_t stream = nullptr);
+
+/**
+ * @brief Scratch bytes gemm_stream_k needs for this shape.
+ * @param m Rows of C.
+ * @param n Columns of C.
+ * @param k Contraction extent.
+ * @param tile_index Family index naming the block tile.
+ * @return Bytes of device scratch, or zero when the shape needs no stream-K
+ *         CTAs and the whole grid is data parallel.
+ */
+CKL_EXPORT std::size_t gemm_stream_k_workspace_size(int m, int n, int k, int tile_index);
+
+/**
+ * @brief The tile family as a hybrid stream-K grid: a bounded number of persistent CTAs
+ *        covering the K split remainder, the rest data parallel.
+ * @param a Device pointer to A, m by k, row major, half precision.
+ * @param b Device pointer to B, k by n, row major, half precision.
+ * @param c Device pointer to C, m by n, row major, single precision.
+ * @param m Rows of A and C.
+ * @param n Columns of B and C.
+ * @param k Contraction extent.
+ * @param alpha Scale on the product.
+ * @param beta Scale on the incoming C; when zero, C is not read.
+ * @param tile_index Family index naming the block tile.
+ * @param workspace Device scratch of at least gemm_stream_k_workspace_size
+ *        bytes, or nullptr to let the driver allocate and free its own.
+ * @param workspace_bytes Size of workspace; ignored when workspace is null.
+ * @param stream Stream to enqueue on; nullptr means the default stream.
+ * @throws ckl::Error with Status::kInvalidValue for a bad tile index or a
+ *         workspace too small for the shape.
+ * @note The stream-K CTAs cover at most two waves of output tiles between them,
+ *       so the tail of a grid that does not fill the machine is spread over
+ *       every SM instead of leaving most of them idle. A CTA whose share stops
+ *       before the end of a tile publishes its partial through the workspace and
+ *       raises a flag; the CTA that covers the tile's last K iteration waits on
+ *       those peers, sums them in, and writes C once. Waits only ever run
+ *       downward in CTA index, so no assumption about co-residency is needed.
+ */
+CKL_EXPORT void gemm_stream_k(const __half* a, const __half* b, float* c, int m, int n, int k,
+                              float alpha, float beta, int tile_index, void* workspace,
+                              std::size_t workspace_bytes, cudaStream_t stream = nullptr);
 
 /**
  * @brief cuBLAS tensor core oracle, FP16 in and FP32 accumulate, producing the same row major C.

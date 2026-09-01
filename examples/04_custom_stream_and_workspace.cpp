@@ -3,9 +3,10 @@
 // Two things are worth taking from this one. First, a Context is externally
 // synchronized: one Context per stream and per thread, never one shared handle
 // whose stream two threads reset from under each other. Second, ask
-// gemm_workspace_size what the shape needs rather than guessing; every path
-// shipped in 1.1.0 answers zero, and the plumbing exists so a later split-K rung
-// can ask for scratch without breaking the ABI.
+// gemm_workspace_size what the shape needs rather than guessing. The FP32 shape
+// below answers zero; an FP16 shape the dispatcher splits along K answers with
+// the partial planes it needs, and handing that buffer over is what keeps the
+// allocation out of the call.
 
 #include <cmath>
 #include <cstdio>
