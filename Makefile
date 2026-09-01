@@ -9,8 +9,8 @@ CTEST_LABELS ?=
 
 # report, roofline, sweep collide with directory names, so they must be phony or
 # make treats the directory as an up to date target and does nothing.
-.PHONY: all setup configure build test bench roofline sweep sweep-quick report \
-        check-style dash provenance clean help
+.PHONY: all setup configure build test bench roofline sweep sweep-quick tile-sweep \
+        summary report check-style dash provenance clean help
 
 help:
 	@echo "Targets:"
@@ -18,6 +18,9 @@ help:
 	@echo "  build        compile all targets"
 	@echo "  test         run correctness tests (needs a GPU)"
 	@echo "  bench        run the default GEMM benchmark (needs a GPU)"
+	@echo "  sweep        full measurement protocol sweep (needs a GPU, locked clocks)"
+	@echo "  tile-sweep   the tile family decision table (needs a GPU)"
+	@echo "  summary      rebuild summary.csv from rows already on file"
 	@echo "  check-style  run the dash and provenance gates"
 	@echo "  all          build then test then check-style"
 	@echo "  clean        remove the build tree"
@@ -39,12 +42,28 @@ roofline: build
 	./$(BUILD_DIR)/tools/ckl_roofline
 	python3 scripts/plot_roofline.py
 
-# Full resumable sweep across every family; refreshes the canonical summary.csv.
+# Full resumable sweep across every family under the Section 13 protocol: locked
+# clocks, five independent process repeats per configuration with a bootstrap
+# interval, vendor baselines measured once per shape, shuffled order with
+# cooldowns, and a throttle gate that fails the run. Refreshes the canonical
+# summary.csv from this commit's rows only. Needs a GPU and clock control; see
+# docs/benchmarking.md for what to do when the clock cannot be locked.
 sweep: build
 	python3 benchmarks/sweep.py
 
 sweep-quick: build
 	python3 benchmarks/sweep.py --quick
+
+# The tile family decision table the dispatch heuristic reads. Same protocol,
+# imported from the sweep driver rather than copied into it.
+tile-sweep: build
+	python3 benchmarks/tile_sweep.py
+
+# Rebuild the canonical summary from rows already on file, without measuring.
+# SUMMARY_COMMIT selects which commit's rows it is built from; the default is
+# HEAD, and a summary never mixes commits.
+summary:
+	python3 benchmarks/sweep.py --refresh-only $(if $(SUMMARY_COMMIT),--commit $(SUMMARY_COMMIT),)
 
 check-style: dash provenance
 

@@ -1,24 +1,57 @@
 // One configuration, one JSON row. bench_all runs a single (family, variant,
-// dtype, shape) benchmark with NVML sampling on, times both the kernel and its
-// vendor baseline in the same process, and prints one JSON object. sweep.py drives
-// it across the matrix and appends the rows to the canonical JSONL. Keeping the
-// measurement in a small binary that does exactly one config makes the sweep
-// resumable: a killed sweep just reruns the configs that have no row yet.
+// dtype, shape) benchmark with NVML sampling on and prints one JSON object.
+// sweep.py and tile_sweep.py drive it across their matrices and append the rows
+// to the canonical results files. Keeping the measurement in a small binary that
+// does exactly one config makes the sweep resumable, and makes an independent
+// process repeat a matter of running the binary again.
 //
-// Usage: bench_all <family> <variant> <dtype> <m> <n> <k> [commit]
+// Four rules from the Section 13 measurement protocol shape this file.
+//
+//   The GEMM variants speak the descriptor API. A variant name maps to a
+//   ckl::Algo through one table, the call goes through ckl::gemm on a Context
+//   created once, and the chosen out-param is asserted equal to the algorithm
+//   the row claims. A benchmark that silently measures a different path than its
+//   row names is defect class A2, and an assertion is the only thing that stops
+//   it happening again.
+//
+//   Nothing is timed before it is verified. One launch of the kernel and one of
+//   the vendor oracle land in separate buffers and are compared against the
+//   family tolerance before the timing loop opens. A mismatch prints a JSON
+//   error object and exits non-zero, so a silently wrong or early returning
+//   kernel cannot post a number.
+//
+//   The vendor baseline is a variant of its own (baseline_cublas_default,
+//   baseline_cublas_autotune, baseline_cusparse), measured in its own process
+//   once per shape and joined onto the variant rows by the sweep driver. v1
+//   re-measured the baseline inside every row and saw a 1.9x spread on identical
+//   calls, which is where the impossible percentages of defect A2 came from.
+//
+//   The cache state and the launch path are inputs, not accidents. --flush-l2
+//   writes an over-L2-size scratch buffer between reps, outside the timed
+//   region, and --launch-mode graph captures the rep loop so launch overhead can
+//   be read off by difference. Both land in the row, so no two rows can be
+//   compared without seeing which protocol produced them.
+//
+// Usage: bench_all <family> <variant> <dtype> <m> <n> <k> [commit] [flags]
 //   family in {gemm, gemv, spmv, trsm}; dtype in {fp32, fp16, bf16}
+// bench_all --help lists the flags.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <random>
 #include <string>
+#include <type_traits>
 #include <vector>
 
+#include <cublas_v2.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
+#include "ckl/ckl.h"
+#include "ckl/context.hpp"
 #include "ckl/cuda_check.hpp"
 #include "ckl/device_buffer.hpp"
 #include "event_timer.hpp"
@@ -28,16 +61,208 @@
 #include "reference.hpp"
 #include "ckl/sparse.hpp"
 #include "ckl/trsm.hpp"
+#include "ckl/types.hpp"
 
 namespace {
 
-struct Result {
-    double median_ms = 0.0;
-    double iqr_ms = 0.0;
-    double gflops = 0.0;
-    double baseline_gflops = 0.0;
-    bool ok = true;
+// Schema version of the row this binary prints. The committed v1 sweep carries
+// no such field at all, which is how a reader tells the two apart: a v1 row
+// re-measured its own baseline inside the row and kept no samples.
+constexpr int kSchemaVersion = 2;
+
+// ---------------------------------------------------------------------------
+// Options
+// ---------------------------------------------------------------------------
+
+struct Options {
+    std::string family;
+    std::string variant;
+    std::string dtype;
+    int m = 0;
+    int n = 0;
+    int k = 0;
+    std::string commit = "unknown";
+
+    int warmups = 5;
+    int reps = 20;         // the exact count in fixed mode, the floor in adaptive
+    bool adaptive = true;  // min(max_reps, budget_s), per Section 13
+    int max_reps = 1000;
+    double budget_s = 2.0;
+
+    std::string flush = "auto";          // auto, on, off
+    std::string launch_mode = "stream";  // stream, graph
+    // Launches inside one event pair. One is the plain protocol. The graph
+    // comparison sets the same value on both of its rows, so the difference
+    // between them is launch overhead and nothing else.
+    int inner = 1;
+
+    bool disallow_reduced_precision = false;
+
+    // Test only. Scales the oracle before the comparison so the verification
+    // gate can be shown red on demand; ground rule 8 wants a gate that has been
+    // seen failing. 1.0 is the only value any real measurement uses, and any
+    // other value is stamped into the row.
+    double verify_perturb = 1.0;
+
+    bool probe_autotune = false;
 };
+
+[[noreturn]] void usage_and_exit(const char* argv0, int code) {
+    std::fprintf(
+        stderr,
+        "usage: %s <family> <variant> <dtype> <m> <n> <k> [commit] [flags]\n"
+        "  families: gemm gemv spmv trsm\n"
+        "  dtypes:   fp32 fp16 bf16\n"
+        "  gemm variants: naive tiled register cp_async wmma mma_ptx mma_ldm mma_opt auto\n"
+        "                 tile_<BM>x<BN>x<BK> splitk streamk\n"
+        "                 baseline_cublas_default baseline_cublas_autotune\n"
+        "  gemv variants: naive warp vectorized baseline_cublas\n"
+        "  spmv variants: naive warp baseline_cusparse\n"
+        "  trsm variants: naive blocked baseline_cublas\n"
+        "flags:\n"
+        "  --warmups N            untimed launches before the loop (default 5)\n"
+        "  --reps N               timed reps, and the floor in adaptive mode (default 20)\n"
+        "  --fixed-reps           run exactly --reps instead of the adaptive budget\n"
+        "  --max-reps N           adaptive ceiling (default 1000)\n"
+        "  --budget-s S           adaptive wall clock budget in seconds (default 2.0)\n"
+        "  --flush-l2 auto|on|off L2 flush between reps (default auto)\n"
+        "  --launch-mode stream|graph\n"
+        "  --inner N              launches inside one event pair (default 1)\n"
+        "  --disallow-reduced-precision-reduction\n"
+        "  --verify-perturb X     TEST ONLY: scale the oracle so verification fails\n"
+        "  --probe-autotune       report whether CUBLAS_GEMM_AUTOTUNE runs, then exit\n",
+        argv0);
+    std::exit(code);
+}
+
+// ---------------------------------------------------------------------------
+// JSON output
+// ---------------------------------------------------------------------------
+
+class JsonRow {
+public:
+    void str(const char* key, const std::string& value) {
+        sep();
+        body_ += '"';
+        body_ += key;
+        body_ += "\":\"";
+        body_ += value;
+        body_ += '"';
+    }
+
+    void num(const char* key, double value, int digits = 6) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%.*f", digits, value);
+        raw(key, buf);
+    }
+
+    void sci(const char* key, double value) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%.6e", value);
+        raw(key, buf);
+    }
+
+    void integer(const char* key, long long value) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%lld", value);
+        raw(key, buf);
+    }
+
+    void boolean(const char* key, bool value) { raw(key, value ? "true" : "false"); }
+
+    void array(const char* key, const std::vector<double>& values, int digits = 6) {
+        std::string out = "[";
+        char buf[64];
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (i != 0) {
+                out += ',';
+            }
+            std::snprintf(buf, sizeof(buf), "%.*f", digits, values[i]);
+            out += buf;
+        }
+        out += ']';
+        raw(key, out);
+    }
+
+    void raw(const char* key, const std::string& literal) {
+        sep();
+        body_ += '"';
+        body_ += key;
+        body_ += "\":";
+        body_ += literal;
+    }
+
+    std::string text() const { return "{" + body_ + "}"; }
+
+private:
+    void sep() {
+        if (!body_.empty()) {
+            body_ += ',';
+        }
+    }
+    std::string body_;
+};
+
+// Escapes what a diagnostic message can realistically contain. Every string here
+// is built inside this binary, not read from input.
+std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c == '"' || c == '\\') {
+            out += '\\';
+            out += c;
+        } else if (c == '\n') {
+            out += "\\n";
+        } else {
+            out += c;
+        }
+    }
+    return out;
+}
+
+const Options* g_opt = nullptr;
+
+// A benchmark that cannot honestly produce a number says so on stdout, as an
+// object with the same identifying fields a row carries, and exits non-zero.
+// Nothing downstream has to guess what an empty line meant.
+[[noreturn]] void fail_json(const char* stage, const std::string& message,
+                            const std::function<void(JsonRow&)>& extra, int code) {
+    JsonRow row;
+    row.boolean("error", true);
+    row.str("stage", stage);
+    if (g_opt != nullptr) {
+        row.str("family", g_opt->family);
+        row.str("variant", g_opt->variant);
+        row.str("dtype", g_opt->dtype);
+        row.integer("m", g_opt->m);
+        row.integer("n", g_opt->n);
+        row.integer("k", g_opt->k);
+        row.str("commit", g_opt->commit);
+    }
+    if (extra) {
+        extra(row);
+    }
+    row.str("message", json_escape(message));
+    std::printf("%s\n", row.text().c_str());
+    std::fflush(stdout);
+    std::exit(code);
+}
+
+[[noreturn]] void fail_json(const char* stage, const std::string& message, int code) {
+    fail_json(stage, message, nullptr, code);
+}
+
+// The detail the library left behind for the last failed call.
+std::string library_detail() {
+    char buf[512] = {0};
+    ckl_last_error(buf, sizeof(buf));
+    return std::string(buf);
+}
+
+// ---------------------------------------------------------------------------
+// Host side helpers
+// ---------------------------------------------------------------------------
 
 template <typename T>
 T from_float(float f);
@@ -57,36 +282,237 @@ __nv_bfloat16 from_float<__nv_bfloat16>(float f) {
 template <typename T>
 std::vector<T> convert(const std::vector<float>& src) {
     std::vector<T> out(src.size());
-    for (std::size_t i = 0; i < src.size(); ++i)
+    for (std::size_t i = 0; i < src.size(); ++i) {
         out[i] = from_float<T>(src[i]);
+    }
+    return out;
+}
+
+std::vector<float> absolute(const std::vector<float>& src) {
+    std::vector<float> out(src.size());
+    for (std::size_t i = 0; i < src.size(); ++i) {
+        out[i] = std::fabs(src[i]);
+    }
     return out;
 }
 
 double gflops_of(double flops, double ms) {
-    return flops / (ms / 1000.0) / 1.0e9;
+    return ms > 0.0 ? flops / (ms / 1000.0) / 1.0e9 : 0.0;
 }
 
-// GEMM, any precision. Times the variant and its cuBLAS baseline of the same dtype.
-template <typename T, typename KFn, typename OFn>
-Result bench_gemm_typed(KFn kernel, OFn oracle, int m, int n, int k) {
-    const auto fa = ckl::random_matrix(m, k, 11);
-    const auto fb = ckl::random_matrix(k, n, 22);
-    const auto a = convert<T>(fa);
-    const auto b = convert<T>(fb);
-    ckl::DeviceBuffer<T> da(a.size());
-    ckl::DeviceBuffer<T> db(b.size());
-    ckl::DeviceBuffer<float> dc(static_cast<std::size_t>(m) * n);
-    da.copy_from_host(a);
-    db.copy_from_host(b);
-    dc.zero();
-    const double flops = 2.0 * m * n * k;
-    ckl::TimingStats ks = ckl::time_stream(
-        [&](cudaStream_t s) { kernel(da.data(), db.data(), dc.data(), m, n, k, 1.0f, 0.0f, s); });
-    ckl::TimingStats os = ckl::time_stream(
-        [&](cudaStream_t s) { oracle(da.data(), db.data(), dc.data(), m, n, k, 1.0f, 0.0f, s); });
-    return {ks.median_ms, ks.iqr_ms, gflops_of(flops, ks.median_ms), gflops_of(flops, os.median_ms),
-            true};
+// The verification measure: worst elementwise |kernel - oracle| over the
+// magnitude the rounding error is actually bounded by, which for a dot product
+// is sum_p |a_ip| |b_pj|. That sum is itself a GEMM, so it is computed on the
+// device from |A| and |B| rather than on the host, and the answer is directly
+// comparable with ckl::tol(k), the same shape derived tolerance the correctness
+// suite is written against. Dividing by |c| instead would make the bound depend
+// on how much the dot product happened to cancel.
+struct Residual {
+    double worst = 0.0;
+    long long index = -1;  ///< Where the worst element sits, so a red gate is debuggable.
+    double got = 0.0;
+    double oracle = 0.0;
+    double scale = 0.0;
+};
+
+Residual scaled_residual(const std::vector<float>& got, const std::vector<float>& oracle,
+                         const std::vector<float>& scale, double perturb) {
+    Residual worst;
+    for (std::size_t i = 0; i < got.size(); ++i) {
+        const double ref = static_cast<double>(oracle[i]) * perturb;
+        const double denom = scale[i] > 1e-30f ? static_cast<double>(scale[i]) : 1.0;
+        const double r = std::fabs(static_cast<double>(got[i]) - ref) / denom;
+        if (r > worst.worst) {
+            worst.worst = r;
+            worst.index = static_cast<long long>(i);
+            worst.got = static_cast<double>(got[i]);
+            worst.oracle = static_cast<double>(oracle[i]);
+            worst.scale = static_cast<double>(scale[i]);
+        }
+    }
+    return worst;
 }
+
+// ---------------------------------------------------------------------------
+// What one run produces
+// ---------------------------------------------------------------------------
+
+struct Measured {
+    ckl::TimingStats stats;
+    double flops = 0.0;
+    std::size_t working_set_bytes = 0;
+    std::string chosen;
+    std::string entry_point = "ckl_gemm";
+    int tile_index = -1;
+    std::string tile;
+    int splits = 1;
+    bool plan_tuned = false;
+    std::string plan_algo;
+    Residual verify;
+    double verify_tol = 0.0;
+    std::string cublas_gemm_algo;
+    long long nnz = 0;
+    bool l2_flushed = false;
+    std::size_t flush_bytes = 0;
+};
+
+// ---------------------------------------------------------------------------
+// The timed loop, shared by every family
+// ---------------------------------------------------------------------------
+
+std::size_t l2_bytes(const ckl::Context& ctx) {
+    const int l2 = ctx.device_properties().l2CacheSize;
+    return l2 > 0 ? static_cast<std::size_t>(l2) : (std::size_t{48} << 20);
+}
+
+// Whether this row flushes L2 between reps. The rule: on for the memory bound
+// families, and on for any row whose whole working set fits in L2, because those
+// are exactly the rows that would otherwise measure a cache no real caller
+// arrives with.
+bool decide_flush(const Options& opt, std::size_t working_set, std::size_t l2) {
+    if (opt.flush == "on") {
+        return true;
+    }
+    if (opt.flush == "off") {
+        return false;
+    }
+    return opt.family == "gemv" || opt.family == "spmv" || working_set <= l2;
+}
+
+void run_timed(const Options& opt, const ckl::Context& ctx, cudaStream_t stream, Measured& out,
+               const std::function<void(cudaStream_t)>& launch,
+               const std::function<void(cudaStream_t)>& prologue) {
+    const std::size_t l2 = l2_bytes(ctx);
+    out.l2_flushed = decide_flush(opt, out.working_set_bytes, l2);
+
+    // Twice L2 guarantees the flush write cannot leave any of the previous
+    // working set resident, whatever the replacement policy does.
+    ckl::DeviceBuffer<unsigned char> scratch;
+    if (out.l2_flushed) {
+        out.flush_bytes = 2 * l2;
+        scratch = ckl::DeviceBuffer<unsigned char>(out.flush_bytes);
+    }
+
+    ckl::TimingOptions timing;
+    timing.stream = stream;
+    timing.warmups = opt.warmups;
+    timing.reps = opt.reps;
+    timing.adaptive = opt.adaptive;
+    timing.max_reps = opt.max_reps;
+    timing.budget_s = opt.budget_s;
+    timing.graph = opt.launch_mode == "graph";
+    // Both launch modes run the same number of launches inside one event pair,
+    // so the whole difference between the paired rows is launch overhead and
+    // nothing else. A stream row measured on its own uses one.
+    timing.inner = opt.inner;
+    timing.flush_buffer = out.l2_flushed ? scratch.data() : nullptr;
+    timing.flush_bytes = out.l2_flushed ? out.flush_bytes : 0;
+    timing.prologue = prologue;
+
+    if (timing.graph && prologue) {
+        // A prologue is host enqueued work between reps. It cannot live inside a
+        // captured graph, and running it once per graph launch would restore a
+        // buffer that the inner launches then consume inner times over.
+        fail_json("usage",
+                  "--launch-mode graph is not available for a family whose kernel consumes its "
+                  "input and needs a restore between reps",
+                  2);
+    }
+    out.stats = ckl::time_stream_ex(launch, timing);
+}
+
+// ---------------------------------------------------------------------------
+// cuBLAS plumbing and the fairness protocol
+// ---------------------------------------------------------------------------
+
+void check_cublas(cublasStatus_t s, const char* what) {
+    if (s != CUBLAS_STATUS_SUCCESS) {
+        fail_json("cublas", std::string(what) + ": " + cublasGetStatusName(s), 5);
+    }
+}
+
+// The row major identity cuBLAS is driven through everywhere in this project:
+// C_t(n by m) = op(B)_t * op(A)_t, so a column major call writes exactly the row
+// major C the hand written kernels produce. algo is the only thing that varies
+// between the two named baseline variants; the protocol forbids sweeping it any
+// further than default against autotune, because algo selection is a no-op on
+// sm_80 and newer.
+cublasStatus_t cublas_gemm_row_major(cublasHandle_t h, cudaDataType in_type, int m, int n, int k,
+                                     float alpha, const void* a, const void* b, float beta,
+                                     float* c, cublasGemmAlgo_t algo) {
+    return cublasGemmEx(h, CUBLAS_OP_N, CUBLAS_OP_N, n, m, k, &alpha, b, in_type, n, a, in_type, k,
+                        &beta, c, CUDA_R_32F, n, CUBLAS_COMPUTE_32F, algo);
+}
+
+// cuBLAS still declares CUBLAS_GEMM_AUTOTUNE and still documents it as
+// experimental, so nothing here assumes it runs: the value is probed against a
+// real call through --probe-autotune and the answer is reported, not asserted.
+#if defined(CUBLAS_VER_MAJOR) && CUBLAS_VER_MAJOR >= 12
+constexpr bool kAutotuneDeclared = true;
+constexpr cublasGemmAlgo_t kAutotuneAlgo = CUBLAS_GEMM_AUTOTUNE;
+#else
+constexpr bool kAutotuneDeclared = false;
+constexpr cublasGemmAlgo_t kAutotuneAlgo = CUBLAS_GEMM_DEFAULT;
+#endif
+
+// The fairness protocol, in one place so it cannot drift between call sites.
+//
+//   cublasSetWorkspace is never called, at any size. One call forfeits the
+//   default pool, which is 32 MiB on sm_120, and a baseline running without its
+//   pool is not the baseline a user would get.
+//   cublasSetStream comes first, because it resets the workspace to the default
+//   pool; a workspace experiment that set the buffer first would lose it again.
+//   The math mode is set explicitly and read back into the row, because with
+//   FP16 in and CUBLAS_COMPUTE_32F cuBLAS may reduce split-K partials in reduced
+//   precision, which moves both its speed and its accuracy as an oracle.
+std::string configure_cublas(const Options& opt, cublasHandle_t h, cudaStream_t stream) {
+    check_cublas(cublasSetStream(h, stream), "cublasSetStream");
+    const cublasMath_t want =
+        opt.disallow_reduced_precision
+            ? static_cast<cublasMath_t>(CUBLAS_DEFAULT_MATH |
+                                        CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION)
+            : CUBLAS_DEFAULT_MATH;
+    check_cublas(cublasSetMathMode(h, want), "cublasSetMathMode");
+    cublasMath_t got = CUBLAS_DEFAULT_MATH;
+    check_cublas(cublasGetMathMode(h, &got), "cublasGetMathMode");
+    std::string name = "CUBLAS_DEFAULT_MATH";
+    if ((static_cast<unsigned>(got) &
+         static_cast<unsigned>(CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION)) != 0u) {
+        name += "|CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION";
+    }
+    return name;
+}
+
+// ---------------------------------------------------------------------------
+// The variant table
+// ---------------------------------------------------------------------------
+
+struct VariantEntry {
+    const char* name;
+    const char* dtype;  // empty means any dtype the family accepts
+    ckl::Algo algo;
+    bool baseline;
+};
+
+// Every GEMM variant name the sweep can ask for, and the ckl::Algo it must run.
+// This replaces the v1 string if-chain over free function pointers: one table,
+// one lookup, and the chosen out-param checked against the entry afterwards.
+const VariantEntry kGemmVariants[] = {
+    {"naive", "fp32", ckl::Algo::kNaive, false},
+    {"tiled", "fp32", ckl::Algo::kTiled, false},
+    {"register", "fp32", ckl::Algo::kRegister, false},
+    {"cp_async", "fp32", ckl::Algo::kCpAsync, false},
+    {"wmma", "fp16", ckl::Algo::kWmmaFp16, false},
+    {"wmma", "bf16", ckl::Algo::kWmmaBf16, false},
+    {"mma_ptx", "fp16", ckl::Algo::kMmaPtx, false},
+    {"mma_ldm", "fp16", ckl::Algo::kMmaLdm, false},
+    {"mma_opt", "fp16", ckl::Algo::kMmaOpt, false},
+    {"splitk", "fp16", ckl::Algo::kSplitK, false},
+    {"streamk", "fp16", ckl::Algo::kStreamK, false},
+    {"auto", "", ckl::Algo::kAuto, false},
+    {"baseline_cublas_default", "", ckl::Algo::kCublas, true},
+    {"baseline_cublas_autotune", "", ckl::Algo::kCublas, true},
+};
 
 // "tile_128x128x32" back to a family index, or -1 when no shape matches. The
 // name is built from the shape rather than from the index so a row in a
@@ -103,87 +529,364 @@ int tile_family_index(const std::string& variant) {
     return -1;
 }
 
-Result bench_gemm(const std::string& v, const std::string& dtype, int m, int n, int k) {
-    if (dtype == "fp32") {
-        std::function<void(const float*, const float*, float*, int, int, int, float, float,
-                           cudaStream_t)>
-            kf;
-        if (v == "naive")
-            kf = ckl::gemm_naive;
-        else if (v == "tiled")
-            kf = ckl::gemm_tiled;
-        else if (v == "register")
-            kf = ckl::gemm_register;
-        else if (v == "cp_async")
-            kf = ckl::gemm_cp_async;
-        else
-            return {0, 0, 0, 0, false};
-        return bench_gemm_typed<float>(kf, ckl::gemm_cublas, m, n, k);
-    }
-    if (dtype == "fp16") {
-        std::function<void(const __half*, const __half*, float*, int, int, int, float, float,
-                           cudaStream_t)>
-            kf;
-        if (v == "wmma")
-            kf = ckl::gemm_wmma_fp16;
-        else if (v == "mma_ptx")
-            kf = ckl::gemm_mma_ptx;
-        else if (v == "mma_ldm")
-            kf = ckl::gemm_mma_ldm;
-        else if (v == "mma_opt")
-            kf = ckl::gemm_mma_opt;
-        else if (v.rfind("tile_", 0) == 0) {
-            // One member of the tile family, named by its block shape:
-            // tile_128x128x32. tile_sweep.py drives every instantiation across
-            // the shape matrix under this name, and the dispatch heuristic reads
-            // the same string back out of the committed CSV.
-            const int index = tile_family_index(v);
-            if (index < 0)
-                return {0, 0, 0, 0, false};
-            kf = [index](const __half* a, const __half* b, float* c, int mm, int nn, int kk,
-                         float alpha, float beta, cudaStream_t s) {
-                ckl::gemm_tile_family(a, b, c, mm, nn, kk, alpha, beta, index, s);
-            };
-        } else
-            return {0, 0, 0, 0, false};
-        return bench_gemm_typed<__half>(kf, ckl::gemm_cublas_fp16, m, n, k);
-    }
-    if (dtype == "bf16") {
-        if (v != "wmma")
-            return {0, 0, 0, 0, false};
-        return bench_gemm_typed<__nv_bfloat16>(ckl::gemm_wmma_bf16, ckl::gemm_cublas_bf16, m, n, k);
-    }
-    return {0, 0, 0, 0, false};
+std::string tile_label(const ckl::GemmTile& t) {
+    return std::to_string(t.m) + "x" + std::to_string(t.n) + "x" + std::to_string(t.k);
 }
 
-Result bench_gemv(const std::string& v, int m, int n) {
+const VariantEntry* find_gemm_variant(const std::string& name, const std::string& dtype) {
+    for (const VariantEntry& e : kGemmVariants) {
+        if (name == e.name && (e.dtype[0] == '\0' || dtype == e.dtype)) {
+            return &e;
+        }
+    }
+    return nullptr;
+}
+
+ckl::DType dtype_of(const std::string& s) {
+    if (s == "fp16") {
+        return ckl::DType::kR16F;
+    }
+    if (s == "bf16") {
+        return ckl::DType::kR16BF;
+    }
+    return ckl::DType::kR32F;
+}
+
+void require_verified(const Measured& out) {
+    if (!(out.verify.worst <= out.verify_tol)) {
+        const Residual r = out.verify;
+        const double tolerance = out.verify_tol;
+        fail_json(
+            "verify",
+            "the kernel and the reference disagree beyond the family tolerance; nothing was timed",
+            [r, tolerance](JsonRow& row) {
+                row.boolean("verify_ok", false);
+                row.sci("verify_residual", r.worst);
+                row.sci("verify_tol", tolerance);
+                row.integer("verify_worst_index", r.index);
+                row.sci("verify_worst_got", r.got);
+                row.sci("verify_worst_reference", r.oracle);
+                row.sci("verify_worst_scale", r.scale);
+            },
+            9);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GEMM
+// ---------------------------------------------------------------------------
+
+template <typename T>
+Measured bench_gemm_typed(const Options& opt, ckl::Context& ctx, cudaStream_t stream,
+                          const VariantEntry& entry, int pinned_tile, cudaDataType in_type) {
+    const int m = opt.m;
+    const int n = opt.n;
+    const int k = opt.k;
+    Measured out;
+    out.flops = 2.0 * static_cast<double>(m) * n * k;
+    out.working_set_bytes =
+        (static_cast<std::size_t>(m) * k + static_cast<std::size_t>(k) * n) * sizeof(T) +
+        static_cast<std::size_t>(m) * n * sizeof(float);
+
+    const auto fa = ckl::random_matrix(m, k, 11);
+    const auto fb = ckl::random_matrix(k, n, 22);
+    ckl::DeviceBuffer<T> da(fa.size());
+    ckl::DeviceBuffer<T> db(fb.size());
+    ckl::DeviceBuffer<float> dc(static_cast<std::size_t>(m) * n);
+    dc.zero();
+
+    ckl::GemmDesc desc;
+    desc.layout = ckl::Layout::kRowMajor;
+    desc.m = m;
+    desc.n = n;
+    desc.k = k;
+    desc.dt_a = dtype_of(opt.dtype);
+    desc.dt_b = desc.dt_a;
+    desc.dt_c = ckl::DType::kR32F;
+    desc.lda = k;
+    desc.ldb = n;
+    desc.ldc = n;
+
+    const bool pinned = pinned_tile >= 0;
+    const bool autotune = std::string(entry.name) == "baseline_cublas_autotune";
+    const ckl::Algo requested = pinned ? ckl::Algo::kTileFamily : entry.algo;
+
+    // The plan, for the record: the whole dispatch decision, so a row can say
+    // which rung and which tile kAuto would have run on this shape and whether a
+    // committed tile sweep informed the answer.
+    ckl::GemmDesc auto_desc = desc;
+    auto_desc.algo = ckl::Algo::kAuto;
+    const ckl::GemmPlan plan = ckl::gemm_plan(ctx, auto_desc);
+    out.plan_tuned = plan.tuned;
+    out.plan_algo = ckl::algo_name(plan.algo);
+
+    ckl::GemmDesc named_desc = desc;
+    named_desc.algo = requested;
+
+    // Scratch for the split-K and stream-K drivers, sized from the API and given
+    // to the Context, so no allocation happens inside a timed call.
+    ckl::DeviceBuffer<unsigned char> workspace;
+    const std::size_t ws = ckl::gemm_workspace_size(ctx, named_desc);
+    if (ws > 0) {
+        workspace = ckl::DeviceBuffer<unsigned char>(ws);
+        ctx.set_workspace(workspace.data(), ws);
+    }
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    float* raw_c = dc.data();
+    auto* handle = static_cast<cublasHandle_t>(ctx.cublas());
+
+    // The launch under test, exactly as the timed loop will run it. tile_* is
+    // the one variant that cannot go through the descriptor API: GemmDesc names
+    // a rung, not a family index, so a tile_* row calls the pinned entry point
+    // and says so through entry_point. Everything else is ckl::gemm.
+    std::function<void(cudaStream_t)> launch;
+    if (pinned) {
+        // The tile family is FP16 in only, which main() has already enforced;
+        // the guard is what keeps the FP32 and BF16 instantiations of this
+        // template from trying to name a __half entry point.
+        if constexpr (std::is_same_v<T, __half>) {
+            const int index = pinned_tile;
+            launch = [&da, &db, raw_c, m, n, k, index](cudaStream_t s) {
+                ckl::gemm_tile_family(da.data(), db.data(), raw_c, m, n, k, 1.0f, 0.0f, index, s);
+            };
+        }
+        out.entry_point = "gemm_tile_family";
+    } else if (autotune) {
+        launch = [&da, &db, raw_c, handle, in_type, m, n, k](cudaStream_t s) {
+            (void)s;  // the handle already carries the stream
+            const cublasStatus_t st = cublas_gemm_row_major(
+                handle, in_type, m, n, k, 1.0f, da.data(), db.data(), 0.0f, raw_c, kAutotuneAlgo);
+            if (st != CUBLAS_STATUS_SUCCESS) {
+                fail_json("launch",
+                          std::string("cublasGemmEx with CUBLAS_GEMM_AUTOTUNE: ") +
+                              cublasGetStatusName(st),
+                          5);
+            }
+        };
+        out.entry_point = "cublasGemmEx";
+        out.cublas_gemm_algo = "CUBLAS_GEMM_AUTOTUNE";
+    } else {
+        launch = [&ctx, &named_desc, &da, &db, &alpha, &beta, raw_c](cudaStream_t s) {
+            (void)s;  // the Context already carries the stream
+            const ckl::Status st =
+                ckl::gemm(ctx, named_desc, &alpha, da.data(), db.data(), &beta, raw_c, nullptr);
+            if (st != ckl::Status::kSuccess) {
+                fail_json("launch",
+                          std::string("ckl::gemm returned ") + ckl::status_string(st) +
+                              " inside the timing loop",
+                          5);
+            }
+        };
+        out.entry_point = "ckl_gemm";
+        if (entry.algo == ckl::Algo::kCublas) {
+            out.cublas_gemm_algo = "CUBLAS_GEMM_DEFAULT";
+        }
+    }
+
+    // --- self verification, before a single timed launch ---
+    {
+        ckl::DeviceBuffer<float> d_scale(static_cast<std::size_t>(m) * n);
+        ckl::DeviceBuffer<float> d_oracle(static_cast<std::size_t>(m) * n);
+
+        ckl::GemmDesc vendor = desc;
+        vendor.algo = ckl::Algo::kCublas;
+        ckl::Algo vendor_chosen = ckl::Algo::kAuto;
+
+        // sum_p |a_ip| |b_pj|, the magnitude the rounding error is bounded by,
+        // computed on the device because on the host it is an m by n by k loop.
+        da.copy_from_host(convert<T>(absolute(fa)));
+        db.copy_from_host(convert<T>(absolute(fb)));
+        ckl::Status st = ckl::gemm(ctx, vendor, &alpha, da.data(), db.data(), &beta, d_scale.data(),
+                                   &vendor_chosen);
+        if (st != ckl::Status::kSuccess) {
+            fail_json("verify",
+                      std::string("the magnitude reference call failed: ") + ckl::status_string(st),
+                      6);
+        }
+
+        // The buffers about to be overwritten are still being read by the call
+        // above. DeviceBuffer copies run on the default stream, and this stream
+        // is non blocking, so nothing orders the two without this.
+        CKL_CUDA_CHECK(cudaStreamSynchronize(stream));
+        da.copy_from_host(convert<T>(fa));
+        db.copy_from_host(convert<T>(fb));
+
+        // One launch of the path under test, and the chosen assertion. An
+        // explicitly named algorithm is never rerouted by the dispatcher, so a
+        // mismatch here means the table and the library disagree about what the
+        // name means, which is exactly the silent substitution A2 was.
+        ckl::Algo chosen = ckl::Algo::kAuto;
+        if (pinned) {
+            // The dispatch probe goes into the oracle buffer, which the vendor
+            // call below overwrites. C under test is written exactly once, by
+            // the pinned tile, so nothing about the comparison depends on two
+            // kernels having landed in the right order.
+            ckl::GemmDesc family = desc;
+            family.algo = ckl::Algo::kTileFamily;
+            st = ckl::gemm(ctx, family, &alpha, da.data(), db.data(), &beta, d_oracle.data(),
+                           &chosen);
+            if (st != ckl::Status::kSuccess) {
+                fail_json("dispatch",
+                          std::string("the tile family refuses this shape: ") +
+                              ckl::status_string(st) + "; " + library_detail(),
+                          7);
+            }
+        }
+
+        st = ckl::gemm(ctx, vendor, &alpha, da.data(), db.data(), &beta, d_oracle.data(),
+                       &vendor_chosen);
+        if (st != ckl::Status::kSuccess) {
+            fail_json("verify",
+                      std::string("the vendor oracle call failed: ") + ckl::status_string(st), 6);
+        }
+
+        if (pinned) {
+            // The pinned tile, not the one the plan picked, is what the row is
+            // about, so it is what gets timed and what gets verified.
+            launch(stream);
+        } else if (autotune) {
+            chosen = ckl::Algo::kCublas;  // a direct cuBLAS call is the vendor path by construction
+            // The first CUBLAS_GEMM_AUTOTUNE call for a shape is the tuning run
+            // itself: cuBLAS benchmarks its candidates and caches the winner in
+            // the handle. Whatever that leaves in C is not the answer, so the
+            // call that gets verified is the one after it.
+            launch(stream);
+            CKL_CUDA_CHECK(cudaStreamSynchronize(stream));
+            launch(stream);
+        } else {
+            st = ckl::gemm(ctx, named_desc, &alpha, da.data(), db.data(), &beta, raw_c, &chosen);
+            if (st != ckl::Status::kSuccess) {
+                fail_json("dispatch",
+                          std::string("ckl::gemm returned ") + ckl::status_string(st) +
+                              " for algo " + ckl::algo_name(requested) + "; " + library_detail(),
+                          7);
+            }
+        }
+        CKL_CUDA_CHECK(cudaStreamSynchronize(stream));
+
+        const ckl::Algo expect = requested == ckl::Algo::kAuto ? chosen : requested;
+        if (chosen != expect) {
+            fail_json("dispatch",
+                      std::string("variant ") + opt.variant + " asked for " +
+                          ckl::algo_name(expect) + " and dispatch reports " +
+                          ckl::algo_name(chosen) +
+                          "; a benchmark that measures a path its row does not name is a defect",
+                      8);
+        }
+        out.chosen = ckl::algo_name(chosen);
+
+        const std::vector<float> got = dc.to_host();
+        const std::vector<float> oracle = d_oracle.to_host();
+        const std::vector<float> scale = d_scale.to_host();
+        out.verify = scaled_residual(got, oracle, scale, opt.verify_perturb);
+        out.verify_tol = ckl::tol(k);
+        require_verified(out);
+    }
+
+    if (pinned) {
+        out.tile_index = pinned_tile;
+        out.tile = tile_label(ckl::gemm_tile_family_shape(pinned_tile));
+    } else if (requested != ckl::Algo::kCublas && plan.tile_index >= 0) {
+        out.tile_index = plan.tile_index;
+        out.tile = tile_label(plan.tile);
+        out.splits = plan.splits;
+    }
+
+    run_timed(opt, ctx, stream, out, launch, nullptr);
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// GEMV, SpMV and TRSM
+// ---------------------------------------------------------------------------
+//
+// None of the three has a descriptor entry point in 1.1.0, so they keep their
+// free function calls. What they do gain is the shared timing helper and the
+// same verification against the vendor oracle, so the protocol is identical
+// everywhere and only the call shape differs.
+
+Measured bench_gemv(const Options& opt, const ckl::Context& ctx, cudaStream_t stream) {
+    const int m = opt.m;
+    const int n = opt.n;
+    Measured out;
+    out.flops = 2.0 * static_cast<double>(m) * n;
+    out.working_set_bytes = (static_cast<std::size_t>(m) * n + static_cast<std::size_t>(n) +
+                             static_cast<std::size_t>(m)) *
+                            sizeof(float);
+    out.entry_point = "free_function";
+
     std::function<void(const float*, const float*, float*, int, int, float, float, cudaStream_t)>
         kf;
-    if (v == "naive")
+    if (opt.variant == "naive") {
         kf = ckl::gemv_naive;
-    else if (v == "warp")
+    } else if (opt.variant == "warp") {
         kf = ckl::gemv_warp;
-    else if (v == "vectorized")
+    } else if (opt.variant == "vectorized") {
         kf = ckl::gemv_vectorized;
-    else
-        return {0, 0, 0, 0, false};
+    } else if (opt.variant == "baseline_cublas") {
+        kf = ckl::gemv_cublas;
+        out.entry_point = "gemv_cublas";
+        out.cublas_gemm_algo = "CUBLAS_GEMM_DEFAULT";
+    } else {
+        fail_json("variant", "unknown gemv variant " + opt.variant, 3);
+    }
+    out.chosen = opt.variant == "baseline_cublas" ? "cublas" : opt.variant;
+
     const auto a = ckl::random_matrix(m, n, 3);
     const auto x = ckl::random_matrix(n, 1, 5);
-    ckl::DeviceBuffer<float> da(a.size()), dx(x.size()), dy(static_cast<std::size_t>(m));
-    da.copy_from_host(a);
-    dx.copy_from_host(x);
+    ckl::DeviceBuffer<float> da(a.size());
+    ckl::DeviceBuffer<float> dx(x.size());
+    ckl::DeviceBuffer<float> dy(static_cast<std::size_t>(m));
     dy.zero();
-    const double flops = 2.0 * m * n;
-    ckl::TimingStats ks = ckl::time_stream(
-        [&](cudaStream_t s) { kf(da.data(), dx.data(), dy.data(), m, n, 1.0f, 0.0f, s); });
-    ckl::TimingStats os = ckl::time_stream([&](cudaStream_t s) {
-        ckl::gemv_cublas(da.data(), dx.data(), dy.data(), m, n, 1.0f, 0.0f, s);
-    });
-    return {ks.median_ms, ks.iqr_ms, gflops_of(flops, ks.median_ms), gflops_of(flops, os.median_ms),
-            true};
+
+    {
+        ckl::DeviceBuffer<float> d_scale(static_cast<std::size_t>(m));
+        ckl::DeviceBuffer<float> d_oracle(static_cast<std::size_t>(m));
+        da.copy_from_host(absolute(a));
+        dx.copy_from_host(absolute(x));
+        ckl::gemv_cublas(da.data(), dx.data(), d_scale.data(), m, n, 1.0f, 0.0f, stream);
+        CKL_CUDA_CHECK(cudaStreamSynchronize(stream));
+        da.copy_from_host(a);
+        dx.copy_from_host(x);
+        ckl::gemv_cublas(da.data(), dx.data(), d_oracle.data(), m, n, 1.0f, 0.0f, stream);
+        kf(da.data(), dx.data(), dy.data(), m, n, 1.0f, 0.0f, stream);
+        CKL_CUDA_CHECK(cudaStreamSynchronize(stream));
+        out.verify = scaled_residual(dy.to_host(), d_oracle.to_host(), d_scale.to_host(),
+                                     opt.verify_perturb);
+        out.verify_tol = ckl::tol(n);
+        require_verified(out);
+    }
+
+    auto launch = [&da, &dx, &dy, kf, m, n](cudaStream_t s) {
+        kf(da.data(), dx.data(), dy.data(), m, n, 1.0f, 0.0f, s);
+    };
+    run_timed(opt, ctx, stream, out, launch, nullptr);
+    return out;
 }
 
-Result bench_spmv(const std::string& v, int m, int n) {
+Measured bench_spmv(const Options& opt, const ckl::Context& ctx, cudaStream_t stream) {
+    const int m = opt.m;
+    const int n = opt.n;
+    Measured out;
+    out.entry_point = "free_function";
+
+    std::function<void(const int*, const int*, const float*, const float*, float*, int, int, int,
+                       float, float, cudaStream_t)>
+        kf;
+    if (opt.variant == "naive") {
+        kf = ckl::spmv_csr_naive;
+    } else if (opt.variant == "warp") {
+        kf = ckl::spmv_csr_warp;
+    } else if (opt.variant == "baseline_cusparse") {
+        kf = ckl::spmv_cusparse;
+        out.entry_point = "spmv_cusparse";
+    } else {
+        fail_json("variant", "unknown spmv variant " + opt.variant, 3);
+    }
+    out.chosen = opt.variant == "baseline_cusparse" ? "cusparse" : opt.variant;
+
     std::mt19937_64 rng(2024);
     std::uniform_real_distribution<double> unit(0.0, 1.0);
     std::uniform_real_distribution<float> val(-1.0f, 1.0f);
@@ -193,14 +896,16 @@ Result bench_spmv(const std::string& v, int m, int n) {
     std::vector<float> values;
     for (int i = 0; i < m; ++i) {
         int deg = 8 + static_cast<int>(unit(rng) * 16.0);
-        if (unit(rng) < 0.02)
+        if (unit(rng) < 0.02) {
             deg = std::min(n, 400 + static_cast<int>(unit(rng) * 600.0));
+        }
         deg = std::min(deg, n);
         std::vector<int> cols;
         while (static_cast<int>(cols.size()) < deg) {
-            int c = col(rng);
-            if (std::find(cols.begin(), cols.end(), c) == cols.end())
+            const int c = col(rng);
+            if (std::find(cols.begin(), cols.end(), c) == cols.end()) {
                 cols.push_back(c);
+            }
         }
         std::sort(cols.begin(), cols.end());
         for (int c : cols) {
@@ -210,179 +915,410 @@ Result bench_spmv(const std::string& v, int m, int n) {
         row_ptr[static_cast<std::size_t>(i) + 1] = row_ptr[static_cast<std::size_t>(i)] + deg;
     }
     const int nnz = row_ptr.back();
+    out.nnz = nnz;
+    out.flops = 2.0 * static_cast<double>(nnz);
+    out.working_set_bytes =
+        static_cast<std::size_t>(nnz) * (sizeof(int) + sizeof(float)) +
+        row_ptr.size() * sizeof(int) +
+        (static_cast<std::size_t>(n) + static_cast<std::size_t>(m)) * sizeof(float);
+
     const auto x = ckl::random_matrix(n, 1, 7);
-    ckl::DeviceBuffer<int> drp(row_ptr.size()), dci(col_idx.size());
-    ckl::DeviceBuffer<float> dv(values.size()), dx(x.size()), dy(static_cast<std::size_t>(m));
+    ckl::DeviceBuffer<int> drp(row_ptr.size());
+    ckl::DeviceBuffer<int> dci(col_idx.size());
+    ckl::DeviceBuffer<float> dv(values.size());
+    ckl::DeviceBuffer<float> dx(x.size());
+    ckl::DeviceBuffer<float> dy(static_cast<std::size_t>(m));
     drp.copy_from_host(row_ptr);
     dci.copy_from_host(col_idx);
-    dv.copy_from_host(values);
-    dx.copy_from_host(x);
     dy.zero();
-    std::function<void(const int*, const int*, const float*, const float*, float*, int, int, int,
-                       float, float, cudaStream_t)>
-        kf;
-    if (v == "naive")
-        kf = ckl::spmv_csr_naive;
-    else if (v == "warp")
-        kf = ckl::spmv_csr_warp;
-    else
-        return {0, 0, 0, 0, false};
-    const double flops = 2.0 * nnz;
-    ckl::TimingStats ks = ckl::time_stream([&](cudaStream_t s) {
-        kf(drp.data(), dci.data(), dv.data(), dx.data(), dy.data(), m, n, nnz, 1.0f, 0.0f, s);
-    });
-    ckl::TimingStats os = ckl::time_stream([&](cudaStream_t s) {
-        ckl::spmv_cusparse(drp.data(), dci.data(), dv.data(), dx.data(), dy.data(), m, n, nnz, 1.0f,
-                           0.0f, s);
-    });
-    return {ks.median_ms, ks.iqr_ms, gflops_of(flops, ks.median_ms), gflops_of(flops, os.median_ms),
-            true};
-}
 
-// TRSM overwrites its right hand side, so every rep needs a fresh B. The v1 code
-// did that with a blocking host to device copy inside the timed lambda, which put
-// a PCIe transfer between the two event records and inflated both the kernel and
-// the cuBLAS baseline (defect A2). Here the restore is a device to device
-// cudaMemcpyAsync enqueued on the same stream *before* the start event, so stream
-// ordering guarantees it has finished by the time the timed region opens. Same
-// protocol for the kernel under test and for the baseline.
-ckl::TimingStats time_with_restore(const std::function<void(cudaStream_t)>& restore,
-                                   const std::function<void(cudaStream_t)>& launch,
-                                   cudaStream_t stream = nullptr, int warmups = 5, int reps = 20) {
-    cudaEvent_t start;
-    cudaEvent_t stop;
-    CKL_CUDA_CHECK(cudaEventCreate(&start));
-    CKL_CUDA_CHECK(cudaEventCreate(&stop));
-
-    for (int i = 0; i < warmups; ++i) {
-        restore(stream);
-        launch(stream);
-    }
-    CKL_CUDA_CHECK(cudaStreamSynchronize(stream));
-
-    std::vector<double> samples;
-    samples.reserve(static_cast<std::size_t>(reps));
-    for (int i = 0; i < reps; ++i) {
-        restore(stream);
-        CKL_CUDA_CHECK(cudaEventRecord(start, stream));
-        launch(stream);
-        CKL_CUDA_CHECK(cudaEventRecord(stop, stream));
-        CKL_CUDA_CHECK(cudaEventSynchronize(stop));
-        float ms = 0.0f;
-        CKL_CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
-        samples.push_back(static_cast<double>(ms));
-    }
-
-    CKL_CUDA_CHECK(cudaEventDestroy(start));
-    CKL_CUDA_CHECK(cudaEventDestroy(stop));
-
-    std::sort(samples.begin(), samples.end());
-    ckl::TimingStats stats;
-    stats.reps = reps;
-    stats.min_ms = samples.front();
-    const auto q = [&samples](double frac) {
-        double pos = frac * static_cast<double>(samples.size() - 1);
-        auto lo = static_cast<std::size_t>(pos);
-        double rem = pos - static_cast<double>(lo);
-        if (lo + 1 < samples.size()) {
-            return samples[lo] * (1.0 - rem) + samples[lo + 1] * rem;
+    {
+        ckl::DeviceBuffer<float> d_scale(static_cast<std::size_t>(m));
+        ckl::DeviceBuffer<float> d_oracle(static_cast<std::size_t>(m));
+        dv.copy_from_host(absolute(values));
+        dx.copy_from_host(absolute(x));
+        ckl::spmv_cusparse(drp.data(), dci.data(), dv.data(), dx.data(), d_scale.data(), m, n, nnz,
+                           1.0f, 0.0f, stream);
+        CKL_CUDA_CHECK(cudaStreamSynchronize(stream));
+        dv.copy_from_host(values);
+        dx.copy_from_host(x);
+        ckl::spmv_cusparse(drp.data(), dci.data(), dv.data(), dx.data(), d_oracle.data(), m, n, nnz,
+                           1.0f, 0.0f, stream);
+        kf(drp.data(), dci.data(), dv.data(), dx.data(), dy.data(), m, n, nnz, 1.0f, 0.0f, stream);
+        CKL_CUDA_CHECK(cudaStreamSynchronize(stream));
+        out.verify = scaled_residual(dy.to_host(), d_oracle.to_host(), d_scale.to_host(),
+                                     opt.verify_perturb);
+        // The contraction length of an SpMV row is its nonzero count, so the
+        // tolerance comes from the longest row rather than from n.
+        int longest = 1;
+        for (std::size_t i = 1; i < row_ptr.size(); ++i) {
+            longest = std::max(longest, row_ptr[i] - row_ptr[i - 1]);
         }
-        return samples[lo];
+        out.verify_tol = ckl::tol(longest);
+        require_verified(out);
+    }
+
+    auto launch = [&drp, &dci, &dv, &dx, &dy, kf, m, n, nnz](cudaStream_t s) {
+        kf(drp.data(), dci.data(), dv.data(), dx.data(), dy.data(), m, n, nnz, 1.0f, 0.0f, s);
     };
-    stats.median_ms = q(0.5);
-    stats.iqr_ms = q(0.75) - q(0.25);
-    return stats;
+    run_timed(opt, ctx, stream, out, launch, nullptr);
+    return out;
 }
 
-Result bench_trsm(const std::string& v, int m, int n) {
+Measured bench_trsm(const Options& opt, ckl::Context& ctx, cudaStream_t stream) {
+    const int m = opt.m;
+    const int n = opt.n;
+    Measured out;
+    // A triangular solve does about m*m*n flops.
+    out.flops = static_cast<double>(m) * m * n;
+    out.working_set_bytes =
+        (static_cast<std::size_t>(m) * m + static_cast<std::size_t>(m) * n) * sizeof(float);
+    out.entry_point = "free_function";
+
+    std::function<void(const float*, float*, int, int, float, cudaStream_t)> kf;
+    if (opt.variant == "naive") {
+        kf = ckl::trsm_naive;
+    } else if (opt.variant == "blocked") {
+        kf = ckl::trsm_blocked;
+    } else if (opt.variant == "baseline_cublas") {
+        kf = ckl::trsm_cublas;
+        out.entry_point = "trsm_cublas";
+        out.cublas_gemm_algo = "CUBLAS_GEMM_DEFAULT";
+    } else {
+        fail_json("variant", "unknown trsm variant " + opt.variant, 3);
+    }
+    out.chosen = opt.variant == "baseline_cublas" ? "cublas" : opt.variant;
+
     auto a = ckl::random_matrix(m, m, 71);
     for (int i = 0; i < m; ++i) {
-        for (int j = i + 1; j < m; ++j)
+        for (int j = i + 1; j < m; ++j) {
             a[static_cast<std::size_t>(i) * m + j] = 0.0f;
+        }
         a[static_cast<std::size_t>(i) * m + i] = static_cast<float>(m + 1);
     }
     const auto b0 = ckl::random_matrix(m, n, 92);
-    ckl::DeviceBuffer<float> da(a.size()), db(b0.size()), db_pristine(b0.size());
+    ckl::DeviceBuffer<float> da(a.size());
+    ckl::DeviceBuffer<float> db(b0.size());
+    ckl::DeviceBuffer<float> db_pristine(b0.size());
     da.copy_from_host(a);
     // The pristine copy is uploaded once, outside every timed region.
     db_pristine.copy_from_host(b0);
-    std::function<void(const float*, float*, int, int, float, cudaStream_t)> kf;
-    if (v == "naive")
-        kf = ckl::trsm_naive;
-    else if (v == "blocked")
-        kf = ckl::trsm_blocked;
-    else
-        return {0, 0, 0, 0, false};
-    // TRSM flops approx m*m*n (triangular solve).
-    const double flops = static_cast<double>(m) * m * n;
+
     const std::size_t b_bytes = db.bytes();
-    auto restore = [&](cudaStream_t s) {
+    // TRSM overwrites its right hand side, so every rep needs a fresh B. v1 did
+    // that with a blocking host to device copy inside the timed lambda, which
+    // put a PCIe transfer between the two event records and inflated both the
+    // kernel and the cuBLAS baseline (defect A2). This restore is a device to
+    // device cudaMemcpyAsync on the same stream, enqueued before the start
+    // event, so stream ordering guarantees it has finished by the time the timed
+    // region opens. Same protocol for the kernel under test and for the baseline.
+    auto restore = [&db, &db_pristine, b_bytes](cudaStream_t s) {
         CKL_CUDA_CHECK(
             cudaMemcpyAsync(db.data(), db_pristine.data(), b_bytes, cudaMemcpyDeviceToDevice, s));
     };
-    ckl::TimingStats ks = time_with_restore(
-        restore, [&](cudaStream_t s) { kf(da.data(), db.data(), m, n, 1.0f, s); });
-    ckl::TimingStats os = time_with_restore(
-        restore, [&](cudaStream_t s) { ckl::trsm_cublas(da.data(), db.data(), m, n, 1.0f, s); });
-    return {ks.median_ms, ks.iqr_ms, gflops_of(flops, ks.median_ms), gflops_of(flops, os.median_ms),
-            true};
+
+    {
+        // A solve is verified by its backward residual, not against another
+        // solve: multiply the answer back through L and see whether B comes out.
+        // The magnitude bound is then the same |L| times |X| product the GEMM
+        // check uses, which is what makes ckl::tol(m) the right yardstick here
+        // too. Comparing two solves elementwise instead would need |L inverse|,
+        // and (|L|) inverse is not it.
+        restore(stream);
+        kf(da.data(), db.data(), m, n, 1.0f, stream);
+        CKL_CUDA_CHECK(cudaStreamSynchronize(stream));
+        const std::vector<float> x = db.to_host();
+
+        ckl::DeviceBuffer<float> d_abs_a(a.size());
+        ckl::DeviceBuffer<float> d_abs_x(x.size());
+        ckl::DeviceBuffer<float> d_prod(x.size());
+        ckl::DeviceBuffer<float> d_scale(x.size());
+        d_abs_a.copy_from_host(absolute(a));
+        d_abs_x.copy_from_host(absolute(x));
+
+        ckl::GemmDesc back;
+        back.layout = ckl::Layout::kRowMajor;
+        back.m = m;
+        back.n = n;
+        back.k = m;
+        back.lda = m;
+        back.ldb = n;
+        back.ldc = n;
+        back.algo = ckl::Algo::kCublas;
+        const float one = 1.0f;
+        const float zero = 0.0f;
+        ckl::Status st =
+            ckl::gemm(ctx, back, &one, da.data(), db.data(), &zero, d_prod.data(), nullptr);
+        if (st == ckl::Status::kSuccess) {
+            st = ckl::gemm(ctx, back, &one, d_abs_a.data(), d_abs_x.data(), &zero, d_scale.data(),
+                           nullptr);
+        }
+        if (st != ckl::Status::kSuccess) {
+            fail_json(
+                "verify",
+                std::string("the backward residual product failed: ") + ckl::status_string(st), 6);
+        }
+        CKL_CUDA_CHECK(cudaStreamSynchronize(stream));
+
+        out.verify = scaled_residual(d_prod.to_host(), b0, d_scale.to_host(), opt.verify_perturb);
+        out.verify_tol = ckl::tol(m);
+        require_verified(out);
+    }
+
+    auto launch = [&da, &db, kf, m, n](cudaStream_t s) { kf(da.data(), db.data(), m, n, 1.0f, s); };
+    run_timed(opt, ctx, stream, out, launch, restore);
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Argument parsing
+// ---------------------------------------------------------------------------
+
+int need_int(const char* flag, int argc, char** argv, int& i) {
+    if (i + 1 >= argc) {
+        fail_json("usage", std::string(flag) + " needs a value", 2);
+    }
+    return std::atoi(argv[++i]);
+}
+
+double need_double(const char* flag, int argc, char** argv, int& i) {
+    if (i + 1 >= argc) {
+        fail_json("usage", std::string(flag) + " needs a value", 2);
+    }
+    return std::atof(argv[++i]);
+}
+
+std::string need_str(const char* flag, int argc, char** argv, int& i) {
+    if (i + 1 >= argc) {
+        fail_json("usage", std::string(flag) + " needs a value", 2);
+    }
+    return argv[++i];
+}
+
+Options parse(int argc, char** argv) {
+    Options opt;
+    std::vector<std::string> positional;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--help" || arg == "-h") {
+            usage_and_exit(argv[0], 0);
+        } else if (arg == "--warmups") {
+            opt.warmups = need_int("--warmups", argc, argv, i);
+        } else if (arg == "--reps") {
+            opt.reps = need_int("--reps", argc, argv, i);
+        } else if (arg == "--fixed-reps") {
+            opt.adaptive = false;
+        } else if (arg == "--max-reps") {
+            opt.max_reps = need_int("--max-reps", argc, argv, i);
+        } else if (arg == "--budget-s") {
+            opt.budget_s = need_double("--budget-s", argc, argv, i);
+        } else if (arg == "--flush-l2") {
+            opt.flush = need_str("--flush-l2", argc, argv, i);
+        } else if (arg == "--launch-mode") {
+            opt.launch_mode = need_str("--launch-mode", argc, argv, i);
+        } else if (arg == "--inner") {
+            opt.inner = need_int("--inner", argc, argv, i);
+        } else if (arg == "--disallow-reduced-precision-reduction") {
+            opt.disallow_reduced_precision = true;
+        } else if (arg == "--verify-perturb") {
+            opt.verify_perturb = need_double("--verify-perturb", argc, argv, i);
+        } else if (arg == "--probe-autotune") {
+            opt.probe_autotune = true;
+        } else if (arg.rfind("--", 0) == 0) {
+            std::fprintf(stderr, "unknown flag %s\n", arg.c_str());
+            usage_and_exit(argv[0], 2);
+        } else {
+            positional.push_back(arg);
+        }
+    }
+    if (opt.probe_autotune) {
+        return opt;
+    }
+    if (positional.size() < 6) {
+        usage_and_exit(argv[0], 2);
+    }
+    opt.family = positional[0];
+    opt.variant = positional[1];
+    opt.dtype = positional[2];
+    opt.m = std::atoi(positional[3].c_str());
+    opt.n = std::atoi(positional[4].c_str());
+    opt.k = std::atoi(positional[5].c_str());
+    if (positional.size() > 6) {
+        opt.commit = positional[6];
+    }
+    return opt;
+}
+
+int probe_autotune() {
+    JsonRow row;
+    row.boolean("cublas_autotune_declared", kAutotuneDeclared);
+    if (!kAutotuneDeclared) {
+        row.boolean("cublas_autotune_available", false);
+        row.str("note", "this cuBLAS does not declare CUBLAS_GEMM_AUTOTUNE");
+        std::printf("%s\n", row.text().c_str());
+        return 0;
+    }
+    ckl::Context ctx;
+    auto* h = static_cast<cublasHandle_t>(ctx.cublas());
+    constexpr int kSide = 128;
+    ckl::DeviceBuffer<__half> a(static_cast<std::size_t>(kSide) * kSide);
+    ckl::DeviceBuffer<__half> b(static_cast<std::size_t>(kSide) * kSide);
+    ckl::DeviceBuffer<float> c(static_cast<std::size_t>(kSide) * kSide);
+    a.zero();
+    b.zero();
+    c.zero();
+    const cublasStatus_t st =
+        cublas_gemm_row_major(h, CUDA_R_16F, kSide, kSide, kSide, 1.0f, a.data(), b.data(), 0.0f,
+                              c.data(), kAutotuneAlgo);
+    const bool ok = st == CUBLAS_STATUS_SUCCESS && cudaDeviceSynchronize() == cudaSuccess;
+    row.boolean("cublas_autotune_available", ok);
+    row.str("status", cublasGetStatusName(st));
+    std::printf("%s\n", row.text().c_str());
+    return 0;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 7) {
-        std::fprintf(stderr, "usage: %s <family> <variant> <dtype> <m> <n> <k> [commit]\n",
-                     argv[0]);
-        return 2;
+    const Options opt = parse(argc, argv);
+    g_opt = &opt;
+    if (opt.probe_autotune) {
+        return probe_autotune();
     }
-    const std::string family = argv[1];
-    const std::string variant = argv[2];
-    const std::string dtype = argv[3];
-    const int m = std::atoi(argv[4]);
-    const int n = std::atoi(argv[5]);
-    const int k = std::atoi(argv[6]);
-    const std::string commit = argc > 7 ? argv[7] : "unknown";
+    if (opt.launch_mode != "stream" && opt.launch_mode != "graph") {
+        fail_json("usage", "--launch-mode takes stream or graph", 2);
+    }
+    if (opt.flush != "auto" && opt.flush != "on" && opt.flush != "off") {
+        fail_json("usage", "--flush-l2 takes auto, on or off", 2);
+    }
 
     ckl::NvmlMonitor monitor(25);
     monitor.start();
 
-    Result r;
-    if (family == "gemm")
-        r = bench_gemm(variant, dtype, m, n, k);
-    else if (family == "gemv")
-        r = bench_gemv(variant, m, n);
-    else if (family == "spmv")
-        r = bench_spmv(variant, m, n);
-    else if (family == "trsm")
-        r = bench_trsm(variant, m, n);
-    else {
-        std::fprintf(stderr, "unknown family %s\n", family.c_str());
-        return 2;
+    // One Context for the whole process, and one stream that is not the legacy
+    // default one, because graph capture refuses that one.
+    //
+    // The stream is deliberately created blocking rather than with
+    // cudaStreamNonBlocking. DeviceBuffer uploads use plain cudaMemcpy, which
+    // for pageable host memory returns as soon as the bytes reach the driver's
+    // staging buffer and leaves the DMA to the device running on the legacy
+    // default stream. A non blocking stream does not wait for that stream, so a
+    // kernel enqueued right after an upload can read the previous contents of
+    // the operand. That is not theoretical: it made one verification in about
+    // twenty fail with a handful of elements computed from stale data, and it
+    // took a standalone repro to pin on the harness rather than on the kernels.
+    // A blocking stream carries the implicit ordering against the legacy stream
+    // and costs nothing here, since nothing else runs concurrently.
+    ckl::Context ctx;
+    cudaStream_t stream = nullptr;
+    CKL_CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamDefault));
+    ctx.set_stream(stream);
+
+    const std::string math_mode =
+        configure_cublas(opt, static_cast<cublasHandle_t>(ctx.cublas()), stream);
+    // The free function families route through the process wide Context, so its
+    // handle gets the same treatment; otherwise the row's math mode field would
+    // be a claim about a handle nothing used.
+    configure_cublas(opt, static_cast<cublasHandle_t>(ckl::detail::default_context().cublas()),
+                     stream);
+
+    Measured measured;
+    if (opt.family == "gemm") {
+        const int pinned = tile_family_index(opt.variant);
+        static const VariantEntry kPinnedEntry{"tile_family", "fp16", ckl::Algo::kTileFamily,
+                                               false};
+        const VariantEntry* entry =
+            pinned >= 0 ? &kPinnedEntry : find_gemm_variant(opt.variant, opt.dtype);
+        if (entry == nullptr) {
+            fail_json("variant", "unknown gemm variant " + opt.variant + " for dtype " + opt.dtype,
+                      3);
+        }
+        if (pinned >= 0 && opt.dtype != "fp16") {
+            fail_json("variant", "the tile family is FP16 in and FP32 out only", 3);
+        }
+        if (opt.dtype == "fp32") {
+            measured = bench_gemm_typed<float>(opt, ctx, stream, *entry, pinned, CUDA_R_32F);
+        } else if (opt.dtype == "fp16") {
+            measured = bench_gemm_typed<__half>(opt, ctx, stream, *entry, pinned, CUDA_R_16F);
+        } else if (opt.dtype == "bf16") {
+            measured =
+                bench_gemm_typed<__nv_bfloat16>(opt, ctx, stream, *entry, pinned, CUDA_R_16BF);
+        } else {
+            fail_json("dtype", "unknown dtype " + opt.dtype, 3);
+        }
+    } else if (opt.family == "gemv") {
+        measured = bench_gemv(opt, ctx, stream);
+    } else if (opt.family == "spmv") {
+        measured = bench_spmv(opt, ctx, stream);
+    } else if (opt.family == "trsm") {
+        measured = bench_trsm(opt, ctx, stream);
+    } else {
+        fail_json("family", "unknown family " + opt.family, 2);
     }
 
-    ckl::NvmlSummary nv = monitor.stop();
-    if (!r.ok) {
-        std::fprintf(stderr, "unknown variant %s for family %s dtype %s\n", variant.c_str(),
-                     family.c_str(), dtype.c_str());
-        return 3;
-    }
-
+    const ckl::NvmlSummary nv = monitor.stop();
     int rt = 0;
     int drv = 0;
     cudaRuntimeGetVersion(&rt);
     cudaDriverGetVersion(&drv);
 
-    const double pct = r.baseline_gflops > 0.0 ? 100.0 * r.gflops / r.baseline_gflops : 0.0;
-    std::printf(
-        "{\"family\":\"%s\",\"variant\":\"%s\",\"dtype\":\"%s\",\"m\":%d,\"n\":%d,\"k\":%d,"
-        "\"median_ms\":%.6f,\"iqr_ms\":%.6f,\"gflops\":%.3f,\"baseline_gflops\":%.3f,"
-        "\"pct_baseline\":%.2f,\"nvml_available\":%s,\"median_sm_clock_mhz\":%.0f,"
-        "\"max_temp_c\":%u,\"max_power_w\":%.1f,\"throttled\":%s,\"nvml_samples\":%d,"
-        "\"cuda_runtime\":%d,\"cuda_driver\":%d,\"commit\":\"%s\"}\n",
-        family.c_str(), variant.c_str(), dtype.c_str(), m, n, k, r.median_ms, r.iqr_ms, r.gflops,
-        r.baseline_gflops, pct, nv.available ? "true" : "false", nv.median_sm_clock_mhz,
-        nv.max_temperature_c, nv.max_power_w, nv.throttled ? "true" : "false", nv.samples, rt, drv,
-        commit.c_str());
+    JsonRow row;
+    row.integer("schema_version", kSchemaVersion);
+    row.str("family", opt.family);
+    row.str("variant", opt.variant);
+    row.str("dtype", opt.dtype);
+    row.integer("m", opt.m);
+    row.integer("n", opt.n);
+    row.integer("k", opt.k);
+    row.num("median_ms", measured.stats.median_ms);
+    row.num("iqr_ms", measured.stats.iqr_ms);
+    row.num("min_ms", measured.stats.min_ms);
+    row.integer("reps", measured.stats.reps);
+    row.integer("warmups", opt.warmups);
+    row.array("samples", measured.stats.samples);
+    row.num("gflops", gflops_of(measured.flops, measured.stats.median_ms), 3);
+    // A variant row carries no baseline of its own any more. The sweep driver
+    // measures the vendor baseline once per shape as its own row and joins it
+    // on, so every variant at a shape is quoted against the same measurement
+    // instead of against a fresh one with a 1.9x spread.
+    row.str("baseline_source", "joined_by_sweep");
+    row.str("chosen", measured.chosen);
+    row.str("entry_point", measured.entry_point);
+    row.str("plan_algo", measured.plan_algo);
+    row.boolean("plan_tuned", measured.plan_tuned);
+    row.integer("tile_index", measured.tile_index);
+    row.str("tile", measured.tile);
+    row.integer("splits", measured.splits);
+    row.integer("nnz", measured.nnz);
+    row.boolean("verify_ok", true);
+    row.sci("verify_residual", measured.verify.worst);
+    row.integer("verify_worst_index", measured.verify.index);
+    row.sci("verify_tol", measured.verify_tol);
+    row.num("verify_perturb", opt.verify_perturb, 6);
+    row.boolean("l2_flushed", measured.l2_flushed);
+    row.integer("flush_bytes", static_cast<long long>(measured.flush_bytes));
+    row.integer("working_set_bytes", static_cast<long long>(measured.working_set_bytes));
+    row.str("launch_mode", opt.launch_mode);
+    row.integer("inner_launches", opt.inner);
+    row.str("timing_mode", opt.adaptive ? "adaptive" : "fixed");
+    row.num("budget_s", opt.budget_s, 3);
+    row.integer("max_reps", opt.max_reps);
+    row.str("cublas_math_mode", math_mode);
+    row.boolean("cublas_reduced_precision_reduction_disallowed", opt.disallow_reduced_precision);
+    row.str("cublas_gemm_algo", measured.cublas_gemm_algo);
+    row.boolean("cublas_autotune_declared", kAutotuneDeclared);
+    row.boolean("nvml_available", nv.available);
+    row.num("median_sm_clock_mhz", nv.median_sm_clock_mhz, 0);
+    row.integer("max_temp_c", nv.max_temperature_c);
+    row.num("max_power_w", nv.max_power_w, 1);
+    row.boolean("throttled", nv.throttled);
+    row.integer("nvml_samples", nv.samples);
+    row.integer("cuda_runtime", rt);
+    row.integer("cuda_driver", drv);
+    row.str("commit", opt.commit);
+    std::printf("%s\n", row.text().c_str());
+
+    CKL_CUDA_CHECK(cudaStreamSynchronize(stream));
+    CKL_CUDA_CHECK(cudaStreamDestroy(stream));
     return 0;
 }
