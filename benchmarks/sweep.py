@@ -100,6 +100,8 @@ BASELINE_VARIANT = {
     "gemm": "baseline_cublas_default",
     "gemv": "baseline_cublas",
     "spmv": "baseline_cusparse_default",
+    "fft": "baseline_cufft",
+    "conv": "baseline_cufft",
     "trsm": "baseline_cublas",
 }
 # Measured alongside the baseline of record and reported next to it. Beating the
@@ -128,6 +130,28 @@ SPMV_VARIANTS = ["naive", "warp", "vector", "merge", "sell", "bsr"]
 SPMV_QUICK_VARIANTS = ["warp", "merge"]
 SPMV_SYNTHETIC_ROWS = 131072
 SPMV_SYNTHETIC_SEEDS = [1, 2, 3, 4, 5]
+
+# The FFT family sweeps a transform length and a batch, not a cube. A 64 KB
+# shared resident block is one block per SM, so a transform at or below 2^12 has
+# to be batched before it fills 48 SMs at all: an unbatched 2^12 row measures
+# launch overhead rather than the kernel. The batch below is two blocks per SM on
+# this part. Above the shared bound one transform already fills the machine.
+FFT_VARIANTS = ["radix2", "shared", "radix4", "radix8", "four_step"]
+FFT_QUICK_VARIANTS = ["four_step", "radix8"]
+FFT_SMALL_SIZES = [1024, 2048, 4096]
+FFT_LARGE_SIZES = [1 << 16, 1 << 20, 1 << 22, 1 << 24]
+FFT_SMALL_BATCH = 96
+FFT_QUICK_SIZES = [1 << 20]
+
+# The convolution crossover: M in powers of two from 8 to 16384 at two signal
+# lengths, so the crossing is inside the range whichever way it falls. The chart
+# in the report is generated from these rows and the crossing M is read out of
+# the data by gen_report_assets.py, never placed by hand.
+CONV_VARIANTS = ["fft_separate", "fft_fused", "direct_shared", "direct_constant"]
+CONV_QUICK_VARIANTS = ["fft_fused", "direct_shared"]
+CONV_SIGNAL_SIZES = [1 << 20, 1 << 22]
+CONV_FILTER_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+CONV_QUICK_FILTERS = [64, 1024, 16384]
 
 
 class Config:
@@ -196,7 +220,8 @@ class Config:
             return True
         if self.flush == "off":
             return False
-        return self.family in ("gemv", "spmv") or working_set(self) <= L2_BYTES
+        return (self.family in ("gemv", "spmv", "fft", "conv")
+                or working_set(self) <= L2_BYTES)
 
     def key(self) -> tuple:
         return (self.family, self.variant, self.dtype, self.m, self.n, self.k,
@@ -216,6 +241,13 @@ def working_set(cfg: Config) -> int:
         return (cfg.m * cfg.n + cfg.n + cfg.m) * 4
     if cfg.family == "trsm":
         return (cfg.m * cfg.m + cfg.m * cfg.n) * 4
+    if cfg.family == "fft":
+        # An input and an output array of m * n complex FP32 points.
+        return 2 * cfg.m * cfg.n * 8
+    if cfg.family == "conv":
+        # The signal, the filter, the output, and the four padded arrays the plan
+        # holds. L is at most twice the output length, so this is an upper bound.
+        return (cfg.m + cfg.n) * 4 + 4 * 2 * (cfg.m + cfg.n) * 8
     # SpMV builds its matrix inside bench_all, so the size is not known here.
     # The family is memory bound either way and always gets the flushed pair.
     return 0
@@ -283,6 +315,39 @@ def spmv_matrix_configs(variants: list[str], quick: bool) -> list[Config]:
     return rows
 
 
+def fft_configs(quick: bool) -> list[Config]:
+    """One config per (variant, length, batch) over the FFT ladder."""
+    rows: list[Config] = []
+    variants = FFT_QUICK_VARIANTS if quick else FFT_VARIANTS
+    sizes = FFT_QUICK_SIZES if quick else (FFT_SMALL_SIZES + FFT_LARGE_SIZES)
+    for n in sizes:
+        batch = FFT_SMALL_BATCH if n <= 4096 else 1
+        for v in variants:
+            # The shared resident kernel holds two ping pong buffers of 8 bytes a
+            # point, so it stops at 2^12. Asking for it above that would be asking
+            # bench_all to measure a refusal.
+            if v == "shared" and n > 4096:
+                continue
+            rows.append(Config("fft", v, "fp32", (n, batch, 0)))
+    return rows
+
+
+def conv_configs(quick: bool) -> list[Config]:
+    """One config per (variant, signal length, filter length): the crossover sweep."""
+    rows: list[Config] = []
+    variants = CONV_QUICK_VARIANTS if quick else CONV_VARIANTS
+    signals = CONV_SIGNAL_SIZES[:1] if quick else CONV_SIGNAL_SIZES
+    filters = CONV_QUICK_FILTERS if quick else CONV_FILTER_SIZES
+    for n in signals:
+        for m in filters:
+            for v in variants:
+                # The constant memory rung holds 16 KB of taps and no more.
+                if v == "direct_constant" and m > 4096:
+                    continue
+                rows.append(Config("conv", v, "fp32", (n, m, 0)))
+    return rows
+
+
 def variant_matrix(quick: bool) -> list[Config]:
     """The kernels under test, before the baselines and the paired rows."""
     rows: list[Config] = []
@@ -306,6 +371,8 @@ def variant_matrix(quick: bool) -> list[Config]:
             rows.append(Config("gemv", v, "fp32", shape))
     rows.extend(spmv_matrix_configs(
         SPMV_QUICK_VARIANTS if quick else SPMV_VARIANTS, quick))
+    rows.extend(fft_configs(quick))
+    rows.extend(conv_configs(quick))
     for v in ["naive", "blocked"]:
         for shape in [(s, 256, 0) for s in (TRSM_SIZES if not quick else [1024])]:
             rows.append(Config("trsm", v, "fp32", shape))
@@ -324,7 +391,8 @@ def expand_protocol(rows: list[Config]) -> list[Config]:
     """
     out: list[Config] = []
     for cfg in rows:
-        resident = cfg.family in ("gemv", "spmv") or working_set(cfg) <= L2_BYTES
+        resident = (cfg.family in ("gemv", "spmv", "fft", "conv")
+                    or working_set(cfg) <= L2_BYTES)
         if resident:
             out.append(Config(cfg.family, cfg.variant, cfg.dtype, (cfg.m, cfg.n, cfg.k),
                               flush="on", matrix=cfg.matrix, seed=cfg.seed))
@@ -585,6 +653,8 @@ SUMMARY_COLUMNS = [
     "chosen", "entry_point", "plan_algo", "tile", "splits", "plan_tuned",
     "sell_padding_ratio", "sell_nnz_padded", "vector_width", "sigma", "bsr_block_dim",
     "model_bytes_low", "model_bytes_high", "dram_bytes_sum", "power_law",
+    "model_bytes", "passes", "batch", "transform_length", "effective_gbs",
+    "twiddle_bytes_low", "twiddle_bytes_high",
     "verify_residual", "verify_tol",
     "cublas_math_mode", "cublas_gemm_algo",
     "throttled", "median_sm_clock_mhz", "clock_locked", "locked_clock_mhz",
@@ -595,7 +665,7 @@ SUMMARY_COLUMNS = [
 
 def auto_flush(row: dict) -> bool:
     """What --flush-l2 auto decides for this row, recomputed from the row itself."""
-    if row.get("family") in ("gemv", "spmv"):
+    if row.get("family") in ("gemv", "spmv", "fft", "conv"):
         return True
     return int(row.get("working_set_bytes", 0)) <= L2_BYTES
 

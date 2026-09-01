@@ -14,6 +14,7 @@
 #include <cuda_runtime.h>
 
 #include "ckl/context.hpp"
+#include "ckl/fft.hpp"
 #include "ckl/gemm.hpp"
 #include "ckl/sparse.hpp"
 #include "ckl/status.hpp"
@@ -127,6 +128,30 @@ ckl_spmv_algo_t from_spmv_algo(ckl::SpmvAlgo a) {
     return static_cast<ckl_spmv_algo_t>(a);
 }
 
+bool to_fft_algo(ckl_fft_algo_t v, ckl::FftAlgo* out) {
+    if (v < CKL_FFT_AUTO || v > CKL_FFT_CUFFT) {
+        return false;
+    }
+    *out = static_cast<ckl::FftAlgo>(v);
+    return true;
+}
+
+ckl_fft_algo_t from_fft_algo(ckl::FftAlgo a) {
+    return static_cast<ckl_fft_algo_t>(a);
+}
+
+bool to_conv_algo(ckl_conv_algo_t v, ckl::ConvAlgo* out) {
+    if (v < CKL_CONV_AUTO || v > CKL_CONV_CUFFT) {
+        return false;
+    }
+    *out = static_cast<ckl::ConvAlgo>(v);
+    return true;
+}
+
+ckl_conv_algo_t from_conv_algo(ckl::ConvAlgo a) {
+    return static_cast<ckl_conv_algo_t>(a);
+}
+
 ckl::Context* as_context(ckl_handle_t h) {
     return reinterpret_cast<ckl::Context*>(h);
 }
@@ -174,6 +199,62 @@ ckl::SpmvPlan& spmv_plan_cache(const int* row_ptr, const int* col_idx, const flo
         // Built before the old one is released, so a failed rebuild leaves the
         // previous plan usable.
         auto* fresh = new ckl::SpmvPlan(a);
+        delete cached;
+        cached = fresh;
+        cached_key = key;
+    }
+    return *cached;
+}
+
+// The same one entry cache for the FFT family, and for the same reason: an ABI
+// with one opaque type stays an ABI with one opaque type. Building a transform
+// plan computes the twiddle tables and creates a cuFFT handle, and building a
+// convolution plan also transforms the filter, so a plan per call would put all
+// of that inside whatever the caller was timing.
+struct FftCacheKey {
+    int n = 0;
+    int batch = 0;
+
+    bool operator==(const FftCacheKey& o) const { return n == o.n && batch == o.batch; }
+};
+
+ckl::FftPlan& fft_plan_cache(int n, int batch) {
+    static std::mutex guard;
+    static ckl::FftPlan* cached = nullptr;
+    static FftCacheKey cached_key;
+    const FftCacheKey key{n, batch};
+    const std::lock_guard<std::mutex> lock(guard);
+    if (cached == nullptr || !(cached_key == key)) {
+        ckl::FftPlanOptions opt;
+        opt.batch = batch;
+        // Built before the old one is released, so a failed rebuild leaves the
+        // previous plan usable.
+        auto* fresh = new ckl::FftPlan(n, opt);
+        delete cached;
+        cached = fresh;
+        cached_key = key;
+    }
+    return *cached;
+}
+
+struct ConvCacheKey {
+    int n = 0;
+    int m = 0;
+    const float* filter = nullptr;
+
+    bool operator==(const ConvCacheKey& o) const {
+        return n == o.n && m == o.m && filter == o.filter;
+    }
+};
+
+ckl::ConvPlan& conv_plan_cache(int n, const float* filter, int m) {
+    static std::mutex guard;
+    static ckl::ConvPlan* cached = nullptr;
+    static ConvCacheKey cached_key;
+    const ConvCacheKey key{n, m, filter};
+    const std::lock_guard<std::mutex> lock(guard);
+    if (cached == nullptr || !(cached_key == key)) {
+        auto* fresh = new ckl::ConvPlan(n, filter, m);
         delete cached;
         cached = fresh;
         cached_key = key;
@@ -600,6 +681,86 @@ ckl_status_t ckl_spmv_csr(ckl_handle_t h, int64_t m, int64_t n, int64_t nnz, flo
             to_c(ckl::spmv(plan, requested, alpha, x, beta, y, &taken, as_context(h)->stream()));
         if (chosen != nullptr) {
             *chosen = from_spmv_algo(taken);
+        }
+        return s;
+    } catch (const ckl::Error& e) {
+        return record(e);
+    } catch (const std::exception& e) {
+        return record(e);
+    } catch (...) {
+        return CKL_STATUS_INTERNAL;
+    }
+}
+
+ckl_status_t ckl_fft_c2c(ckl_handle_t h, int64_t n, int64_t batch, const void* in, void* out,
+                         ckl_fft_direction_t dir, ckl_fft_algo_t algo, ckl_fft_algo_t* chosen) {
+    ckl::detail::clear_last_error();
+    if (h == nullptr) {
+        return invalid("ckl_fft_c2c: handle is null");
+    }
+    ckl::FftAlgo requested = ckl::FftAlgo::kAuto;
+    if (!to_fft_algo(algo, &requested)) {
+        return invalid("ckl_fft_c2c: algo is out of range");
+    }
+    if (dir != CKL_FFT_FORWARD && dir != CKL_FFT_INVERSE) {
+        return invalid("ckl_fft_c2c: dir is out of range");
+    }
+    constexpr int64_t kMaxLength = 16777216;
+    if (n < 2 || n > kMaxLength || (n & (n - 1)) != 0) {
+        return invalid("ckl_fft_c2c: n must be a power of two between 2 and 16777216");
+    }
+    if (batch < 1 || batch > 2147483647) {
+        return invalid("ckl_fft_c2c: batch must be at least 1 and inside int range");
+    }
+    try {
+        ckl::FftPlan& plan = fft_plan_cache(static_cast<int>(n), static_cast<int>(batch));
+        ckl::FftAlgo taken = ckl::FftAlgo::kAuto;
+        const ckl_status_t s = to_c(ckl::fft(
+            plan, requested,
+            dir == CKL_FFT_FORWARD ? ckl::FftDirection::kForward : ckl::FftDirection::kInverse,
+            static_cast<const float2*>(in), static_cast<float2*>(out), &taken,
+            as_context(h)->stream()));
+        if (chosen != nullptr) {
+            *chosen = from_fft_algo(taken);
+        }
+        return s;
+    } catch (const ckl::Error& e) {
+        return record(e);
+    } catch (const std::exception& e) {
+        return record(e);
+    } catch (...) {
+        return CKL_STATUS_INTERNAL;
+    }
+}
+
+ckl_status_t ckl_conv_r2r(ckl_handle_t h, int64_t signal_length, const float* signal,
+                          int64_t filter_length, const float* filter, float* out,
+                          ckl_conv_algo_t algo, ckl_conv_algo_t* chosen) {
+    ckl::detail::clear_last_error();
+    if (h == nullptr) {
+        return invalid("ckl_conv_r2r: handle is null");
+    }
+    ckl::ConvAlgo requested = ckl::ConvAlgo::kAuto;
+    if (!to_conv_algo(algo, &requested)) {
+        return invalid("ckl_conv_r2r: algo is out of range");
+    }
+    constexpr int64_t kIntMax = 2147483647;
+    if (signal_length < 1 || filter_length < 1 || signal_length > kIntMax ||
+        filter_length > kIntMax) {
+        return invalid(
+            "ckl_conv_r2r: the signal and filter lengths must be at least 1 and inside int range");
+    }
+    if (filter == nullptr) {
+        return invalid("ckl_conv_r2r: filter is null");
+    }
+    try {
+        ckl::ConvPlan& plan = conv_plan_cache(static_cast<int>(signal_length), filter,
+                                              static_cast<int>(filter_length));
+        ckl::ConvAlgo taken = ckl::ConvAlgo::kAuto;
+        const ckl_status_t s =
+            to_c(ckl::conv(plan, requested, signal, out, &taken, as_context(h)->stream()));
+        if (chosen != nullptr) {
+            *chosen = from_conv_algo(taken);
         }
         return s;
     } catch (const ckl::Error& e) {

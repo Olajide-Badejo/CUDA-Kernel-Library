@@ -119,6 +119,47 @@ typedef enum {
 } ckl_spmv_algo_t;
 
 /**
+ * @brief Direction of a transform. Neither direction is scaled, as in cuFFT.
+ *
+ * The values match ckl::FftDirection one for one and in the same order.
+ */
+typedef enum {
+    CKL_FFT_FORWARD = 0, /**< exp(-2 pi i k n / N). */
+    CKL_FFT_INVERSE = 1  /**< exp(+2 pi i k n / N), unscaled. */
+} ckl_fft_direction_t;
+
+/**
+ * @brief Every 1D transform path plus the cuFFT baseline.
+ *
+ * The values match ckl::FftAlgo one for one and in the same order. Every hand
+ * written rung is Stockham autosort; Cooley-Tukey with a separate bit reversal
+ * pass is not implemented, and docs/fft.md derives why.
+ */
+typedef enum {
+    CKL_FFT_AUTO = 0,        /**< Let the plan choose and report it through chosen. */
+    CKL_FFT_RADIX2_GLOBAL,   /**< One global memory pass per radix 2 stage. */
+    CKL_FFT_SHARED_RESIDENT, /**< One block per transform, both buffers in shared memory. */
+    CKL_FFT_RADIX4_GLOBAL,   /**< Radix 4 butterflies, half the stages. */
+    CKL_FFT_RADIX8_GLOBAL,   /**< Radix 8 butterflies mixed with one narrower stage. */
+    CKL_FFT_FOUR_STEP,       /**< N = N1 * N2, batched shared transforms and transposes. */
+    CKL_FFT_CUFFT            /**< cuFFT, planned once per size and reused. */
+} ckl_fft_algo_t;
+
+/**
+ * @brief Every convolution path plus the cuFFT baseline.
+ *
+ * The values match ckl::ConvAlgo one for one and in the same order.
+ */
+typedef enum {
+    CKL_CONV_AUTO = 0,        /**< Let the plan choose and report it through chosen. */
+    CKL_CONV_FFT_SEPARATE,    /**< Forward, a standalone pointwise multiply, inverse. */
+    CKL_CONV_FFT_FUSED,       /**< The multiply and the 1/L folded into the transform epilogues. */
+    CKL_CONV_DIRECT_SHARED,   /**< Tiled time domain with the taps in shared memory. */
+    CKL_CONV_DIRECT_CONSTANT, /**< The same tiling with the taps in constant memory. */
+    CKL_CONV_CUFFT            /**< cuFFT forward, a pointwise multiply, cuFFT inverse. */
+} ckl_conv_algo_t;
+
+/**
  * @brief Numeric library version, 10000 * major + 100 * minor + patch.
  * @return 10100 for release 1.1.0.
  */
@@ -406,6 +447,56 @@ CKL_EXPORT ckl_status_t ckl_spmv_csr(ckl_handle_t h, int64_t m, int64_t n, int64
                                      const int* row_ptr, const int* col_idx, const float* values,
                                      const float* x, float beta, float* y, ckl_spmv_algo_t algo,
                                      ckl_spmv_algo_t* chosen);
+
+/**
+ * @brief Single precision complex to complex FFT of a batch of transforms.
+ * @param h Handle supplying the stream; the plan keeps its own tables and cuFFT handle.
+ * @param n Transform length; a power of two from 2 to 16777216.
+ * @param batch Transforms laid out back to back; at least 1.
+ * @param in Device pointer to n * batch interleaved complex FP32 inputs.
+ * @param out Device pointer to n * batch interleaved complex FP32 outputs; must
+ *        differ from in, because every path here is out of place.
+ * @param dir Forward or inverse; neither is scaled.
+ * @param algo Requested path, or CKL_FFT_AUTO.
+ * @param chosen Optional out-param receiving the path taken; may be NULL. When
+ *        non-NULL it is written on success and on failure alike.
+ * @return CKL_STATUS_SUCCESS, or the failure status; ckl_last_error carries the detail.
+ * @note An explicitly named algo is never rerouted. Only CKL_FFT_AUTO chooses,
+ *       and chosen reports where it landed.
+ * @note This entry point keeps a one entry plan cache keyed on the length and the
+ *       batch, because building a plan per call would put the twiddle tables and
+ *       a cuFFT handle inside the caller's timed region. A benchmark should build
+ *       a ckl::FftPlan of its own: the cache holds one plan, so alternating
+ *       between two sizes rebuilds on every call.
+ * @note Asynchronous on the handle's stream.
+ */
+CKL_EXPORT ckl_status_t ckl_fft_c2c(ckl_handle_t h, int64_t n, int64_t batch, const void* in,
+                                    void* out, ckl_fft_direction_t dir, ckl_fft_algo_t algo,
+                                    ckl_fft_algo_t* chosen);
+
+/**
+ * @brief Linear convolution of a real signal with a real filter.
+ * @param h Handle supplying the stream.
+ * @param signal_length N, the signal length; at least 1.
+ * @param signal Device pointer to N reals.
+ * @param filter_length M, the filter length; at least 1.
+ * @param filter Device pointer to M reals.
+ * @param out Device pointer to N + M - 1 reals.
+ * @param algo Requested path, or CKL_CONV_AUTO.
+ * @param chosen Optional out-param receiving the path taken; may be NULL. When
+ *        non-NULL it is written on success and on failure alike.
+ * @return CKL_STATUS_SUCCESS, or the failure status; ckl_last_error carries the detail.
+ * @note An explicitly named algo is never rerouted. Only CKL_CONV_AUTO chooses,
+ *       and chosen reports where it landed.
+ * @note This entry point keeps a one entry plan cache keyed on the signal length,
+ *       the filter pointer and the filter length. Building the plan transforms
+ *       the filter, and doing that on every call is exactly what the cached
+ *       filter spectrum exists to prevent.
+ * @note Asynchronous on the handle's stream.
+ */
+CKL_EXPORT ckl_status_t ckl_conv_r2r(ckl_handle_t h, int64_t signal_length, const float* signal,
+                                     int64_t filter_length, const float* filter, float* out,
+                                     ckl_conv_algo_t algo, ckl_conv_algo_t* chosen);
 
 #ifdef __cplusplus
 } /* extern "C" */

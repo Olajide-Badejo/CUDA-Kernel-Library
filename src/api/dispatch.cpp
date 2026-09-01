@@ -54,11 +54,13 @@
 #include <cuda_runtime.h>
 
 #include "ckl/cuda_check.hpp"
+#include "ckl/fft.hpp"
 #include "ckl/sparse.hpp"
 #include "ckl/status.hpp"
 #include "ckl/types.hpp"
 
 #include "detail/last_error.hpp"
+#include "fft/fft_internal.hpp"
 #include "sparse/spmv_launch.hpp"
 
 namespace ckl {
@@ -1073,6 +1075,195 @@ Status spmv(SpmvPlan& plan, SpmvAlgo algo, float alpha, const float* x, float be
 
     try {
         detail::spmv_launch(plan, picked, alpha, x, beta, y, stream);
+    } catch (const Error& e) {
+        detail::set_last_error(e.what());
+        return e.status();
+    } catch (const std::exception& e) {
+        detail::set_last_error(e.what());
+        return Status::kInternal;
+    }
+    return Status::kSuccess;
+}
+
+// ---------------------------------------------------------------------------
+// FFT and convolution dispatch
+// ---------------------------------------------------------------------------
+//
+// The same two rules again. *chosen is written whenever it is non-null, on
+// success and on failure alike, so a regression that quietly sends every size
+// down one path cannot pass a test. And an explicitly named algorithm is never
+// rerouted: a variant the plan refuses returns kNotSupported and says why, rather
+// than falling back to another rung and letting a benchmark row claim a path it
+// never ran. FftPlan::refusal carries the reason and it names the shared memory
+// arithmetic or the missing factorization rather than saying "not supported".
+//
+// The choice kAuto makes is FftPlan::query: shared resident at or below 2^12,
+// four step above it, which is the shared memory budget and nothing else. The
+// radix 4 and radix 8 rungs are never auto-chosen because whether a wider
+// butterfly wins depends on the occupancy its register count leaves, and there is
+// no committed sweep yet. ConvPlan::query compares the two traffic models against
+// the two roofs of this part, which predicts a crossover; the crossover is what
+// the sweep exists to measure, and both are documented as provisional in
+// docs/fft.md.
+
+namespace {
+
+bool fft_pointers_ok(const void* in, const void* out, const char* what) {
+    if (in == nullptr || out == nullptr) {
+        detail::set_last_error(std::string(what) +
+                               ": the input and output pointers must not be "
+                               "null");
+        return false;
+    }
+    if (in == out) {
+        detail::set_last_error(std::string(what) +
+                               ": the transform is out of place, so in and out must differ");
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+Status fft(FftPlan& plan, FftAlgo algo, FftDirection dir, const float2* in, float2* out,
+           FftAlgo* chosen, cudaStream_t stream) {
+    detail::clear_last_error();
+
+    FftAlgo picked = algo;
+    try {
+        if (algo == FftAlgo::kAuto) {
+            picked = plan.query();
+        }
+    } catch (const Error& e) {
+        detail::set_last_error(e.what());
+        return e.status();
+    }
+    if (chosen != nullptr) {
+        *chosen = picked;
+    }
+    if (!fft_pointers_ok(in, out, "fft")) {
+        return Status::kInvalidValue;
+    }
+
+    try {
+        detail::fft_launch(plan, picked, dir, in, out, stream);
+    } catch (const Error& e) {
+        detail::set_last_error(e.what());
+        return e.status();
+    } catch (const std::exception& e) {
+        detail::set_last_error(e.what());
+        return Status::kInternal;
+    }
+    return Status::kSuccess;
+}
+
+Status fft_r2c(FftPlan& plan, FftAlgo algo, const float* in, float2* out, FftAlgo* chosen,
+               cudaStream_t stream) {
+    detail::clear_last_error();
+
+    FftAlgo picked = algo;
+    try {
+        if (algo == FftAlgo::kAuto) {
+            picked = plan.query();
+        }
+    } catch (const Error& e) {
+        detail::set_last_error(e.what());
+        return e.status();
+    }
+    if (chosen != nullptr) {
+        *chosen = picked;
+    }
+    if (in == nullptr || out == nullptr) {
+        detail::set_last_error("fft_r2c: the input and output pointers must not be null");
+        return Status::kInvalidValue;
+    }
+
+    try {
+        detail::fft_r2c_launch(plan, picked, in, out, stream);
+    } catch (const Error& e) {
+        detail::set_last_error(e.what());
+        return e.status();
+    } catch (const std::exception& e) {
+        detail::set_last_error(e.what());
+        return Status::kInternal;
+    }
+    return Status::kSuccess;
+}
+
+Status fft_c2r(FftPlan& plan, FftAlgo algo, const float2* in, float* out, FftAlgo* chosen,
+               cudaStream_t stream) {
+    detail::clear_last_error();
+
+    FftAlgo picked = algo;
+    try {
+        if (algo == FftAlgo::kAuto) {
+            picked = plan.query();
+        }
+    } catch (const Error& e) {
+        detail::set_last_error(e.what());
+        return e.status();
+    }
+    if (chosen != nullptr) {
+        *chosen = picked;
+    }
+    if (in == nullptr || out == nullptr) {
+        detail::set_last_error("fft_c2r: the input and output pointers must not be null");
+        return Status::kInvalidValue;
+    }
+
+    try {
+        detail::fft_c2r_launch(plan, picked, in, out, stream);
+    } catch (const Error& e) {
+        detail::set_last_error(e.what());
+        return e.status();
+    } catch (const std::exception& e) {
+        detail::set_last_error(e.what());
+        return Status::kInternal;
+    }
+    return Status::kSuccess;
+}
+
+Status fft2d(Fft2dPlan& plan, FftDirection dir, const float2* in, float2* out,
+             cudaStream_t stream) {
+    detail::clear_last_error();
+    if (!fft_pointers_ok(in, out, "fft2d")) {
+        return Status::kInvalidValue;
+    }
+    try {
+        detail::fft2d_launch(plan, dir, in, out, stream);
+    } catch (const Error& e) {
+        detail::set_last_error(e.what());
+        return e.status();
+    } catch (const std::exception& e) {
+        detail::set_last_error(e.what());
+        return Status::kInternal;
+    }
+    return Status::kSuccess;
+}
+
+Status conv(ConvPlan& plan, ConvAlgo algo, const float* signal, float* out, ConvAlgo* chosen,
+            cudaStream_t stream) {
+    detail::clear_last_error();
+
+    ConvAlgo picked = algo;
+    try {
+        if (algo == ConvAlgo::kAuto) {
+            picked = plan.query();
+        }
+    } catch (const Error& e) {
+        detail::set_last_error(e.what());
+        return e.status();
+    }
+    if (chosen != nullptr) {
+        *chosen = picked;
+    }
+    if (signal == nullptr || out == nullptr) {
+        detail::set_last_error("conv: the signal and output pointers must not be null");
+        return Status::kInvalidValue;
+    }
+
+    try {
+        detail::conv_launch(plan, picked, signal, out, stream);
     } catch (const Error& e) {
         detail::set_last_error(e.what());
         return e.status();

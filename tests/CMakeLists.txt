@@ -122,6 +122,20 @@ if(TARGET ckl_sparse AND TARGET ckl_api AND TARGET ckl_gemv)
     ckl_register_gtest(ckl_test_spmv)
 endif()
 
+# ckl_api for ckl::fft, ckl::fft2d and ckl::conv, which are the dispatchers, and
+# ckl_fft for the rungs and the plans they run out of.
+if(TARGET ckl_fft AND TARGET ckl_api)
+    add_executable(ckl_test_fft test_fft.cpp)
+    target_link_libraries(ckl_test_fft PRIVATE ckl_api ckl_fft ckl_headers ckl_test_support)
+    ckl_set_warnings(ckl_test_fft)
+    ckl_register_gtest(ckl_test_fft)
+
+    add_executable(ckl_test_conv test_conv.cpp)
+    target_link_libraries(ckl_test_conv PRIVATE ckl_api ckl_fft ckl_headers ckl_test_support)
+    ckl_set_warnings(ckl_test_conv)
+    ckl_register_gtest(ckl_test_conv)
+endif()
+
 if(TARGET ckl_trsm)
     add_executable(ckl_test_trsm test_trsm.cpp)
     target_link_libraries(ckl_test_trsm PRIVATE ckl_trsm ckl_headers ckl_test_support)

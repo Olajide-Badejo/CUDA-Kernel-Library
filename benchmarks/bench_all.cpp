@@ -62,6 +62,7 @@
 #include "ckl/cuda_check.hpp"
 #include "ckl/device_buffer.hpp"
 #include "event_timer.hpp"
+#include "ckl/fft.hpp"
 #include "ckl/gemm.hpp"
 #include "ckl/gemv.hpp"
 #include "matrix_cache.hpp"
@@ -124,7 +125,7 @@ struct Options {
     std::fprintf(
         stderr,
         "usage: %s <family> <variant> <dtype> <m> <n> <k> [commit] [flags]\n"
-        "  families: gemm gemv spmv trsm\n"
+        "  families: gemm gemv spmv fft conv trsm\n"
         "  dtypes:   fp32 fp16 bf16\n"
         "  gemm variants: naive tiled register cp_async wmma mma_ptx mma_ldm mma_opt auto\n"
         "                 tile_<BM>x<BN>x<BK> splitk streamk\n"
@@ -134,6 +135,11 @@ struct Options {
         "                 baseline_cusparse_default baseline_cusparse_alg2\n"
         "  spmv takes a matrix name in the m position: a name from\n"
         "  experiments/matrix_manifest.csv, or synthetic[:rows]. n and k are ignored.\n"
+        "  fft variants:  radix2 shared radix4 radix8 four_step auto baseline_cufft\n"
+        "  fft takes the transform length in m and the batch in n; k is ignored.\n"
+        "  conv variants: fft_separate fft_fused direct_shared direct_constant auto\n"
+        "                 baseline_cufft\n"
+        "  conv takes the signal length in m and the filter length in n; k is ignored.\n"
         "  trsm variants: naive blocked baseline_cublas\n"
         "flags:\n"
         "  --seed N               seed for the synthetic SpMV generator (default 1)\n"
@@ -393,6 +399,18 @@ struct Measured {
     double mean_nnz_per_row = 0.0;
     int max_nnz_per_row = 0;
     bool power_law = false;
+
+    // FFT and convolution only. The declared model is what the Gate X 15 percent
+    // dram__bytes.sum check is against, and a row that did not carry it could not
+    // be checked at all. The batch rides along because a small transform measured
+    // unbatched measures launch overhead rather than the kernel, and the row has
+    // to say which it was.
+    long long declared_model_bytes = 0;
+    int passes = 0;
+    int batch = 1;
+    int transform_length = 0;
+    long long twiddle_bytes_low = 0;
+    long long twiddle_bytes_high = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -415,7 +433,8 @@ bool decide_flush(const Options& opt, std::size_t working_set, std::size_t l2) {
     if (opt.flush == "off") {
         return false;
     }
-    return opt.family == "gemv" || opt.family == "spmv" || working_set <= l2;
+    return opt.family == "gemv" || opt.family == "spmv" || opt.family == "fft" ||
+           opt.family == "conv" || working_set <= l2;
 }
 
 void run_timed(const Options& opt, const ckl::Context& ctx, cudaStream_t stream, Measured& out,
@@ -1084,6 +1103,286 @@ Measured bench_spmv(const Options& opt, const ckl::Context& ctx, cudaStream_t st
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// FFT and convolution
+// ---------------------------------------------------------------------------
+//
+// Same table shape and the same chosen assertion as the other two tuned
+// families. The oracle is cuFFT in both cases, and the tolerance is
+// ckl::fft_tolerance, the derived bound the correctness suite is written
+// against: error grows with the number of stages, so the bound has to as well.
+//
+// The magnitude the rounding error is bounded by is a constant here rather than a
+// per element vector. Every twiddle has modulus one, so bin k of a transform is
+// bounded by the sum of the input magnitudes, and an output sample of a
+// convolution is bounded by the sum of the signal magnitudes times the largest
+// tap. Both are computed on the host from the data that was uploaded, which costs
+// one pass over the input instead of the O(N M) the exact bound would.
+
+struct FftVariantEntry {
+    const char* name;
+    ckl::FftAlgo algo;
+};
+
+const FftVariantEntry kFftVariants[] = {
+    {"radix2", ckl::FftAlgo::kRadix2Global},  {"shared", ckl::FftAlgo::kSharedResident},
+    {"radix4", ckl::FftAlgo::kRadix4Global},  {"radix8", ckl::FftAlgo::kRadix8Global},
+    {"four_step", ckl::FftAlgo::kFourStep},   {"auto", ckl::FftAlgo::kAuto},
+    {"baseline_cufft", ckl::FftAlgo::kCufft},
+};
+
+struct ConvVariantEntry {
+    const char* name;
+    ckl::ConvAlgo algo;
+};
+
+const ConvVariantEntry kConvVariants[] = {
+    {"fft_separate", ckl::ConvAlgo::kFftSeparate},
+    {"fft_fused", ckl::ConvAlgo::kFftFused},
+    {"direct_shared", ckl::ConvAlgo::kDirectShared},
+    {"direct_constant", ckl::ConvAlgo::kDirectConstant},
+    {"auto", ckl::ConvAlgo::kAuto},
+    {"baseline_cufft", ckl::ConvAlgo::kCufft},
+};
+
+std::vector<float> interleaved_signal(long long count, std::uint64_t seed) {
+    return ckl::random_matrix(static_cast<int>(2 * count), 1, seed);
+}
+
+std::vector<float> filled(std::size_t count, float value) {
+    return std::vector<float>(count, value);
+}
+
+Measured bench_fft(const Options& opt, const ckl::Context& ctx, cudaStream_t stream) {
+    Measured out;
+    out.entry_point = "ckl_fft";
+
+    const int n = opt.m;
+    const int batch = opt.n > 0 ? opt.n : 1;
+    const FftVariantEntry* entry = nullptr;
+    for (const FftVariantEntry& e : kFftVariants) {
+        if (opt.variant == e.name) {
+            entry = &e;
+        }
+    }
+    if (entry == nullptr) {
+        fail_json("variant", "unknown fft variant " + opt.variant, 3);
+    }
+    if (n < 2 || (n & (n - 1)) != 0) {
+        fail_json("shape", "the fft family takes a power of two transform length in m", 3);
+    }
+
+    ckl::FftPlanOptions plan_opt;
+    plan_opt.batch = batch;
+    ckl::FftPlan plan(n, plan_opt);
+    const ckl::FftAlgo resolved = entry->algo == ckl::FftAlgo::kAuto ? plan.query() : entry->algo;
+    if (!plan.supports(resolved)) {
+        fail_json("variant",
+                  std::string("this plan refuses ") + ckl::fft_algo_name(resolved) + ": " +
+                      plan.refusal(resolved),
+                  3);
+    }
+
+    const long long elems = static_cast<long long>(n) * batch;
+    out.batch = batch;
+    out.transform_length = n;
+    out.passes = plan.passes(resolved);
+    out.declared_model_bytes = plan.model_bytes(resolved);
+    out.twiddle_bytes_low = plan.twiddle_bytes_low(resolved);
+    out.twiddle_bytes_high = plan.twiddle_bytes_high(resolved);
+    out.flops = plan.flop_model();
+    out.working_set_bytes = 2 * static_cast<std::size_t>(elems) * sizeof(float2);
+    out.plan_algo = ckl::fft_algo_name(plan.query());
+
+    const std::vector<float> host_flat = interleaved_signal(elems, 7);
+    ckl::DeviceBuffer<float2> da(static_cast<std::size_t>(elems));
+    ckl::DeviceBuffer<float2> db(static_cast<std::size_t>(elems));
+    ckl::DeviceBuffer<float2> d_oracle(static_cast<std::size_t>(elems));
+    da.copy_from_host(reinterpret_cast<const float2*>(host_flat.data()),
+                      static_cast<std::size_t>(elems));
+
+    {
+        // Every twiddle has modulus one, so bin k is bounded by the sum of the
+        // input magnitudes of its own transform. The largest of those sums is the
+        // scale every element is divided by.
+        double magnitude = 0.0;
+        for (int b = 0; b < batch; ++b) {
+            double sum = 0.0;
+            for (int i = 0; i < n; ++i) {
+                const std::size_t idx = 2 * (static_cast<std::size_t>(b) * n + i);
+                sum += std::sqrt(static_cast<double>(host_flat[idx]) * host_flat[idx] +
+                                 static_cast<double>(host_flat[idx + 1]) * host_flat[idx + 1]);
+            }
+            magnitude = std::max(magnitude, sum);
+        }
+
+        ckl::Status st = ckl::fft(plan, ckl::FftAlgo::kCufft, ckl::FftDirection::kForward,
+                                  da.data(), d_oracle.data(), nullptr, stream);
+        if (st != ckl::Status::kSuccess) {
+            fail_json("verify",
+                      std::string("the cuFFT oracle call failed: ") + ckl::status_string(st), 6);
+        }
+        ckl::FftAlgo chosen = ckl::FftAlgo::kAuto;
+        st = ckl::fft(plan, entry->algo, ckl::FftDirection::kForward, da.data(), db.data(), &chosen,
+                      stream);
+        if (st != ckl::Status::kSuccess) {
+            fail_json("dispatch",
+                      std::string("ckl::fft returned ") + ckl::status_string(st) + " for algo " +
+                          ckl::fft_algo_name(entry->algo) + "; " + library_detail(),
+                      7);
+        }
+        CKL_CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (chosen != resolved) {
+            fail_json("dispatch",
+                      std::string("variant ") + opt.variant + " asked for " +
+                          ckl::fft_algo_name(resolved) + " and dispatch reports " +
+                          ckl::fft_algo_name(chosen) +
+                          "; a benchmark that measures a path its row does not name is a defect",
+                      8);
+        }
+        out.chosen = ckl::fft_algo_name(chosen);
+
+        const std::vector<float2> got = db.to_host();
+        const std::vector<float2> want = d_oracle.to_host();
+        std::vector<float> got_flat(static_cast<std::size_t>(2 * elems));
+        std::vector<float> want_flat(static_cast<std::size_t>(2 * elems));
+        for (long long i = 0; i < elems; ++i) {
+            got_flat[static_cast<std::size_t>(2 * i)] = got[static_cast<std::size_t>(i)].x;
+            got_flat[static_cast<std::size_t>(2 * i) + 1] = got[static_cast<std::size_t>(i)].y;
+            want_flat[static_cast<std::size_t>(2 * i)] = want[static_cast<std::size_t>(i)].x;
+            want_flat[static_cast<std::size_t>(2 * i) + 1] = want[static_cast<std::size_t>(i)].y;
+        }
+        out.verify = scaled_residual(got_flat, want_flat,
+                                     filled(got_flat.size(), static_cast<float>(magnitude)),
+                                     opt.verify_perturb);
+        out.verify_tol = ckl::fft_tolerance(n);
+        require_verified(out);
+    }
+
+    const ckl::FftAlgo run_algo = entry->algo;
+    auto launch = [&plan, &da, &db, run_algo](cudaStream_t s) {
+        const ckl::Status st =
+            ckl::fft(plan, run_algo, ckl::FftDirection::kForward, da.data(), db.data(), nullptr, s);
+        if (st != ckl::Status::kSuccess) {
+            fail_json("launch",
+                      std::string("ckl::fft returned ") + ckl::status_string(st) +
+                          " inside the timing loop",
+                      5);
+        }
+    };
+    run_timed(opt, ctx, stream, out, launch, nullptr);
+    return out;
+}
+
+Measured bench_conv(const Options& opt, const ckl::Context& ctx, cudaStream_t stream) {
+    Measured out;
+    out.entry_point = "ckl_conv";
+
+    const int n = opt.m;
+    const int m = opt.n;
+    const ConvVariantEntry* entry = nullptr;
+    for (const ConvVariantEntry& e : kConvVariants) {
+        if (opt.variant == e.name) {
+            entry = &e;
+        }
+    }
+    if (entry == nullptr) {
+        fail_json("variant", "unknown conv variant " + opt.variant, 3);
+    }
+    if (n < 1 || m < 1) {
+        fail_json("shape", "the conv family takes the signal length in m and the filter in n", 3);
+    }
+
+    const std::vector<float> signal = ckl::random_matrix(n, 1, 5);
+    const std::vector<float> filter = ckl::random_matrix(m, 1, 6);
+    ckl::DeviceBuffer<float> ds(signal.size());
+    ckl::DeviceBuffer<float> df(filter.size());
+    ds.copy_from_host(signal);
+    df.copy_from_host(filter);
+
+    ckl::ConvPlan plan(n, df.data(), m);
+    const ckl::ConvAlgo resolved = entry->algo == ckl::ConvAlgo::kAuto ? plan.query() : entry->algo;
+    if (!plan.supports(resolved)) {
+        fail_json("variant",
+                  std::string("this plan refuses ") + ckl::conv_algo_name(resolved) + ": " +
+                      plan.refusal(resolved),
+                  3);
+    }
+
+    const int out_len = plan.output_length();
+    out.transform_length = plan.transform_length();
+    out.passes = plan.passes(resolved);
+    out.declared_model_bytes = plan.model_bytes(resolved);
+    out.flops = plan.flop_model(resolved);
+    out.working_set_bytes =
+        (signal.size() + filter.size() + static_cast<std::size_t>(out_len)) * sizeof(float) +
+        4 * static_cast<std::size_t>(plan.transform_length()) * sizeof(float2);
+    out.plan_algo = ckl::conv_algo_name(plan.query());
+
+    ckl::DeviceBuffer<float> dout(static_cast<std::size_t>(out_len));
+    ckl::DeviceBuffer<float> d_oracle(static_cast<std::size_t>(out_len));
+    dout.zero();
+
+    {
+        // An output sample is a dot product of the signal against the reversed
+        // filter, so its rounding error is bounded by the sum of the signal
+        // magnitudes times the largest tap.
+        double signal_sum = 0.0;
+        for (float v : signal) {
+            signal_sum += std::fabs(static_cast<double>(v));
+        }
+        double biggest_tap = 0.0;
+        for (float v : filter) {
+            biggest_tap = std::max(biggest_tap, std::fabs(static_cast<double>(v)));
+        }
+        const double magnitude = signal_sum * biggest_tap;
+
+        ckl::Status st =
+            ckl::conv(plan, ckl::ConvAlgo::kCufft, ds.data(), d_oracle.data(), nullptr, stream);
+        if (st != ckl::Status::kSuccess) {
+            fail_json("verify",
+                      std::string("the cuFFT oracle call failed: ") + ckl::status_string(st), 6);
+        }
+        ckl::ConvAlgo chosen = ckl::ConvAlgo::kAuto;
+        st = ckl::conv(plan, entry->algo, ds.data(), dout.data(), &chosen, stream);
+        if (st != ckl::Status::kSuccess) {
+            fail_json("dispatch",
+                      std::string("ckl::conv returned ") + ckl::status_string(st) + " for algo " +
+                          ckl::conv_algo_name(entry->algo) + "; " + library_detail(),
+                      7);
+        }
+        CKL_CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (chosen != resolved) {
+            fail_json("dispatch",
+                      std::string("variant ") + opt.variant + " asked for " +
+                          ckl::conv_algo_name(resolved) + " and dispatch reports " +
+                          ckl::conv_algo_name(chosen) +
+                          "; a benchmark that measures a path its row does not name is a defect",
+                      8);
+        }
+        out.chosen = ckl::conv_algo_name(chosen);
+        out.verify = scaled_residual(
+            dout.to_host(), d_oracle.to_host(),
+            filled(static_cast<std::size_t>(out_len), static_cast<float>(magnitude)),
+            opt.verify_perturb);
+        out.verify_tol = ckl::fft_tolerance(plan.transform_length());
+        require_verified(out);
+    }
+
+    const ckl::ConvAlgo run_algo = entry->algo;
+    auto launch = [&plan, &ds, &dout, run_algo](cudaStream_t s) {
+        const ckl::Status st = ckl::conv(plan, run_algo, ds.data(), dout.data(), nullptr, s);
+        if (st != ckl::Status::kSuccess) {
+            fail_json("launch",
+                      std::string("ckl::conv returned ") + ckl::status_string(st) +
+                          " inside the timing loop",
+                      5);
+        }
+    };
+    run_timed(opt, ctx, stream, out, launch, nullptr);
+    return out;
+}
+
 Measured bench_trsm(const Options& opt, ckl::Context& ctx, cudaStream_t stream) {
     const int m = opt.m;
     const int n = opt.n;
@@ -1375,6 +1674,10 @@ int main(int argc, char** argv) {
         measured = bench_gemv(opt, ctx, stream);
     } else if (opt.family == "spmv") {
         measured = bench_spmv(opt, ctx, stream);
+    } else if (opt.family == "fft") {
+        measured = bench_fft(opt, ctx, stream);
+    } else if (opt.family == "conv") {
+        measured = bench_conv(opt, ctx, stream);
     } else if (opt.family == "trsm") {
         measured = bench_trsm(opt, ctx, stream);
     } else {
@@ -1437,6 +1740,25 @@ int main(int argc, char** argv) {
         row.boolean("power_law", measured.power_law);
         // The number of record for percent of roof. Nothing measures it here;
         // the ncu round does, and until it runs the field says so.
+        row.str("dram_bytes_sum", "pending ncu round");
+    }
+    if (opt.family == "fft" || opt.family == "conv") {
+        // The declared model is what the Gate X 15 percent dram__bytes.sum check
+        // is against, so a row that did not carry it could not be checked at all.
+        // The batch rides along because an unbatched small transform measures
+        // launch overhead rather than the kernel.
+        row.integer("model_bytes", measured.declared_model_bytes);
+        row.integer("passes", measured.passes);
+        row.integer("batch", measured.batch);
+        row.integer("transform_length", measured.transform_length);
+        row.integer("twiddle_bytes_low", measured.twiddle_bytes_low);
+        row.integer("twiddle_bytes_high", measured.twiddle_bytes_high);
+        row.num("effective_gbs",
+                measured.stats.median_ms > 0.0
+                    ? static_cast<double>(measured.declared_model_bytes) /
+                          (measured.stats.median_ms / 1000.0) / 1.0e9
+                    : 0.0,
+                3);
         row.str("dram_bytes_sum", "pending ncu round");
     }
     row.boolean("verify_ok", true);

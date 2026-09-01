@@ -129,6 +129,130 @@ def write_families(rows) -> None:
     out.write_text("\n".join(lines), encoding="utf-8")
 
 
+def conv_crossover_rows(rows) -> dict[int, dict[int, float]]:
+    """Canonical convolution rows as {signal length: {filter length: seconds}} per path.
+
+    Two series come back keyed by the fastest FFT variant and the fastest direct
+    variant at each filter length, because which member of each family wins is
+    itself a result and the chart is about the two families crossing.
+    """
+    fft_variants = {"fft_separate", "fft_fused"}
+    direct_variants = {"direct_shared", "direct_constant"}
+    best_fft: dict[int, dict[int, float]] = {}
+    best_direct: dict[int, dict[int, float]] = {}
+    for r in rows:
+        if r.get("family") != "conv" or str(r.get("canonical", "")).lower() != "true":
+            continue
+        n = int(r["m"])
+        m = int(r["n"])
+        ms = float(r["median_ms"])
+        target = None
+        if r["variant"] in fft_variants:
+            target = best_fft.setdefault(n, {})
+        elif r["variant"] in direct_variants:
+            target = best_direct.setdefault(n, {})
+        if target is None:
+            continue
+        if m not in target or ms < target[m]:
+            target[m] = ms
+    return {"fft": best_fft, "direct": best_direct}
+
+
+def crossing_filter_length(fft_series: dict[int, float],
+                           direct_series: dict[int, float]) -> float | None:
+    """The M where the two curves cross, read out of the data.
+
+    Log-linear interpolation between the two filter lengths that bracket the sign
+    change of (direct - fft). None when the sweep does not contain a crossing, in
+    which case the caption says so rather than inventing one.
+    """
+    import math
+
+    shared = sorted(set(fft_series) & set(direct_series))
+    for lo, hi in zip(shared, shared[1:], strict=False):
+        d_lo = direct_series[lo] - fft_series[lo]
+        d_hi = direct_series[hi] - fft_series[hi]
+        if d_lo <= 0.0 <= d_hi and d_hi != d_lo:
+            frac = -d_lo / (d_hi - d_lo)
+            return math.exp(math.log(lo) + frac * (math.log(hi) - math.log(lo)))
+    return None
+
+
+def plot_conv_crossover(rows) -> None:
+    """The convolution crossover chart, generated from committed rows only.
+
+    Gate X asks for this chart to come out of the sweep data with the crossing
+    read by the script and printed in the caption, never placed by hand. When
+    there are no convolution rows yet the figure is removed rather than left
+    stale: a report rebuilt around a picture whose input is gone is defect A7.
+    """
+    series = conv_crossover_rows(rows)
+    signals = sorted(set(series["fft"]) & set(series["direct"]))
+    targets = [FIGURES / "conv_crossover.pdf", FIGURES / "conv_crossover.png"]
+    caption = TABLES / "conv_crossover_caption.tex"
+    if not signals:
+        for path in targets + [caption]:
+            if path.exists():
+                path.unlink()
+        print("conv crossover: no convolution rows in summary.csv, so no chart. "
+              "Run the conv family through benchmarks/sweep.py first.")
+        return
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    ink = "#222222"
+    muted = "#6A6A6A"
+    fft_c, direct_c = "#0072B2", "#E69F00"
+
+    fig, ax = plt.subplots(figsize=(9.0, 5.6))
+    fig.subplots_adjust(left=0.11, right=0.97, top=0.84, bottom=0.16)
+    caption_lines = []
+    for i, n in enumerate(signals):
+        fft_series = series["fft"][n]
+        direct_series = series["direct"][n]
+        ms = sorted(set(fft_series) & set(direct_series))
+        style = "-" if i == 0 else "--"
+        ax.plot(ms, [fft_series[m] for m in ms], style, color=fft_c, marker="o", markersize=4,
+                label=f"FFT path, N = {n}")
+        ax.plot(ms, [direct_series[m] for m in ms], style, color=direct_c, marker="s",
+                markersize=4, label=f"direct path, N = {n}")
+        crossing = crossing_filter_length(fft_series, direct_series)
+        if crossing is None:
+            caption_lines.append(
+                f"At N = {n} the sweep contains no crossing: one path is faster at every "
+                f"filter length measured.")
+            continue
+        ax.axvline(crossing, color=muted, linestyle=":", linewidth=1.2)
+        ax.annotate(f"crossing at M = {crossing:.0f}", xy=(crossing, ax.get_ylim()[1]),
+                    xytext=(4, -12), textcoords="offset points", fontsize=8.5, color=ink)
+        caption_lines.append(f"At N = {n} the two paths cross at M = {crossing:.0f}.")
+
+    ax.set_xscale("log", base=2)
+    ax.set_yscale("log")
+    ax.set_xlabel("filter length M (taps)", fontsize=10.5, fontweight="bold", color=ink)
+    ax.set_ylabel("time per convolution (ms, lower is better)", fontsize=10.5,
+                  fontweight="bold", color=ink)
+    ax.grid(True, which="both", color="#E6E6E6", linewidth=0.6)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    for spine in ("left", "bottom"):
+        ax.spines[spine].set_color(muted)
+    ax.tick_params(colors=muted, labelcolor=ink)
+    ax.legend(frameon=True, framealpha=0.95, edgecolor="#DDDDDD", fontsize=8.5)
+    fig.suptitle("Convolution crossover", x=0.5, y=0.96, fontsize=15, fontweight="bold",
+                 color=ink)
+    fig.text(0.5, 0.9,
+             "the FFT path barely moves with M; the direct path is 2 N M and does not stop",
+             ha="center", va="top", fontsize=9.5, color=muted)
+    fig.savefig(FIGURES / "conv_crossover.pdf")
+    fig.savefig(FIGURES / "conv_crossover.png", dpi=150)
+    caption.write_text(" ".join(caption_lines) + "\n", encoding="utf-8")
+    print(f"conv crossover: {' '.join(caption_lines)}")
+
+
 def plot_ladder(plotted: list[tuple[str, str, float, float]]) -> None:
     import matplotlib
 
@@ -215,7 +339,8 @@ def main() -> int:
     FIGURES.mkdir(parents=True, exist_ok=True)
     rows = read_summary()
 
-    steps = ["gemm ladder table", "families table", "roofline figure", "ladder figure"]
+    steps = ["gemm ladder table", "families table", "roofline figure", "ladder figure",
+             "conv crossover figure"]
     try:
         from tqdm import tqdm
         it = tqdm(steps, unit="asset")
@@ -233,6 +358,8 @@ def main() -> int:
                            check=True)
         elif step == "ladder figure":
             plot_ladder(plotted)
+        elif step == "conv crossover figure":
+            plot_conv_crossover(rows)
 
     print(f"wrote tables to {TABLES.relative_to(REPO)} and figures to {FIGURES.relative_to(REPO)}")
     return 0
