@@ -35,6 +35,13 @@
 // Usage: bench_all <family> <variant> <dtype> <m> <n> <k> [commit] [flags]
 //   family in {gemm, gemv, spmv, trsm}; dtype in {fp32, fp16, bf16}
 // bench_all --help lists the flags.
+//
+// The spmv family takes a matrix name where the other three take m. One
+// synthetic matrix cannot separate the SpMV variants, so a row names a matrix
+// from experiments/matrix_manifest.csv and the shape it reports is the shape
+// that matrix actually has. "synthetic" and "synthetic:<rows>" build v1's
+// generator in process, so a sweep still runs on a machine whose matrix cache
+// has not been populated.
 
 #include <algorithm>
 #include <cmath>
@@ -57,6 +64,7 @@
 #include "event_timer.hpp"
 #include "ckl/gemm.hpp"
 #include "ckl/gemv.hpp"
+#include "matrix_cache.hpp"
 #include "ckl/nvml_monitor.hpp"
 #include "reference.hpp"
 #include "ckl/sparse.hpp"
@@ -82,6 +90,11 @@ struct Options {
     int n = 0;
     int k = 0;
     std::string commit = "unknown";
+
+    // The spmv family names a matrix where the others give m. The name is what
+    // a row carries, and it has to match a row of the manifest.
+    std::string matrix;
+    std::uint64_t seed = 1;
 
     int warmups = 5;
     int reps = 20;         // the exact count in fixed mode, the floor in adaptive
@@ -117,9 +130,13 @@ struct Options {
         "                 tile_<BM>x<BN>x<BK> splitk streamk\n"
         "                 baseline_cublas_default baseline_cublas_autotune\n"
         "  gemv variants: naive warp vectorized baseline_cublas\n"
-        "  spmv variants: naive warp baseline_cusparse\n"
+        "  spmv variants: naive warp vector merge sell bsr auto\n"
+        "                 baseline_cusparse_default baseline_cusparse_alg2\n"
+        "  spmv takes a matrix name in the m position: a name from\n"
+        "  experiments/matrix_manifest.csv, or synthetic[:rows]. n and k are ignored.\n"
         "  trsm variants: naive blocked baseline_cublas\n"
         "flags:\n"
+        "  --seed N               seed for the synthetic SpMV generator (default 1)\n"
         "  --warmups N            untimed launches before the loop (default 5)\n"
         "  --reps N               timed reps, and the floor in adaptive mode (default 20)\n"
         "  --fixed-reps           run exactly --reps instead of the adaptive budget\n"
@@ -238,6 +255,9 @@ const Options* g_opt = nullptr;
         row.integer("m", g_opt->m);
         row.integer("n", g_opt->n);
         row.integer("k", g_opt->k);
+        // For spmv the shape positions hold a matrix name, so the name is what
+        // identifies the failed configuration.
+        row.str("matrix", g_opt->family == "spmv" ? g_opt->matrix : std::string());
         row.str("commit", g_opt->commit);
     }
     if (extra) {
@@ -354,6 +374,25 @@ struct Measured {
     long long nnz = 0;
     bool l2_flushed = false;
     std::size_t flush_bytes = 0;
+
+    // SpMV only. Every one of these rides on the row because the family's
+    // claims cannot be read without them: a padding ratio decides whether a
+    // SELL win is a win, and the model band is what a measured dram__bytes.sum
+    // gets compared against.
+    std::string matrix;
+    int rows = 0;
+    int cols = 0;
+    double sell_padding_ratio = 0.0;
+    long long sell_nnz_padded = 0;
+    int vector_width = 0;
+    int sigma = 0;
+    int bsr_block_dim = 0;
+    double bsr_detect_ms = 0.0;
+    long long model_bytes_low = 0;
+    long long model_bytes_high = 0;
+    double mean_nnz_per_row = 0.0;
+    int max_nnz_per_row = 0;
+    bool power_law = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -866,100 +905,180 @@ Measured bench_gemv(const Options& opt, const ckl::Context& ctx, cudaStream_t st
     return out;
 }
 
-Measured bench_spmv(const Options& opt, const ckl::Context& ctx, cudaStream_t stream) {
-    const int m = opt.m;
-    const int n = opt.n;
-    Measured out;
-    out.entry_point = "free_function";
+// Every SpMV variant name the sweep can ask for, and the ckl::SpmvAlgo it must
+// run. Same table shape as the GEMM roster, and the chosen out-param is checked
+// against the entry afterwards for the same reason.
+struct SpmvVariantEntry {
+    const char* name;
+    ckl::SpmvAlgo algo;
+};
 
-    std::function<void(const int*, const int*, const float*, const float*, float*, int, int, int,
-                       float, float, cudaStream_t)>
-        kf;
-    if (opt.variant == "naive") {
-        kf = ckl::spmv_csr_naive;
-    } else if (opt.variant == "warp") {
-        kf = ckl::spmv_csr_warp;
-    } else if (opt.variant == "baseline_cusparse") {
-        kf = ckl::spmv_cusparse;
-        out.entry_point = "spmv_cusparse";
-    } else {
+const SpmvVariantEntry kSpmvVariants[] = {
+    {"naive", ckl::SpmvAlgo::kCsrNaive},
+    {"warp", ckl::SpmvAlgo::kCsrWarp},
+    {"vector", ckl::SpmvAlgo::kCsrVector},
+    {"merge", ckl::SpmvAlgo::kMerge},
+    {"sell", ckl::SpmvAlgo::kSellCSigma},
+    {"bsr", ckl::SpmvAlgo::kBsr},
+    {"auto", ckl::SpmvAlgo::kAuto},
+    {"baseline_cusparse_default", ckl::SpmvAlgo::kCusparseDefault},
+    {"baseline_cusparse_alg2", ckl::SpmvAlgo::kCusparseAlg2},
+    // The name the schema v2 rows already on file carry. Kept so an old command
+    // line still runs; the sweep asks for the explicit name.
+    {"baseline_cusparse", ckl::SpmvAlgo::kCusparseDefault},
+};
+
+const SpmvVariantEntry* find_spmv_variant(const std::string& name) {
+    for (const SpmvVariantEntry& e : kSpmvVariants) {
+        if (name == e.name) {
+            return &e;
+        }
+    }
+    return nullptr;
+}
+
+Measured bench_spmv(const Options& opt, const ckl::Context& ctx, cudaStream_t stream) {
+    Measured out;
+    out.entry_point = "ckl_spmv";
+
+    const SpmvVariantEntry* entry = find_spmv_variant(opt.variant);
+    if (entry == nullptr) {
         fail_json("variant", "unknown spmv variant " + opt.variant, 3);
     }
-    out.chosen = opt.variant == "baseline_cusparse" ? "cusparse" : opt.variant;
 
-    std::mt19937_64 rng(2024);
-    std::uniform_real_distribution<double> unit(0.0, 1.0);
-    std::uniform_real_distribution<float> val(-1.0f, 1.0f);
-    std::uniform_int_distribution<int> col(0, n - 1);
-    std::vector<int> row_ptr(static_cast<std::size_t>(m) + 1, 0);
-    std::vector<int> col_idx;
-    std::vector<float> values;
-    for (int i = 0; i < m; ++i) {
-        int deg = 8 + static_cast<int>(unit(rng) * 16.0);
-        if (unit(rng) < 0.02) {
-            deg = std::min(n, 400 + static_cast<int>(unit(rng) * 600.0));
-        }
-        deg = std::min(deg, n);
-        std::vector<int> cols;
-        while (static_cast<int>(cols.size()) < deg) {
-            const int c = col(rng);
-            if (std::find(cols.begin(), cols.end(), c) == cols.end()) {
-                cols.push_back(c);
-            }
-        }
-        std::sort(cols.begin(), cols.end());
-        for (int c : cols) {
-            col_idx.push_back(c);
-            values.push_back(val(rng));
-        }
-        row_ptr[static_cast<std::size_t>(i) + 1] = row_ptr[static_cast<std::size_t>(i)] + deg;
+    ckl::bench::HostCsr a;
+    std::string load_error;
+    if (!ckl::bench::load_matrix(opt.matrix, opt.seed, &a, &load_error)) {
+        fail_json("matrix", load_error, 10);
     }
-    const int nnz = row_ptr.back();
+    const int m = a.m;
+    const int n = a.n;
+    const int nnz = a.nnz;
+    out.matrix = a.name;
+    out.rows = m;
+    out.cols = n;
     out.nnz = nnz;
     out.flops = 2.0 * static_cast<double>(nnz);
     out.working_set_bytes =
         static_cast<std::size_t>(nnz) * (sizeof(int) + sizeof(float)) +
-        row_ptr.size() * sizeof(int) +
+        a.row_ptr.size() * sizeof(int) +
         (static_cast<std::size_t>(n) + static_cast<std::size_t>(m)) * sizeof(float);
 
     const auto x = ckl::random_matrix(n, 1, 7);
-    ckl::DeviceBuffer<int> drp(row_ptr.size());
-    ckl::DeviceBuffer<int> dci(col_idx.size());
-    ckl::DeviceBuffer<float> dv(values.size());
+    ckl::DeviceBuffer<int> drp(a.row_ptr.size());
+    ckl::DeviceBuffer<int> dci(a.col_idx.size());
+    ckl::DeviceBuffer<float> dv(a.values.size());
     ckl::DeviceBuffer<float> dx(x.size());
     ckl::DeviceBuffer<float> dy(static_cast<std::size_t>(m));
-    drp.copy_from_host(row_ptr);
-    dci.copy_from_host(col_idx);
+    drp.copy_from_host(a.row_ptr);
+    if (nnz > 0) {
+        dci.copy_from_host(a.col_idx);
+        dv.copy_from_host(a.values);
+    }
     dy.zero();
 
+    // The plan, built once, before anything is timed. It owns the descriptors,
+    // both vendor workspaces, the histogram and the two converted layouts, and
+    // that is the whole of the A2 fix: a timed call enqueues launches only.
+    ckl::SpmvCsr view;
+    view.row_ptr = drp.data();
+    view.col_idx = dci.data();
+    view.values = dv.data();
+    view.m = m;
+    view.n = n;
+    view.nnz = nnz;
+    ckl::SpmvPlan plan(view);
+    out.sell_padding_ratio = plan.sell_padding_ratio();
+    out.sell_nnz_padded = plan.sell_nnz_padded();
+    out.vector_width = plan.vector_width();
+    out.sigma = plan.sigma();
+    out.bsr_block_dim = plan.bsr_block_dim();
+    out.bsr_detect_ms = plan.bsr_detect_ms();
+    out.model_bytes_low = plan.model_bytes_low(false);
+    out.model_bytes_high = plan.model_bytes_high(false);
+    out.mean_nnz_per_row = plan.mean_nnz_per_row();
+    out.max_nnz_per_row = plan.max_nnz_per_row();
+    out.power_law = plan.power_law();
+    out.plan_algo = ckl::spmv_algo_name(plan.query());
+
+    // --- self verification, before a single timed launch ---
     {
         ckl::DeviceBuffer<float> d_scale(static_cast<std::size_t>(m));
         ckl::DeviceBuffer<float> d_oracle(static_cast<std::size_t>(m));
-        dv.copy_from_host(absolute(values));
+
+        // sum_k |a_ik| |x_k|, the magnitude the rounding error is bounded by.
+        // The plan holds pointers into dv and dx rather than copies of them, and
+        // the sparsity pattern is untouched, so swapping the values in and out
+        // is safe. The SELL and BSR copies were taken from the real values at
+        // construction, which is why the oracle call below runs after the
+        // restore rather than before it.
+        if (nnz > 0) {
+            dv.copy_from_host(absolute(a.values));
+        }
         dx.copy_from_host(absolute(x));
-        ckl::spmv_cusparse(drp.data(), dci.data(), dv.data(), dx.data(), d_scale.data(), m, n, nnz,
-                           1.0f, 0.0f, stream);
+        ckl::Status st = ckl::spmv(plan, ckl::SpmvAlgo::kCusparseDefault, 1.0f, dx.data(), 0.0f,
+                                   d_scale.data(), nullptr, stream);
+        if (st != ckl::Status::kSuccess) {
+            fail_json("verify",
+                      std::string("the magnitude reference call failed: ") + ckl::status_string(st),
+                      6);
+        }
         CKL_CUDA_CHECK(cudaStreamSynchronize(stream));
-        dv.copy_from_host(values);
+        if (nnz > 0) {
+            dv.copy_from_host(a.values);
+        }
         dx.copy_from_host(x);
-        ckl::spmv_cusparse(drp.data(), dci.data(), dv.data(), dx.data(), d_oracle.data(), m, n, nnz,
-                           1.0f, 0.0f, stream);
-        kf(drp.data(), dci.data(), dv.data(), dx.data(), dy.data(), m, n, nnz, 1.0f, 0.0f, stream);
+
+        st = ckl::spmv(plan, ckl::SpmvAlgo::kCusparseDefault, 1.0f, dx.data(), 0.0f,
+                       d_oracle.data(), nullptr, stream);
+        if (st != ckl::Status::kSuccess) {
+            fail_json("verify",
+                      std::string("the vendor oracle call failed: ") + ckl::status_string(st), 6);
+        }
+
+        ckl::SpmvAlgo chosen = ckl::SpmvAlgo::kAuto;
+        st = ckl::spmv(plan, entry->algo, 1.0f, dx.data(), 0.0f, dy.data(), &chosen, stream);
+        if (st != ckl::Status::kSuccess) {
+            fail_json("dispatch",
+                      std::string("ckl::spmv returned ") + ckl::status_string(st) + " for algo " +
+                          ckl::spmv_algo_name(entry->algo) + "; " + library_detail(),
+                      7);
+        }
         CKL_CUDA_CHECK(cudaStreamSynchronize(stream));
+
+        const ckl::SpmvAlgo expect = entry->algo == ckl::SpmvAlgo::kAuto ? chosen : entry->algo;
+        if (chosen != expect) {
+            fail_json("dispatch",
+                      std::string("variant ") + opt.variant + " asked for " +
+                          ckl::spmv_algo_name(expect) + " and dispatch reports " +
+                          ckl::spmv_algo_name(chosen) +
+                          "; a benchmark that measures a path its row does not name is a defect",
+                      8);
+        }
+        out.chosen = ckl::spmv_algo_name(chosen);
+
         out.verify = scaled_residual(dy.to_host(), d_oracle.to_host(), d_scale.to_host(),
                                      opt.verify_perturb);
         // The contraction length of an SpMV row is its nonzero count, so the
         // tolerance comes from the longest row rather than from n.
         int longest = 1;
-        for (std::size_t i = 1; i < row_ptr.size(); ++i) {
-            longest = std::max(longest, row_ptr[i] - row_ptr[i - 1]);
+        for (std::size_t i = 1; i < a.row_ptr.size(); ++i) {
+            longest = std::max(longest, a.row_ptr[i] - a.row_ptr[i - 1]);
         }
         out.verify_tol = ckl::tol(longest);
         require_verified(out);
     }
 
-    auto launch = [&drp, &dci, &dv, &dx, &dy, kf, m, n, nnz](cudaStream_t s) {
-        kf(drp.data(), dci.data(), dv.data(), dx.data(), dy.data(), m, n, nnz, 1.0f, 0.0f, s);
+    const ckl::SpmvAlgo run_algo = entry->algo;
+    auto launch = [&plan, &dx, &dy, run_algo](cudaStream_t s) {
+        const ckl::Status st =
+            ckl::spmv(plan, run_algo, 1.0f, dx.data(), 0.0f, dy.data(), nullptr, s);
+        if (st != ckl::Status::kSuccess) {
+            fail_json("launch",
+                      std::string("ckl::spmv returned ") + ckl::status_string(st) +
+                          " inside the timing loop",
+                      5);
+        }
     };
     run_timed(opt, ctx, stream, out, launch, nullptr);
     return out;
@@ -1120,6 +1239,8 @@ Options parse(int argc, char** argv) {
             opt.inner = need_int("--inner", argc, argv, i);
         } else if (arg == "--disallow-reduced-precision-reduction") {
             opt.disallow_reduced_precision = true;
+        } else if (arg == "--seed") {
+            opt.seed = static_cast<std::uint64_t>(need_int("--seed", argc, argv, i));
         } else if (arg == "--verify-perturb") {
             opt.verify_perturb = need_double("--verify-perturb", argc, argv, i);
         } else if (arg == "--probe-autotune") {
@@ -1140,6 +1261,10 @@ Options parse(int argc, char** argv) {
     opt.family = positional[0];
     opt.variant = positional[1];
     opt.dtype = positional[2];
+    // The spmv family names a matrix here. m and n are filled in from the
+    // matrix once it is loaded, so the row's shape is the shape the matrix has
+    // and never a pair of numbers somebody typed next to a name.
+    opt.matrix = positional[3];
     opt.m = std::atoi(positional[3].c_str());
     opt.n = std::atoi(positional[4].c_str());
     opt.k = std::atoi(positional[5].c_str());
@@ -1267,9 +1392,13 @@ int main(int argc, char** argv) {
     row.str("family", opt.family);
     row.str("variant", opt.variant);
     row.str("dtype", opt.dtype);
-    row.integer("m", opt.m);
-    row.integer("n", opt.n);
+    // For spmv the shape comes from the matrix that was loaded, not from the
+    // command line, so a row cannot claim a shape its matrix does not have.
+    const bool sparse = opt.family == "spmv";
+    row.integer("m", sparse ? measured.rows : opt.m);
+    row.integer("n", sparse ? measured.cols : opt.n);
     row.integer("k", opt.k);
+    row.str("matrix", measured.matrix);
     row.num("median_ms", measured.stats.median_ms);
     row.num("iqr_ms", measured.stats.iqr_ms);
     row.num("min_ms", measured.stats.min_ms);
@@ -1290,6 +1419,26 @@ int main(int argc, char** argv) {
     row.str("tile", measured.tile);
     row.integer("splits", measured.splits);
     row.integer("nnz", measured.nnz);
+    if (sparse) {
+        // The SpMV family's claims cannot be read without these. The padding
+        // ratio decides whether a SELL win is a win, the model band is what a
+        // measured dram__bytes.sum gets compared against, and the width, sigma
+        // and block dimension are the plan decisions the row was measured under.
+        row.num("sell_padding_ratio", measured.sell_padding_ratio, 4);
+        row.integer("sell_nnz_padded", measured.sell_nnz_padded);
+        row.integer("vector_width", measured.vector_width);
+        row.integer("sigma", measured.sigma);
+        row.integer("bsr_block_dim", measured.bsr_block_dim);
+        row.num("bsr_detect_ms", measured.bsr_detect_ms, 4);
+        row.integer("model_bytes_low", measured.model_bytes_low);
+        row.integer("model_bytes_high", measured.model_bytes_high);
+        row.num("mean_nnz_per_row", measured.mean_nnz_per_row, 4);
+        row.integer("max_nnz_per_row", measured.max_nnz_per_row);
+        row.boolean("power_law", measured.power_law);
+        // The number of record for percent of roof. Nothing measures it here;
+        // the ncu round does, and until it runs the field says so.
+        row.str("dram_bytes_sum", "pending ncu round");
+    }
     row.boolean("verify_ok", true);
     row.sci("verify_residual", measured.verify.worst);
     row.integer("verify_worst_index", measured.verify.index);

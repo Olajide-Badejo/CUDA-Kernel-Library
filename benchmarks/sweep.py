@@ -39,6 +39,13 @@ rows. v1 printed a warning and carried on.
 One commit per summary. refresh_summary filters the JSONL to a single commit and
 asserts one row per key. v1 mixed commits and the report took the first match.
 
+A matrix suite for SpMV. The family's rows name a matrix from
+experiments/matrix_manifest.csv rather than a pair of dimensions, because merge
+based and warp per row are the same speed on a uniform degree distribution and a
+size list could only ever confirm the winner v1 already had. A matrix that is in
+the manifest but not in the local cache is skipped with an instruction to run
+scripts/fetch_matrices.py; nothing here downloads a matrix mid sweep.
+
 Run it with `make sweep`. --list prints the matrix without running anything,
 --quick runs a representative subset, --force redoes finished work, and
 --refresh-only rebuilds summary.csv from rows that already exist.
@@ -49,6 +56,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import random
 import subprocess
 import sys
@@ -60,6 +68,7 @@ RESULTS = REPO / "experiments" / "results"
 JSONL = RESULTS / "sweep.jsonl"
 SUMMARY = RESULTS / "summary.csv"
 BENCH_ALL = REPO / "build" / "benchmarks" / "bench_all"
+MANIFEST = REPO / "experiments" / "matrix_manifest.csv"
 
 # Version of the row this driver writes. A row without it came from the v1
 # harness: it re-measured its own baseline and kept no samples, so it cannot be
@@ -90,13 +99,18 @@ GRAPH_INNER = 20
 BASELINE_VARIANT = {
     "gemm": "baseline_cublas_default",
     "gemv": "baseline_cublas",
-    "spmv": "baseline_cusparse",
+    "spmv": "baseline_cusparse_default",
     "trsm": "baseline_cublas",
 }
 # Measured alongside the baseline of record and reported next to it. Beating the
 # heuristic pick is a weaker claim than beating the autotuned pick, so both are
-# on the record and every percentage says which one it is against.
-EXTRA_BASELINES = {"gemm": ["baseline_cublas_autotune"]}
+# on the record and every percentage says which one it is against. cuSPARSE's
+# CSR_ALG2 is the same argument: it buys a deterministic reduction order at a
+# cost, and quoting whichever of the two is slower is a weak claim.
+EXTRA_BASELINES = {
+    "gemm": ["baseline_cublas_autotune"],
+    "spmv": ["baseline_cusparse_alg2"],
+}
 
 DTYPE_BYTES = {"fp32": 4, "fp16": 2, "bf16": 2}
 
@@ -105,15 +119,22 @@ GEMM_FP32_SIZES = [512, 1024, 2048, 4096]
 GEMM_TENSOR_SIZES = [1024, 2048, 4096, 8192]
 GEMM_SMALL_SIZES = [128, 256, 512, 768]
 GEMV_SIZES = [1024, 2048, 4096, 8192]
-SPMV_SIZES = [16384, 65536, 131072]
 TRSM_SIZES = [512, 1024, 2048]
+
+# The SpMV family runs over the matrix suite rather than over a size list. One
+# synthetic matrix cannot separate merge based from warp per row, so a size list
+# there would be a sweep that can only confirm the winner v1 already had.
+SPMV_VARIANTS = ["naive", "warp", "vector", "merge", "sell", "bsr"]
+SPMV_QUICK_VARIANTS = ["warp", "merge"]
+SPMV_SYNTHETIC_ROWS = 131072
+SPMV_SYNTHETIC_SEEDS = [1, 2, 3, 4, 5]
 
 
 class Config:
     """One bench_all invocation, minus the process repeat index."""
 
     def __init__(self, family, variant, dtype, shape, flush="auto",
-                 launch_mode="stream", inner=1):
+                 launch_mode="stream", inner=1, matrix="", seed=1):
         self.family = family
         self.variant = variant
         self.dtype = dtype
@@ -121,20 +142,39 @@ class Config:
         self.flush = flush
         self.launch_mode = launch_mode
         self.inner = inner
+        # SpMV names a matrix where the other families give m. The name is the
+        # row's identity and has to resolve in experiments/matrix_manifest.csv.
+        self.matrix = matrix
+        self.seed = seed
 
     @property
     def baseline(self) -> bool:
         return self.variant.startswith("baseline_")
 
+    def matrix_label(self) -> str:
+        """What the row's matrix field will read, seed included for a generator."""
+        if not self.matrix:
+            return ""
+        if self.matrix.startswith("synthetic"):
+            rows = self.matrix.split(":")[1] if ":" in self.matrix else str(SPMV_SYNTHETIC_ROWS)
+            return f"synthetic:{rows}:seed{self.seed}"
+        return self.matrix
+
     def argv(self, bench: Path, commit: str) -> list[str]:
-        return [str(bench), self.family, self.variant, self.dtype,
-                str(self.m), str(self.n), str(self.k), commit,
+        first = self.matrix if self.matrix else str(self.m)
+        argv = [str(bench), self.family, self.variant, self.dtype,
+                first, str(self.n), str(self.k), commit,
                 "--flush-l2", self.flush,
                 "--launch-mode", self.launch_mode,
                 "--inner", str(self.inner)]
+        if self.matrix:
+            argv += ["--seed", str(self.seed)]
+        return argv
 
     def spec(self) -> str:
         """Compact identity, which is what --only matches against."""
+        if self.matrix:
+            return f"{self.family}:{self.variant}:{self.dtype}:{self.matrix_label()}"
         return f"{self.family}:{self.variant}:{self.dtype}:{self.m}x{self.n}x{self.k}"
 
     def label(self) -> str:
@@ -146,8 +186,9 @@ class Config:
         if self.inner != 1:
             extra.append(f"inner={self.inner}")
         tail = (" " + " ".join(extra)) if extra else ""
-        return (f"{self.family:5s} {self.variant:24s} {self.dtype:5s} "
-                f"{self.m}x{self.n}x{self.k}{tail}")
+        shape = self.matrix_label() if self.matrix else f"{self.m}x{self.n}x{self.k}"
+        return (f"{self.family:5s} {self.variant:26s} {self.dtype:5s} "
+                f"{shape}{tail}")
 
     def flush_state(self) -> bool:
         """What bench_all will decide, so the join key can be built here too."""
@@ -159,10 +200,10 @@ class Config:
 
     def key(self) -> tuple:
         return (self.family, self.variant, self.dtype, self.m, self.n, self.k,
-                self.flush_state(), self.launch_mode, self.inner)
+                self.matrix_label(), self.flush_state(), self.launch_mode, self.inner)
 
     def baseline_key(self) -> tuple:
-        return (self.family, self.dtype, self.m, self.n, self.k,
+        return (self.family, self.dtype, self.m, self.n, self.k, self.matrix_label(),
                 self.flush_state(), self.launch_mode, self.inner)
 
 
@@ -182,6 +223,64 @@ def working_set(cfg: Config) -> int:
 
 def cube(sizes):
     return [(s, s, s) for s in sizes]
+
+
+def matrix_cache_dir() -> Path:
+    env = os.environ.get("CKL_MATRIX_CACHE", "").strip()
+    if env:
+        return Path(env).expanduser()
+    return Path.home() / ".cache" / "ckl" / "matrices"
+
+
+def suite_matrices() -> tuple[list[dict], list[str]]:
+    """Manifest rows that are usable here, and the reasons the rest are not.
+
+    A row naming a matrix that is not in the cache is not run and not silently
+    downloaded: pulling 250 MB off the network in the middle of a sweep would
+    put the download inside the measurement, and the matrix that arrived might
+    not be the one the manifest hashes. The caller is told to run
+    fetch_matrices.py instead.
+    """
+    usable: list[dict] = []
+    skipped: list[str] = []
+    if not MANIFEST.exists():
+        return usable, [f"{rel(MANIFEST)} does not exist; run "
+                        f"python3 scripts/fetch_matrices.py"]
+    cache = matrix_cache_dir()
+    with MANIFEST.open(newline="") as f:
+        for row in csv.DictReader(f):
+            name = row["name"]
+            if row.get("status") != "ok":
+                skipped.append(f"{name}: the manifest marks it {row.get('status')} "
+                               f"({row.get('note', '')})")
+                continue
+            if not (cache / f"{name}.csr.bin").exists():
+                skipped.append(f"{name}: the manifest has it but {cache} does not; run "
+                               f"python3 scripts/fetch_matrices.py --only {name}")
+                continue
+            usable.append(row)
+    return usable, skipped
+
+
+def spmv_matrix_configs(variants: list[str], quick: bool) -> list[Config]:
+    """One config per (variant, matrix) over the suite plus the generator."""
+    rows: list[Config] = []
+    matrices, skipped = suite_matrices()
+    for line in skipped:
+        print(f"spmv: skipping {line}", file=sys.stderr)
+    if quick:
+        matrices = matrices[:2]
+    for entry in matrices:
+        shape = (int(entry["rows"]), int(entry["cols"]), 0)
+        for v in variants:
+            rows.append(Config("spmv", v, "fp32", shape, matrix=entry["name"]))
+    seeds = SPMV_SYNTHETIC_SEEDS[:1] if quick else SPMV_SYNTHETIC_SEEDS
+    shape = (SPMV_SYNTHETIC_ROWS, SPMV_SYNTHETIC_ROWS, 0)
+    for seed in seeds:
+        for v in variants:
+            rows.append(Config("spmv", v, "fp32", shape,
+                               matrix=f"synthetic:{SPMV_SYNTHETIC_ROWS}", seed=seed))
+    return rows
 
 
 def variant_matrix(quick: bool) -> list[Config]:
@@ -205,9 +304,8 @@ def variant_matrix(quick: bool) -> list[Config]:
     for v in ["naive", "warp", "vectorized"]:
         for shape in [(s, s, 0) for s in (GEMV_SIZES if not quick else [2048, 4096])]:
             rows.append(Config("gemv", v, "fp32", shape))
-    for v in ["naive", "warp"]:
-        for shape in [(s, s, 0) for s in (SPMV_SIZES if not quick else [65536])]:
-            rows.append(Config("spmv", v, "fp32", shape))
+    rows.extend(spmv_matrix_configs(
+        SPMV_QUICK_VARIANTS if quick else SPMV_VARIANTS, quick))
     for v in ["naive", "blocked"]:
         for shape in [(s, 256, 0) for s in (TRSM_SIZES if not quick else [1024])]:
             rows.append(Config("trsm", v, "fp32", shape))
@@ -229,9 +327,9 @@ def expand_protocol(rows: list[Config]) -> list[Config]:
         resident = cfg.family in ("gemv", "spmv") or working_set(cfg) <= L2_BYTES
         if resident:
             out.append(Config(cfg.family, cfg.variant, cfg.dtype, (cfg.m, cfg.n, cfg.k),
-                              flush="on"))
+                              flush="on", matrix=cfg.matrix, seed=cfg.seed))
             out.append(Config(cfg.family, cfg.variant, cfg.dtype, (cfg.m, cfg.n, cfg.k),
-                              flush="off"))
+                              flush="off", matrix=cfg.matrix, seed=cfg.seed))
         else:
             out.append(cfg)
         if cfg.family == "gemm" and max(cfg.m, cfg.n, cfg.k) <= GRAPH_SHAPE_MAX:
@@ -256,7 +354,8 @@ def with_baselines(rows: list[Config]) -> tuple[list[Config], list[Config]]:
         names = [BASELINE_VARIANT[cfg.family]] + EXTRA_BASELINES.get(cfg.family, [])
         for name in names:
             base = Config(cfg.family, name, cfg.dtype, (cfg.m, cfg.n, cfg.k),
-                          flush=cfg.flush, launch_mode=cfg.launch_mode, inner=cfg.inner)
+                          flush=cfg.flush, launch_mode=cfg.launch_mode, inner=cfg.inner,
+                          matrix=cfg.matrix, seed=cfg.seed)
             if base.key() in seen:
                 continue
             seen.add(base.key())
@@ -478,12 +577,14 @@ def gflops_from(row: dict, ms: float) -> float:
 # ---------------------------------------------------------------------------
 
 SUMMARY_COLUMNS = [
-    "family", "variant", "dtype", "m", "n", "k",
+    "family", "variant", "dtype", "m", "n", "k", "matrix", "nnz",
     "median_ms", "iqr_ms", "min_ms", "reps",
     "ci95_lo_ms", "ci95_hi_ms", "process_reps",
     "gflops", "baseline_variant", "baseline_gflops", "pct_baseline", "baseline_source",
     "l2_flushed", "launch_mode", "inner_launches",
-    "chosen", "entry_point", "tile", "splits", "plan_tuned",
+    "chosen", "entry_point", "plan_algo", "tile", "splits", "plan_tuned",
+    "sell_padding_ratio", "sell_nnz_padded", "vector_width", "sigma", "bsr_block_dim",
+    "model_bytes_low", "model_bytes_high", "dram_bytes_sum", "power_law",
     "verify_residual", "verify_tol",
     "cublas_math_mode", "cublas_gemm_algo",
     "throttled", "median_sm_clock_mhz", "clock_locked", "locked_clock_mhz",
@@ -519,12 +620,14 @@ def is_canonical(row: dict) -> bool:
 # them are answers to different questions and must not collapse onto each other.
 def summary_key(row: dict) -> tuple:
     return (row["family"], row["variant"], row["dtype"], row["m"], row["n"], row["k"],
+            str(row.get("matrix", "")),
             bool(row.get("l2_flushed", False)), row.get("launch_mode", "stream"),
             int(row.get("inner_launches", 1)))
 
 
 def baseline_join_key(row: dict) -> tuple:
     return (row["family"], row["dtype"], row["m"], row["n"], row["k"],
+            str(row.get("matrix", "")),
             bool(row.get("l2_flushed", False)), row.get("launch_mode", "stream"),
             int(row.get("inner_launches", 1)))
 
@@ -636,7 +739,8 @@ def refresh_summary(commit: str, jsonl: Path = JSONL, summary: Path = SUMMARY) -
     # Canonical rows come first inside a shape, so a consumer that looks a row up
     # by (family, variant, dtype, m) and takes the first match gets the row the
     # protocol calls the answer rather than a flush or launch mode study.
-    joined.sort(key=lambda r: (r["family"], r["dtype"], r["variant"], r["m"], r["n"], r["k"],
+    joined.sort(key=lambda r: (r["family"], r["dtype"], r["variant"], str(r.get("matrix", "")),
+                               r["m"], r["n"], r["k"],
                                0 if r["canonical"] else 1,
                                str(r.get("launch_mode", "")), int(r.get("inner_launches", 1)),
                                str(r.get("l2_flushed", ""))))

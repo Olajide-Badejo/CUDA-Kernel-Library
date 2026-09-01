@@ -7,6 +7,7 @@
 
 #include <cstring>
 #include <exception>
+#include <mutex>
 #include <new>
 #include <string>
 
@@ -14,6 +15,7 @@
 
 #include "ckl/context.hpp"
 #include "ckl/gemm.hpp"
+#include "ckl/sparse.hpp"
 #include "ckl/status.hpp"
 #include "ckl/types.hpp"
 #include "ckl/version.hpp"
@@ -33,8 +35,8 @@ thread_local char g_last_error[kLastErrorCapacity] = {0};
 }  // namespace
 
 void set_last_error(const std::string& message) {
-    const std::size_t n = message.size() < kLastErrorCapacity - 1 ? message.size()
-                                                                  : kLastErrorCapacity - 1;
+    const std::size_t n =
+        message.size() < kLastErrorCapacity - 1 ? message.size() : kLastErrorCapacity - 1;
     std::memcpy(g_last_error, message.data(), n);
     g_last_error[n] = '\0';
 }
@@ -113,8 +115,70 @@ ckl_algo_t from_algo(ckl::Algo a) {
     return static_cast<ckl_algo_t>(a);
 }
 
+bool to_spmv_algo(ckl_spmv_algo_t v, ckl::SpmvAlgo* out) {
+    if (v < CKL_SPMV_AUTO || v > CKL_SPMV_CUSPARSE_ALG2) {
+        return false;
+    }
+    *out = static_cast<ckl::SpmvAlgo>(v);
+    return true;
+}
+
+ckl_spmv_algo_t from_spmv_algo(ckl::SpmvAlgo a) {
+    return static_cast<ckl_spmv_algo_t>(a);
+}
+
 ckl::Context* as_context(ckl_handle_t h) {
     return reinterpret_cast<ckl::Context*>(h);
+}
+
+// The C face of the SpMV family has no plan handle: adding one would be a second
+// opaque type in an ABI that has exactly one. So the shim keeps the plan instead,
+// one entry, keyed on the three device buffers and the shape. A repeated call on
+// the same matrix reuses the descriptors, both workspaces and both converted
+// layouts, which is the whole point of ground rule 4; alternating between two
+// matrices rebuilds on every call, and the header says so and points a caller
+// who cares at ckl::SpmvPlan.
+//
+// The cache is released at process exit rather than at destruction time, for the
+// same reason the default Context is: destroying cuSPARSE descriptors after the
+// CUDA runtime has begun tearing down is worse than holding them.
+struct SpmvCacheKey {
+    const int* row_ptr = nullptr;
+    const int* col_idx = nullptr;
+    const float* values = nullptr;
+    int m = 0;
+    int n = 0;
+    int nnz = 0;
+
+    bool operator==(const SpmvCacheKey& o) const {
+        return row_ptr == o.row_ptr && col_idx == o.col_idx && values == o.values && m == o.m &&
+               n == o.n && nnz == o.nnz;
+    }
+};
+
+ckl::SpmvPlan& spmv_plan_cache(const int* row_ptr, const int* col_idx, const float* values, int m,
+                               int n, int nnz) {
+    static std::mutex guard;
+    static ckl::SpmvPlan* cached = nullptr;
+    static SpmvCacheKey cached_key;
+    const SpmvCacheKey key{row_ptr, col_idx, values, m, n, nnz};
+    const std::lock_guard<std::mutex> lock(guard);
+    if (cached == nullptr || !(cached_key == key)) {
+        ckl::SpmvCsr a;
+        a.row_ptr = row_ptr;
+        a.col_idx = col_idx;
+        a.values = values;
+        a.m = m;
+        a.n = n;
+        a.nnz = nnz;
+        // Built before the old one is released, so a failed rebuild leaves the
+        // previous plan usable.
+        auto* fresh = new ckl::SpmvPlan(a);
+        delete cached;
+        cached = fresh;
+        cached_key = key;
+    }
+    return *cached;
 }
 
 // Every entry point ends in this pair. A catch-all that returns kInternal is
@@ -503,6 +567,41 @@ ckl_status_t ckl_gemm_strided_batched_ex(ckl_handle_t h, ckl_layout_t layout, ck
         d.stride_c = stride_c;
         d.batch_count = batch_count;
         return to_c(ckl::gemm(*as_context(h), d, alpha, a, b, beta, c, nullptr));
+    } catch (const ckl::Error& e) {
+        return record(e);
+    } catch (const std::exception& e) {
+        return record(e);
+    } catch (...) {
+        return CKL_STATUS_INTERNAL;
+    }
+}
+
+ckl_status_t ckl_spmv_csr(ckl_handle_t h, int64_t m, int64_t n, int64_t nnz, float alpha,
+                          const int* row_ptr, const int* col_idx, const float* values,
+                          const float* x, float beta, float* y, ckl_spmv_algo_t algo,
+                          ckl_spmv_algo_t* chosen) {
+    ckl::detail::clear_last_error();
+    if (h == nullptr) {
+        return invalid("ckl_spmv_csr: handle is null");
+    }
+    ckl::SpmvAlgo requested = ckl::SpmvAlgo::kAuto;
+    if (!to_spmv_algo(algo, &requested)) {
+        return invalid("ckl_spmv_csr: algo is out of range");
+    }
+    constexpr int64_t kIntMax = 2147483647;
+    if (m < 0 || n < 0 || nnz < 0 || m > kIntMax || n > kIntMax || nnz > kIntMax) {
+        return invalid("ckl_spmv_csr: m, n and nnz must be non negative and inside int range");
+    }
+    try {
+        ckl::SpmvPlan& plan = spmv_plan_cache(row_ptr, col_idx, values, static_cast<int>(m),
+                                              static_cast<int>(n), static_cast<int>(nnz));
+        ckl::SpmvAlgo taken = ckl::SpmvAlgo::kAuto;
+        const ckl_status_t s =
+            to_c(ckl::spmv(plan, requested, alpha, x, beta, y, &taken, as_context(h)->stream()));
+        if (chosen != nullptr) {
+            *chosen = from_spmv_algo(taken);
+        }
+        return s;
     } catch (const ckl::Error& e) {
         return record(e);
     } catch (const std::exception& e) {

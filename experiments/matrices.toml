@@ -1,0 +1,116 @@
+# The SpMV matrix suite.
+#
+# One synthetic matrix cannot separate the SpMV variants: merge based and warp
+# per row are the same speed on a uniform degree distribution, so a suite that
+# only holds a generator can confirm a winner and never find one. These seven
+# come from SuiteSparse and span the four classes the family is tuned for,
+# regular stencil, near diagonal, banded and blocked FEM, irregular circuit, and
+# power law.
+#
+# rows, cols and nnz below are the SuiteSparse index values. They are a claim,
+# not a measurement: scripts/fetch_matrices.py confirms every one of them
+# against the downloaded MatrixMarket file and refuses to write a manifest row
+# that disagrees.
+#
+# Nothing here enters the repository. The archives and the converted binary CSR
+# live under $CKL_MATRIX_CACHE, default ~/.cache/ckl/matrices, and only
+# experiments/matrix_manifest.csv is tracked.
+
+[source]
+# SuiteSparse serves MatrixMarket archives under
+# https://<base>/<group>/<name>.tar.gz
+base_url = "https://suitesparse-collection-website.herokuapp.com/MM"
+mirror_url = "https://sparse.tamu.edu/MM"
+
+[format]
+# The converted file: an 8 byte magic, three int32 (m, n, nnz), then row_ptr
+# (m+1 int32), col_idx (nnz int32), values (nnz float32), all little endian.
+# Columns inside a row are sorted ascending and duplicates are summed, so a
+# kernel that assumes sorted unique columns and one that does not both see the
+# same matrix.
+magic = "CKLCSR01"
+version = 1
+
+[[matrix]]
+name = "parabolic_fem"
+group = "Wissgott"
+klass = "regular stencil"
+rows = 525825
+cols = 525825
+nnz = 3674625
+why = "near uniform 7 nonzeros per row; the case spmv_csr_vector targets"
+
+[[matrix]]
+name = "mc2depi"
+group = "Williams"
+klass = "near diagonal"
+rows = 525825
+cols = 525825
+nnz = 2100225
+why = "exactly 4 nonzeros per row, tight bandwidth, near best case locality"
+
+[[matrix]]
+name = "cant"
+group = "Williams"
+klass = "banded FEM"
+rows = 62451
+cols = 62451
+nnz = 4007383
+why = "about 64 nonzeros per row, narrow band, natural blocks for BSR"
+
+[[matrix]]
+name = "pdb1HYS"
+group = "Williams"
+klass = "blocked"
+rows = 36417
+cols = 36417
+nnz = 4344765
+why = "dense sub blocks; the second BSR case"
+
+[[matrix]]
+name = "scircuit"
+# The spec table lists this one under Williams. SuiteSparse serves it from Hamm,
+# and Williams/scircuit.tar.gz is a 404; the group here is the one that resolves.
+group = "Hamm"
+klass = "irregular circuit"
+rows = 170998
+cols = 170998
+nnz = 958936
+why = "short rows with a long tail, very low work per byte"
+
+[[matrix]]
+name = "webbase-1M"
+group = "Williams"
+klass = "power law web"
+rows = 1000005
+cols = 1000005
+nnz = 3105536
+why = "max row degree about 4700; where merge based must win"
+
+[[matrix]]
+name = "soc-LiveJournal1"
+group = "SNAP"
+klass = "power law social"
+rows = 4847571
+cols = 4847571
+nnz = 68993773
+why = "large power law; exercises the plan at scale"
+# About 1 GB unpacked. Fetch it with --include-large; without that flag the
+# manifest row reads pending and --verify skips it with a warning rather than
+# failing, so a clone that has not paid for the download still passes the gate.
+large = true
+
+# The generator v1 shipped, kept as an eighth case and now driven by seeds 1 to
+# 5 rather than by one hard coded 2024. It needs no download: bench_spmv and
+# bench_all build it in process from these parameters.
+[synthetic]
+name = "synthetic_skewed"
+klass = "skewed"
+rows = 131072
+cols = 131072
+base_degree_min = 8
+base_degree_max = 24
+heavy_fraction = 0.02
+heavy_degree_min = 400
+heavy_degree_max = 1000
+seeds = [1, 2, 3, 4, 5]

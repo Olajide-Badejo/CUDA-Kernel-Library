@@ -111,9 +111,13 @@ if(TARGET ckl_gemv)
     ckl_register_gtest(ckl_test_gemv)
 endif()
 
-if(TARGET ckl_sparse)
+# ckl_api for ckl::spmv, which is the dispatcher; ckl_gemm and ckl_gemv for the
+# symmetric positive definite case, which builds A = B^T B + n I on the device
+# and cross checks the sparse answer against the dense one.
+if(TARGET ckl_sparse AND TARGET ckl_api AND TARGET ckl_gemv)
     add_executable(ckl_test_spmv test_spmv.cpp)
-    target_link_libraries(ckl_test_spmv PRIVATE ckl_sparse ckl_headers ckl_test_support)
+    target_link_libraries(ckl_test_spmv PRIVATE
+        ckl_api ckl_sparse ckl_gemm ckl_gemv ckl_headers ckl_test_support)
     ckl_set_warnings(ckl_test_spmv)
     ckl_register_gtest(ckl_test_spmv)
 endif()

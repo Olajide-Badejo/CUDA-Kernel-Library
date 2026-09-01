@@ -98,6 +98,27 @@ typedef enum {
 } ckl_algo_t;
 
 /**
+ * @brief Every CSR SpMV path plus the two cuSPARSE algorithms.
+ *
+ * The values match ckl::SpmvAlgo one for one and in the same order.
+ * CKL_SPMV_CUSPARSE_DEFAULT is CUSPARSE_SPMV_ALG_DEFAULT and
+ * CKL_SPMV_CUSPARSE_ALG2 is CUSPARSE_SPMV_CSR_ALG2, which buys a deterministic
+ * reduction order at a cost; both are measured on every matrix, so a percentage
+ * always says which one it is against.
+ */
+typedef enum {
+    CKL_SPMV_AUTO = 0,         /**< Let the plan choose and report it through chosen. */
+    CKL_SPMV_CSR_NAIVE,        /**< One thread per row. */
+    CKL_SPMV_CSR_WARP,         /**< One 32 lane warp per row. */
+    CKL_SPMV_CSR_VECTOR,       /**< A lane group of 2 to 32 per row. */
+    CKL_SPMV_MERGE,            /**< Merge path after Merrill and Garland. */
+    CKL_SPMV_SELL_C_SIGMA,     /**< Sliced ELLPACK, C = 32. */
+    CKL_SPMV_BSR,              /**< Block CSR over the detected block dimension. */
+    CKL_SPMV_CUSPARSE_DEFAULT, /**< cusparseSpMV, CUSPARSE_SPMV_ALG_DEFAULT. */
+    CKL_SPMV_CUSPARSE_ALG2     /**< cusparseSpMV, CUSPARSE_SPMV_CSR_ALG2. */
+} ckl_spmv_algo_t;
+
+/**
  * @brief Numeric library version, 10000 * major + 100 * minor + patch.
  * @return 10100 for release 1.1.0.
  */
@@ -353,6 +374,38 @@ CKL_EXPORT ckl_status_t ckl_gemm_strided_batched_ex(
     int64_t stride_a, const void* b, ckl_datatype_t dtb, int64_t ldb, int64_t stride_b,
     const void* beta, void* c, ckl_datatype_t dtc, int64_t ldc, int64_t stride_c,
     int32_t batch_count, ckl_algo_t algo);
+
+/**
+ * @brief Single precision CSR SpMV: y = alpha * (A * x) + beta * y.
+ * @param h Handle supplying the stream; the plan keeps its own cuSPARSE handle.
+ * @param m Rows of A and length of y.
+ * @param n Columns of A and length of x.
+ * @param nnz Number of stored nonzeros.
+ * @param alpha Host scale on the product.
+ * @param row_ptr Device pointer to the CSR row offsets, length m+1.
+ * @param col_idx Device pointer to the CSR column indices, length nnz.
+ * @param values Device pointer to the CSR values, length nnz.
+ * @param x Device pointer to x, length n.
+ * @param beta Host scale on the incoming y; when zero, y is not read.
+ * @param y Device pointer to y, length m, written in place.
+ * @param algo Requested path, or CKL_SPMV_AUTO.
+ * @param chosen Optional out-param receiving the path taken; may be NULL. When
+ *        non-NULL it is written on success and on failure alike.
+ * @return CKL_STATUS_SUCCESS, or the failure status; ckl_last_error carries the detail.
+ * @note An explicitly named algo is never rerouted. Only CKL_SPMV_AUTO chooses,
+ *       and chosen reports where it landed.
+ * @note This entry point keeps a one entry plan cache keyed on the three device
+ *       buffers and the shape, because building a plan per call is exactly the
+ *       defect the plan exists to remove. A repeated call on the same matrix
+ *       reuses the descriptors, both workspaces and both converted layouts. A
+ *       benchmark should build a ckl::SpmvPlan of its own instead: the cache
+ *       holds one matrix, so alternating between two rebuilds on every call.
+ * @note Asynchronous on the handle's stream.
+ */
+CKL_EXPORT ckl_status_t ckl_spmv_csr(ckl_handle_t h, int64_t m, int64_t n, int64_t nnz, float alpha,
+                                     const int* row_ptr, const int* col_idx, const float* values,
+                                     const float* x, float beta, float* y, ckl_spmv_algo_t algo,
+                                     ckl_spmv_algo_t* chosen);
 
 #ifdef __cplusplus
 } /* extern "C" */

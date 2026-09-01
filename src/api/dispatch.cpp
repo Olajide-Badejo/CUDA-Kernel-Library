@@ -54,10 +54,12 @@
 #include <cuda_runtime.h>
 
 #include "ckl/cuda_check.hpp"
+#include "ckl/sparse.hpp"
 #include "ckl/status.hpp"
 #include "ckl/types.hpp"
 
 #include "detail/last_error.hpp"
+#include "sparse/spmv_launch.hpp"
 
 namespace ckl {
 
@@ -1014,6 +1016,70 @@ Status gemm(Context& ctx, const GemmDesc& desc, const void* alpha, const void* a
         return Status::kInternal;
     }
 
+    return Status::kSuccess;
+}
+
+// ---------------------------------------------------------------------------
+// SpMV dispatch
+// ---------------------------------------------------------------------------
+//
+// The same two rules the GEMM dispatcher runs on. *chosen is written whenever it
+// is non-null, on success and on failure alike, so a regression that quietly
+// sends every matrix down one path cannot pass a test. And an explicitly named
+// algorithm is never rerouted: a variant the plan has no state for returns
+// kNotSupported and says which conversion is missing and why, rather than
+// falling back to a CSR kernel and letting a benchmark row claim a path it
+// never ran.
+//
+// The choice kAuto makes is SpmvPlan::query, which reads the plan's histogram.
+// It is provisional and documented as such in docs/sparse.md: power law goes to
+// the merge path, a mean row of 32 or more goes to the warp kernel, and
+// everything else goes to the vector kernel at the width the histogram implies.
+// SELL-C-sigma and BSR are never auto-chosen, because whether they win depends
+// on a padding ratio and a block fill that only a measurement settles, and there
+// is no committed sweep yet.
+
+Status spmv(SpmvPlan& plan, SpmvAlgo algo, float alpha, const float* x, float beta, float* y,
+            SpmvAlgo* chosen, cudaStream_t stream) {
+    detail::clear_last_error();
+
+    SpmvAlgo picked = algo;
+    try {
+        if (algo == SpmvAlgo::kAuto) {
+            picked = plan.query();
+        }
+    } catch (const Error& e) {
+        detail::set_last_error(e.what());
+        return e.status();
+    }
+    if (chosen != nullptr) {
+        *chosen = picked;
+    }
+
+    const SpmvCsr* a = nullptr;
+    try {
+        a = &plan.matrix();
+    } catch (const Error& e) {
+        detail::set_last_error(e.what());
+        return e.status();
+    }
+    if (a->m > 0 && a->n > 0 && a->nnz > 0 && (x == nullptr || y == nullptr)) {
+        detail::set_last_error("spmv: x and y must not be null for a non empty matrix");
+        return Status::kInvalidValue;
+    }
+    if (a->m == 0 || a->n == 0) {
+        return Status::kSuccess;  // no output elements, nothing to write
+    }
+
+    try {
+        detail::spmv_launch(plan, picked, alpha, x, beta, y, stream);
+    } catch (const Error& e) {
+        detail::set_last_error(e.what());
+        return e.status();
+    } catch (const std::exception& e) {
+        detail::set_last_error(e.what());
+        return Status::kInternal;
+    }
     return Status::kSuccess;
 }
 

@@ -32,9 +32,21 @@ if(TARGET ckl_gemv)
     ckl_set_warnings(bench_gemv)
 endif()
 
-if(TARGET ckl_sparse)
+# bench_spmv is the only binary in the tree that links CUPTI. Gate S needs an
+# allocation counter around the timed region, and CUPTI is the only way to see a
+# cudaMalloc issued from inside a vendor call. It is a profiling dependency of
+# one benchmark, never of a library target: nothing under src/ links it.
+if(TARGET ckl_sparse AND TARGET ckl_api)
     add_executable(bench_spmv bench_spmv.cpp)
-    target_link_libraries(bench_spmv PRIVATE ckl_sparse ckl_headers ckl_bench_support)
+    target_link_libraries(bench_spmv PRIVATE
+        ckl_api ckl_sparse ckl_headers ckl_bench_support)
+    if(TARGET CUDA::cupti)
+        target_link_libraries(bench_spmv PRIVATE CUDA::cupti)
+    else()
+        message(FATAL_ERROR
+            "CUDA::cupti was not found in this toolkit. bench_spmv needs it for the Gate S "
+            "allocation counter; a build without it would ship a gate that cannot fail.")
+    endif()
     ckl_set_warnings(bench_spmv)
 endif()
 
