@@ -16,6 +16,7 @@
 #include "ckl/context.hpp"
 #include "ckl/fft.hpp"
 #include "ckl/gemm.hpp"
+#include "ckl/scan.hpp"
 #include "ckl/sparse.hpp"
 #include "ckl/status.hpp"
 #include "ckl/types.hpp"
@@ -152,6 +153,46 @@ ckl_conv_algo_t from_conv_algo(ckl::ConvAlgo a) {
     return static_cast<ckl_conv_algo_t>(a);
 }
 
+bool to_scan_dtype(ckl_scan_dtype_t v, ckl::ScanDType* out) {
+    if (v < CKL_SCAN_F32 || v > CKL_SCAN_I64) {
+        return false;
+    }
+    *out = static_cast<ckl::ScanDType>(v);
+    return true;
+}
+
+bool to_scan_op(ckl_scan_op_t v, ckl::ScanOp* out) {
+    if (v < CKL_SCAN_OP_SUM || v > CKL_SCAN_OP_LAST_NONZERO) {
+        return false;
+    }
+    *out = static_cast<ckl::ScanOp>(v);
+    return true;
+}
+
+bool to_reduce_algo(ckl_reduce_algo_t v, ckl::ReduceAlgo* out) {
+    if (v < CKL_REDUCE_AUTO || v > CKL_REDUCE_CUB) {
+        return false;
+    }
+    *out = static_cast<ckl::ReduceAlgo>(v);
+    return true;
+}
+
+ckl_reduce_algo_t from_reduce_algo(ckl::ReduceAlgo a) {
+    return static_cast<ckl_reduce_algo_t>(a);
+}
+
+bool to_scan_algo(ckl_scan_algo_t v, ckl::ScanAlgo* out) {
+    if (v < CKL_SCAN_AUTO || v > CKL_SCAN_CUB) {
+        return false;
+    }
+    *out = static_cast<ckl::ScanAlgo>(v);
+    return true;
+}
+
+ckl_scan_algo_t from_scan_algo(ckl::ScanAlgo a) {
+    return static_cast<ckl_scan_algo_t>(a);
+}
+
 ckl::Context* as_context(ckl_handle_t h) {
     return reinterpret_cast<ckl::Context*>(h);
 }
@@ -246,6 +287,35 @@ struct ConvCacheKey {
         return n == o.n && m == o.m && filter == o.filter;
     }
 };
+
+// And once more for the reduction and scan family. Building a plan allocates the
+// partials, the level buffers and the tile status array and asks CUB how much
+// temporary storage it wants, so a plan per call would put all of that inside
+// whatever the caller was timing. One plan, keyed on the length and the element
+// type, shared by ckl_reduce and ckl_scan because both run out of the same one.
+struct ScanCacheKey {
+    long long n = 0;
+    ckl::ScanDType dtype = ckl::ScanDType::kF32;
+
+    bool operator==(const ScanCacheKey& o) const { return n == o.n && dtype == o.dtype; }
+};
+
+ckl::ScanPlan& scan_plan_cache(long long n, ckl::ScanDType dtype) {
+    static std::mutex guard;
+    static ckl::ScanPlan* cached = nullptr;
+    static ScanCacheKey cached_key;
+    const ScanCacheKey key{n, dtype};
+    const std::lock_guard<std::mutex> lock(guard);
+    if (cached == nullptr || !(cached_key == key)) {
+        // Built before the old one is released, so a failed rebuild leaves the
+        // previous plan usable.
+        auto* fresh = new ckl::ScanPlan(n, dtype);
+        delete cached;
+        cached = fresh;
+        cached_key = key;
+    }
+    return *cached;
+}
 
 ckl::ConvPlan& conv_plan_cache(int n, const float* filter, int m) {
     static std::mutex guard;
@@ -761,6 +831,76 @@ ckl_status_t ckl_conv_r2r(ckl_handle_t h, int64_t signal_length, const float* si
             to_c(ckl::conv(plan, requested, signal, out, &taken, as_context(h)->stream()));
         if (chosen != nullptr) {
             *chosen = from_conv_algo(taken);
+        }
+        return s;
+    } catch (const ckl::Error& e) {
+        return record(e);
+    } catch (const std::exception& e) {
+        return record(e);
+    } catch (...) {
+        return CKL_STATUS_INTERNAL;
+    }
+}
+
+ckl_status_t ckl_reduce(ckl_handle_t h, int64_t n, ckl_scan_dtype_t dtype, ckl_scan_op_t op,
+                        const void* in, void* out, ckl_reduce_algo_t algo,
+                        ckl_reduce_algo_t* chosen) {
+    ckl::detail::clear_last_error();
+    if (h == nullptr) {
+        return invalid("ckl_reduce: handle is null");
+    }
+    ckl::ScanDType element = ckl::ScanDType::kF32;
+    ckl::ScanOp binary = ckl::ScanOp::kSum;
+    ckl::ReduceAlgo requested = ckl::ReduceAlgo::kAuto;
+    if (!to_scan_dtype(dtype, &element) || !to_scan_op(op, &binary) ||
+        !to_reduce_algo(algo, &requested)) {
+        return invalid("ckl_reduce: an enum argument is out of range");
+    }
+    if (n < 0) {
+        return invalid("ckl_reduce: n must not be negative");
+    }
+    try {
+        ckl::ScanPlan& plan = scan_plan_cache(n, element);
+        ckl::ReduceAlgo taken = ckl::ReduceAlgo::kAuto;
+        const ckl_status_t s =
+            to_c(ckl::reduce(plan, requested, binary, in, out, &taken, as_context(h)->stream()));
+        if (chosen != nullptr) {
+            *chosen = from_reduce_algo(taken);
+        }
+        return s;
+    } catch (const ckl::Error& e) {
+        return record(e);
+    } catch (const std::exception& e) {
+        return record(e);
+    } catch (...) {
+        return CKL_STATUS_INTERNAL;
+    }
+}
+
+ckl_status_t ckl_scan(ckl_handle_t h, int64_t n, ckl_scan_dtype_t dtype, ckl_scan_op_t op,
+                      int exclusive, const void* in, void* out, ckl_scan_algo_t algo,
+                      ckl_scan_algo_t* chosen) {
+    ckl::detail::clear_last_error();
+    if (h == nullptr) {
+        return invalid("ckl_scan: handle is null");
+    }
+    ckl::ScanDType element = ckl::ScanDType::kF32;
+    ckl::ScanOp binary = ckl::ScanOp::kSum;
+    ckl::ScanAlgo requested = ckl::ScanAlgo::kAuto;
+    if (!to_scan_dtype(dtype, &element) || !to_scan_op(op, &binary) ||
+        !to_scan_algo(algo, &requested)) {
+        return invalid("ckl_scan: an enum argument is out of range");
+    }
+    if (n < 0) {
+        return invalid("ckl_scan: n must not be negative");
+    }
+    try {
+        ckl::ScanPlan& plan = scan_plan_cache(n, element);
+        ckl::ScanAlgo taken = ckl::ScanAlgo::kAuto;
+        const ckl_status_t s = to_c(ckl::scan(plan, requested, binary, exclusive != 0, in, out,
+                                              &taken, as_context(h)->stream()));
+        if (chosen != nullptr) {
+            *chosen = from_scan_algo(taken);
         }
         return s;
     } catch (const ckl::Error& e) {

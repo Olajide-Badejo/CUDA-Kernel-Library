@@ -39,6 +39,13 @@ rows. v1 printed a warning and carried on.
 One commit per summary. refresh_summary filters the JSONL to a single commit and
 asserts one row per key. v1 mixed commits and the report took the first match.
 
+A ladder for reduction and scan. The family sweeps a length rather than a shape:
+the three large lengths are the ones Gate R is stated at, the two mid ones are L2
+resident and get the flushed and unflushed pair, and the two small ones are
+shorter than a launch and get the stream and graph pair. CUB is the baseline of
+record for both ladders and every row carries the CUB version it was measured
+against.
+
 A matrix suite for SpMV. The family's rows name a matrix from
 experiments/matrix_manifest.csv rather than a pair of dimensions, because merge
 based and warp per row are the same speed on a uniform degree distribution and a
@@ -102,6 +109,8 @@ BASELINE_VARIANT = {
     "spmv": "baseline_cusparse_default",
     "fft": "baseline_cufft",
     "conv": "baseline_cufft",
+    "reduce": "baseline_cub_reduce",
+    "scan": "baseline_cub_scan",
     "trsm": "baseline_cublas",
 }
 # Measured alongside the baseline of record and reported next to it. Beating the
@@ -152,6 +161,24 @@ CONV_QUICK_VARIANTS = ["fft_fused", "direct_shared"]
 CONV_SIGNAL_SIZES = [1 << 20, 1 << 22]
 CONV_FILTER_SIZES = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
 CONV_QUICK_FILTERS = [64, 1024, 16384]
+
+# The reduction and scan family sweeps a length. The three large lengths are the
+# ones Gate R is stated at; the two mid ones are L2 resident on this 48 MB part
+# and get the flushed and unflushed pair; the two small ones are shorter than a
+# launch and get the stream and graph pair instead. Only the inclusive scan is
+# swept: exclusive is the same kernel with one template parameter flipped, and a
+# row for it would double the matrix without answering a new question.
+REDUCE_VARIANTS = ["atomic", "shared_tree", "shuffle", "vec4", "single_pass",
+                   "two_pass", "deterministic", "kahan"]
+REDUCE_QUICK_VARIANTS = ["vec4", "single_pass"]
+SCAN_VARIANTS = ["hillis_steele", "blelloch", "three_kernel", "reduce_then_scan",
+                 "lookback", "deterministic"]
+SCAN_QUICK_VARIANTS = ["lookback", "reduce_then_scan"]
+SCAN_SIZES = [1 << 12, 1 << 16, 1 << 20, 1 << 22, 1 << 26, 1 << 27, 1 << 28]
+SCAN_QUICK_SIZES = [1 << 20, 1 << 26]
+# At or below this length the kernel is shorter than the launch, so the row gets
+# a graph launched partner and no bandwidth claim is made from either.
+SCAN_GRAPH_MAX_N = 1 << 16
 
 
 class Config:
@@ -220,7 +247,7 @@ class Config:
             return True
         if self.flush == "off":
             return False
-        return (self.family in ("gemv", "spmv", "fft", "conv")
+        return (self.family in ("gemv", "spmv", "fft", "conv", "reduce", "scan")
                 or working_set(self) <= L2_BYTES)
 
     def key(self) -> tuple:
@@ -248,6 +275,11 @@ def working_set(cfg: Config) -> int:
         # The signal, the filter, the output, and the four padded arrays the plan
         # holds. L is at most twice the output length, so this is an upper bound.
         return (cfg.m + cfg.n) * 4 + 4 * 2 * (cfg.m + cfg.n) * 8
+    if cfg.family == "reduce":
+        return cfg.m * 4
+    if cfg.family == "scan":
+        # An input and an output array of m FP32 elements.
+        return 2 * cfg.m * 4
     # SpMV builds its matrix inside bench_all, so the size is not known here.
     # The family is memory bound either way and always gets the flushed pair.
     return 0
@@ -348,6 +380,20 @@ def conv_configs(quick: bool) -> list[Config]:
     return rows
 
 
+def scan_configs(quick: bool) -> list[Config]:
+    """One config per (family, variant, length) over both ladders."""
+    rows: list[Config] = []
+    sizes = SCAN_QUICK_SIZES if quick else SCAN_SIZES
+    reduce_variants = REDUCE_QUICK_VARIANTS if quick else REDUCE_VARIANTS
+    scan_variants = SCAN_QUICK_VARIANTS if quick else SCAN_VARIANTS
+    for n in sizes:
+        for v in reduce_variants:
+            rows.append(Config("reduce", v, "fp32", (n, 0, 0)))
+        for v in scan_variants:
+            rows.append(Config("scan", v, "fp32", (n, 0, 0)))
+    return rows
+
+
 def variant_matrix(quick: bool) -> list[Config]:
     """The kernels under test, before the baselines and the paired rows."""
     rows: list[Config] = []
@@ -373,6 +419,7 @@ def variant_matrix(quick: bool) -> list[Config]:
         SPMV_QUICK_VARIANTS if quick else SPMV_VARIANTS, quick))
     rows.extend(fft_configs(quick))
     rows.extend(conv_configs(quick))
+    rows.extend(scan_configs(quick))
     for v in ["naive", "blocked"]:
         for shape in [(s, 256, 0) for s in (TRSM_SIZES if not quick else [1024])]:
             rows.append(Config("trsm", v, "fp32", shape))
@@ -400,7 +447,9 @@ def expand_protocol(rows: list[Config]) -> list[Config]:
                               flush="off", matrix=cfg.matrix, seed=cfg.seed))
         else:
             out.append(cfg)
-        if cfg.family == "gemm" and max(cfg.m, cfg.n, cfg.k) <= GRAPH_SHAPE_MAX:
+        graph_shape = (cfg.family == "gemm" and max(cfg.m, cfg.n, cfg.k) <= GRAPH_SHAPE_MAX) or (
+            cfg.family in ("reduce", "scan") and cfg.m <= SCAN_GRAPH_MAX_N)
+        if graph_shape:
             flush = "on" if resident else "auto"
             out.append(Config(cfg.family, cfg.variant, cfg.dtype, (cfg.m, cfg.n, cfg.k),
                               flush=flush, launch_mode="stream", inner=GRAPH_INNER))
@@ -654,6 +703,7 @@ SUMMARY_COLUMNS = [
     "sell_padding_ratio", "sell_nnz_padded", "vector_width", "sigma", "bsr_block_dim",
     "model_bytes_low", "model_bytes_high", "dram_bytes_sum", "power_law",
     "model_bytes", "passes", "batch", "transform_length", "effective_gbs",
+    "elements", "exclusive", "cub_version",
     "twiddle_bytes_low", "twiddle_bytes_high",
     "verify_residual", "verify_tol",
     "cublas_math_mode", "cublas_gemm_algo",
@@ -665,7 +715,7 @@ SUMMARY_COLUMNS = [
 
 def auto_flush(row: dict) -> bool:
     """What --flush-l2 auto decides for this row, recomputed from the row itself."""
-    if row.get("family") in ("gemv", "spmv", "fft", "conv"):
+    if row.get("family") in ("gemv", "spmv", "fft", "conv", "reduce", "scan"):
         return True
     return int(row.get("working_set_bytes", 0)) <= L2_BYTES
 
@@ -752,9 +802,31 @@ def attach_baseline(row: dict, baselines: dict[tuple, dict]) -> dict:
     out["baseline_variant"] = base["variant"]
     out["baseline_gflops"] = base["gflops"]
     out["baseline_median_ms"] = base["median_ms"]
-    out["pct_baseline"] = (100.0 * float(row["gflops"]) / float(base["gflops"])
-                           if float(base["gflops"]) > 0 else "")
+    out["pct_baseline"] = percent_of_baseline(row, base)
     return out
+
+
+def percent_of_baseline(row: dict, base: dict):
+    """Baseline over row, from throughput where there is one and from time otherwise.
+
+    The reduction and scan family is memory bound and carries no flop count, so
+    its rows report zero GFLOP/s and effective GB/s instead. Inventing a flop
+    count to fill the percentage column would be worse than reading the ratio off
+    the two medians, which is the same number for a family that does have one.
+    """
+    try:
+        mine = float(row.get("gflops", 0.0))
+        theirs = float(base.get("gflops", 0.0))
+    except (TypeError, ValueError):
+        mine = theirs = 0.0
+    if mine > 0.0 and theirs > 0.0:
+        return 100.0 * mine / theirs
+    try:
+        row_ms = float(row["median_ms"])
+        base_ms = float(base["median_ms"])
+    except (KeyError, TypeError, ValueError):
+        return ""
+    return 100.0 * base_ms / row_ms if row_ms > 0.0 else ""
 
 
 def refresh_summary(commit: str, jsonl: Path = JSONL, summary: Path = SUMMARY) -> int:
@@ -902,8 +974,7 @@ def run_phase(name: str, configs: list[Config], bench: Path, commit: str, args,
                 row["baseline_variant"] = base["variant"]
                 row["baseline_median_ms"] = base["median_ms"]
                 row["baseline_gflops"] = base["gflops"]
-                row["pct_baseline"] = (100.0 * float(row["gflops"]) / float(base["gflops"])
-                                       if float(base["gflops"]) > 0 else 0.0)
+                row["pct_baseline"] = percent_of_baseline(row, base)
         out.write(json.dumps(row) + "\n")
         out.flush()
         measured.append(row)
@@ -912,8 +983,10 @@ def run_phase(name: str, configs: list[Config], bench: Path, commit: str, args,
         eta = elapsed / i * (len(configs) - i)
         pct = row.get("pct_baseline")
         pct_text = f" ({float(pct):.0f}% base)" if isinstance(pct, (int, float)) else ""
+        rate = (f"{row['gflops']:.0f} GFLOP/s" if float(row.get("gflops", 0.0)) > 0.0
+                else f"{float(row.get('effective_gbs', 0.0)):.0f} GB/s")
         print(f"  [{name} {i}/{len(configs)}] {cfg.label()} "
-              f"{row['gflops']:.0f} GFLOP/s{pct_text} eta {eta:.0f}s")
+              f"{rate}{pct_text} eta {eta:.0f}s")
     return failures
 
 

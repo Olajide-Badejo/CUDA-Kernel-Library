@@ -162,6 +162,10 @@ if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/fft/CMakeLists.txt")
     add_subdirectory(src/fft)
 endif()
 
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/scan/CMakeLists.txt")
+    add_subdirectory(src/scan)
+endif()
+
 if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/src/trsm/CMakeLists.txt")
     add_subdirectory(src/trsm)
 endif()
@@ -188,7 +192,7 @@ add_library(ckl INTERFACE)
 add_library(ckl::ckl ALIAS ckl)
 target_link_libraries(ckl INTERFACE
     ckl_headers ckl_core ckl_api
-    ckl_gemm ckl_gemv ckl_sparse ckl_fft ckl_trsm ckl_solver ckl_telemetry)
+    ckl_gemm ckl_gemv ckl_sparse ckl_fft ckl_scan ckl_trsm ckl_solver ckl_telemetry)
 
 # ---------------------------------------------------------------------------
 # Tools, tests, benchmarks, and the later phase hooks

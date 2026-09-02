@@ -73,6 +73,25 @@ if(TARGET ckl_fft AND TARGET ckl_api)
     ckl_set_warnings(bench_conv)
 endif()
 
+# bench_scan arms the same CUPTI allocation counter. The claim ckl::ScanPlan
+# makes is that a timed call enqueues launches and nothing else, and for this
+# family that covers the partials, the level buffers, the tile status array and
+# the CUB temporary storage, all of which a naive implementation would allocate
+# per call.
+if(TARGET ckl_scan AND TARGET ckl_api)
+    if(NOT TARGET CUDA::cupti)
+        message(FATAL_ERROR
+            "CUDA::cupti was not found in this toolkit. bench_scan needs it for the allocation "
+            "counter around its timed regions; a build without it would ship a gate that cannot "
+            "fail.")
+    endif()
+
+    add_executable(bench_scan bench_scan.cpp)
+    target_link_libraries(bench_scan PRIVATE
+        ckl_api ckl_scan ckl_headers ckl_bench_support CUDA::cupti)
+    ckl_set_warnings(bench_scan)
+endif()
+
 # The vendor fused convolution baseline. cufftXtSetCallback needs static linking
 # against libcufft_static and separate device compilation, and libckl links the
 # shared cuFFT, so this is a target of its own that links nothing from libckl.
@@ -94,10 +113,10 @@ endif()
 # the autotuned selection as a named baseline variant, and the library never
 # passes anything but CUBLAS_GEMM_DEFAULT, so that one call is made here.
 if(TARGET ckl_gemm AND TARGET ckl_gemv AND TARGET ckl_sparse AND TARGET ckl_fft
-        AND TARGET ckl_trsm AND TARGET ckl_telemetry AND TARGET ckl_api)
+        AND TARGET ckl_scan AND TARGET ckl_trsm AND TARGET ckl_telemetry AND TARGET ckl_api)
     add_executable(bench_all bench_all.cpp)
     target_link_libraries(bench_all PRIVATE
-        ckl_api ckl_gemm ckl_gemv ckl_sparse ckl_fft ckl_trsm ckl_telemetry ckl_headers
+        ckl_api ckl_gemm ckl_gemv ckl_sparse ckl_fft ckl_scan ckl_trsm ckl_telemetry ckl_headers
         ckl_bench_support CUDA::cublas)
     ckl_set_warnings(bench_all)
 endif()

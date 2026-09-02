@@ -136,6 +136,40 @@ if(TARGET ckl_fft AND TARGET ckl_api)
     ckl_register_gtest(ckl_test_conv)
 endif()
 
+# ckl_api for ckl::reduce and ckl::scan, which are the dispatchers, and ckl_scan
+# for the rungs and the plan they run out of.
+#
+# This suite is registered by hand rather than through ckl_register_gtest,
+# because the 2^28 cases need a label and a timeout of their own. Discovery
+# excludes them, and one extra ctest entry runs the whole Slow subset under the
+# labels "gpu;slow". A run of `ctest -L gpu -LE slow` is then the fast suite and
+# `ctest -L slow` is the large one, and neither measures the other twice.
+if(TARGET ckl_scan AND TARGET ckl_api)
+    add_executable(ckl_test_scan test_scan.cpp)
+    target_link_libraries(ckl_test_scan PRIVATE ckl_api ckl_scan ckl_headers ckl_test_support)
+    ckl_set_warnings(ckl_test_scan)
+    # TEST_FILTER, not EXTRA_ARGS. EXTRA_ARGS is appended to every generated test
+    # command, so a --gtest_filter there lands after the one naming the single
+    # test and, last filter winning, every ctest entry would re-run the whole
+    # suite. That is not a hypothetical: it cost 9.9 seconds per entry and 670
+    # seconds of wall clock before it was caught. TEST_FILTER goes to the
+    # discovery invocation only, which is what excluding a suite from discovery
+    # actually means.
+    gtest_discover_tests(ckl_test_scan
+        TEST_FILTER -ScanSlow.*
+        DISCOVERY_MODE PRE_TEST
+        DISCOVERY_TIMEOUT 120
+        PROPERTIES
+            LABELS "gpu"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 900)
+    add_test(NAME scan_slow COMMAND ckl_test_scan --gtest_filter=ScanSlow.*)
+    set_tests_properties(scan_slow PROPERTIES
+        LABELS "gpu;slow"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 3600)
+endif()
+
 if(TARGET ckl_trsm)
     add_executable(ckl_test_trsm test_trsm.cpp)
     target_link_libraries(ckl_test_trsm PRIVATE ckl_trsm ckl_headers ckl_test_support)

@@ -55,12 +55,14 @@
 
 #include "ckl/cuda_check.hpp"
 #include "ckl/fft.hpp"
+#include "ckl/scan.hpp"
 #include "ckl/sparse.hpp"
 #include "ckl/status.hpp"
 #include "ckl/types.hpp"
 
 #include "detail/last_error.hpp"
 #include "fft/fft_internal.hpp"
+#include "scan/scan_internal.hpp"
 #include "sparse/spmv_launch.hpp"
 
 namespace ckl {
@@ -1264,6 +1266,115 @@ Status conv(ConvPlan& plan, ConvAlgo algo, const float* signal, float* out, Conv
 
     try {
         detail::conv_launch(plan, picked, signal, out, stream);
+    } catch (const Error& e) {
+        detail::set_last_error(e.what());
+        return e.status();
+    } catch (const std::exception& e) {
+        detail::set_last_error(e.what());
+        return Status::kInternal;
+    }
+    return Status::kSuccess;
+}
+
+// ---------------------------------------------------------------------------
+// Reduction and scan dispatch
+// ---------------------------------------------------------------------------
+//
+// The same two rules once more. *chosen is written whenever it is non-null, on
+// success and on failure alike, so a regression that quietly sends every length
+// down one rung cannot pass a test. And an explicitly named rung is never
+// rerouted: a rung the plan refuses returns kNotSupported and says why, through
+// ScanPlan::reduce_refusal or ScanPlan::scan_refusal, which name the operator or
+// the missing CUB storage rather than saying "not supported".
+//
+// The choice kAuto makes has one extra input here that the other families do not
+// have: determinism. When CKL_REDUCE_DETERMINISTIC is set in the environment, or
+// ScanPlanOptions::deterministic was passed, kAuto resolves to the deterministic
+// rungs and chosen says so. That is a mode, not a fallback, and it is visible in
+// exactly the way a fallback would not be. Everything else about the rule is
+// provisional and docs/scan.md says so: there is no committed sweep for this
+// family yet, so kAuto picks the single pass reduction and, above one tile, the
+// decoupled look-back scan, on the traffic model rather than on a measurement.
+
+Status reduce(ScanPlan& plan, ReduceAlgo algo, ScanOp op, const void* in, void* out,
+              ReduceAlgo* chosen, cudaStream_t stream) {
+    detail::clear_last_error();
+
+    ReduceAlgo picked = algo;
+    try {
+        if (algo == ReduceAlgo::kAuto) {
+            picked = plan.query_reduce();
+        }
+    } catch (const Error& e) {
+        detail::set_last_error(e.what());
+        return e.status();
+    }
+    if (chosen != nullptr) {
+        *chosen = picked;
+    }
+
+    long long n = 0;
+    try {
+        n = plan.size();
+    } catch (const Error& e) {
+        detail::set_last_error(e.what());
+        return e.status();
+    }
+    if (out == nullptr) {
+        detail::set_last_error("reduce: the output pointer must not be null");
+        return Status::kInvalidValue;
+    }
+    if (n > 0 && in == nullptr) {
+        detail::set_last_error("reduce: the input pointer must not be null for a non empty plan");
+        return Status::kInvalidValue;
+    }
+
+    try {
+        detail::reduce_launch(plan, picked, op, in, out, stream);
+    } catch (const Error& e) {
+        detail::set_last_error(e.what());
+        return e.status();
+    } catch (const std::exception& e) {
+        detail::set_last_error(e.what());
+        return Status::kInternal;
+    }
+    return Status::kSuccess;
+}
+
+Status scan(ScanPlan& plan, ScanAlgo algo, ScanOp op, bool exclusive, const void* in, void* out,
+            ScanAlgo* chosen, cudaStream_t stream) {
+    detail::clear_last_error();
+
+    ScanAlgo picked = algo;
+    try {
+        if (algo == ScanAlgo::kAuto) {
+            picked = plan.query_scan();
+        }
+    } catch (const Error& e) {
+        detail::set_last_error(e.what());
+        return e.status();
+    }
+    if (chosen != nullptr) {
+        *chosen = picked;
+    }
+
+    long long n = 0;
+    try {
+        n = plan.size();
+    } catch (const Error& e) {
+        detail::set_last_error(e.what());
+        return e.status();
+    }
+    if (n == 0) {
+        return Status::kSuccess;  // no output elements, nothing to write
+    }
+    if (in == nullptr || out == nullptr) {
+        detail::set_last_error("scan: the input and output pointers must not be null");
+        return Status::kInvalidValue;
+    }
+
+    try {
+        detail::scan_launch(plan, picked, op, exclusive, in, out, stream);
     } catch (const Error& e) {
         detail::set_last_error(e.what());
         return e.status();

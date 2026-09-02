@@ -1,0 +1,70 @@
+Determinism artifact for the reduction and scan family
+======================================================
+
+This is not a performance artifact. Every number in it is a property of the
+arithmetic and of nothing else, so it was produced at unlocked clocks and would
+be the same at any clock, on a busy device or an idle one. Nothing here may be
+quoted as a measurement.
+
+What it records is the promise ckl::ReduceAlgo::kDeterministic and
+ckl::ScanAlgo::kDeterministic make: the same input gives the same bits, run
+after run. Both rungs size their grid from the length alone and never from
+cudaOccupancyMaxActiveBlocksPerMultiprocessor, so the element to thread mapping
+and the shape of the combining tree are fixed, and no partial is accumulated
+through an atomic. docs/scan.md carries the reasoning.
+
+The hash is FNV-1a 64 over the raw output bytes. Two runs that agree on it agree
+bit for bit.
+
+How to reproduce
+----------------
+
+    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_CUDA_HOST_COMPILER=g++-14
+    cmake --build build
+    ./build/tests/ckl_test_scan \
+        --gtest_filter=ScanDeterminism.TenConsecutiveRunsAreBitIdenticalAt2To24
+    ./build/tests/ckl_test_scan --gtest_filter=ScanSlow.DeterminismAt2To28
+
+Both cases run the rung ten consecutive times and assert every hash equals the
+first; the value below is that hash.
+
+Environment
+-----------
+
+    device            NVIDIA GeForce RTX 5070, compute capability 12.0, 48 SMs
+    driver            610.62
+    toolkit           CUDA 13.3.73, CUB 3.3.4 (CUB_VERSION 300304)
+    host compiler     g++-14.3.0
+    build             Release, CMAKE_CUDA_ARCHITECTURES=120
+    seed              20250901 (the suite default; --seed moves it)
+    clocks            unlocked, and deliberately so
+
+Results
+-------
+
+N = 2^24 = 16777216, fp32, ScanOp::kSum, random uniform input from seed 20250901,
+ten consecutive runs, all ten identical:
+
+    reduce  kDeterministic   fnv1a64  37530171b3d869d3
+    scan    kDeterministic   fnv1a64  0e8c81f92310a8be
+
+N = 2^28 = 268435456, fp32, ScanOp::kSum, a 1024 element repeating pattern so the
+input needs no gigabyte host array, ten consecutive runs, all ten identical:
+
+    reduce  kDeterministic   fnv1a64  918c829f9b213f47
+
+The 2^28 scan is checked for exactness rather than for a hash, in
+ScanSlow.ScanAt2To28: it scans 2^28 int32 ones through every rung of the ladder
+and asserts every one of the 268435456 outputs equals its index plus one. An
+integer scan has no rounding to be deterministic about, so a hash there would
+record nothing a full exact comparison does not already record.
+
+What would change these hashes
+------------------------------
+
+A different seed, a different length, a different element type, or a change to
+the deterministic rungs themselves: the block size, the fixed block count, the
+grid stride mapping, or the shape of the halving tree. A different GPU, a
+different driver, a different clock or a busier machine would not, and that is
+the whole point of the mode.

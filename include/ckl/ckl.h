@@ -160,6 +160,70 @@ typedef enum {
 } ckl_conv_algo_t;
 
 /**
+ * @brief Element type a reduction or scan works on.
+ *
+ * The values match ckl::ScanDType one for one and in the same order. FP32
+ * carries every operator; the other three carry CKL_SCAN_OP_SUM, and anything
+ * else returns CKL_STATUS_NOT_SUPPORTED with the reason in ckl_last_error.
+ */
+typedef enum {
+    CKL_SCAN_F32 = 0, /**< 32 bit float. */
+    CKL_SCAN_F64 = 1, /**< 64 bit float. */
+    CKL_SCAN_I32 = 2, /**< 32 bit signed integer. */
+    CKL_SCAN_I64 = 3  /**< 64 bit signed integer. */
+} ckl_scan_dtype_t;
+
+/**
+ * @brief The binary operator a reduction or scan combines with.
+ *
+ * The values match ckl::ScanOp one for one and in the same order.
+ * CKL_SCAN_OP_LAST_NONZERO is associative and not commutative: `a op b` is `b`
+ * unless `b` is zero, in which case it is `a`. It runs on every rung of the scan
+ * ladder and on no rung of the reduction ladder, which returns
+ * CKL_STATUS_NOT_SUPPORTED and says why.
+ */
+typedef enum {
+    CKL_SCAN_OP_SUM = 0,         /**< Addition; identity zero. */
+    CKL_SCAN_OP_MAX = 1,         /**< Maximum. */
+    CKL_SCAN_OP_MIN = 2,         /**< Minimum. */
+    CKL_SCAN_OP_LAST_NONZERO = 3 /**< The right operand unless it is zero. */
+} ckl_scan_op_t;
+
+/**
+ * @brief Every rung of the reduction ladder plus the CUB baseline.
+ *
+ * The values match ckl::ReduceAlgo one for one and in the same order.
+ */
+typedef enum {
+    CKL_REDUCE_AUTO = 0,      /**< Let the plan choose and report it through chosen. */
+    CKL_REDUCE_ATOMIC,        /**< One atomic per element onto one global accumulator. */
+    CKL_REDUCE_SHARED_TREE,   /**< Shared memory tree per block. */
+    CKL_REDUCE_SHUFFLE,       /**< Warp shuffle, one atomic per block. */
+    CKL_REDUCE_VEC4,          /**< 16 byte loads over persistent blocks. */
+    CKL_REDUCE_SINGLE_PASS,   /**< One launch; the last block combines the partials. */
+    CKL_REDUCE_TWO_PASS,      /**< The same partials, combined by a second launch. */
+    CKL_REDUCE_DETERMINISTIC, /**< Fixed tree, fixed block count, no atomic accumulation. */
+    CKL_REDUCE_KAHAN,         /**< Compensated summation; sum only. */
+    CKL_REDUCE_CUB            /**< cub::DeviceReduce, the baseline. */
+} ckl_reduce_algo_t;
+
+/**
+ * @brief Every rung of the scan ladder plus the CUB baseline.
+ *
+ * The values match ckl::ScanAlgo one for one and in the same order.
+ */
+typedef enum {
+    CKL_SCAN_AUTO = 0,         /**< Let the plan choose and report it through chosen. */
+    CKL_SCAN_HILLIS_STEELE,    /**< Hillis-Steele block scan, one item per thread. */
+    CKL_SCAN_BLELLOCH,         /**< Work efficient upsweep and downsweep. */
+    CKL_SCAN_THREE_KERNEL,     /**< Scan then propagate, about four passes. */
+    CKL_SCAN_REDUCE_THEN_SCAN, /**< Reduce then scan, about three passes. */
+    CKL_SCAN_LOOKBACK,         /**< Single pass decoupled look-back, about two passes. */
+    CKL_SCAN_DETERMINISTIC,    /**< Fixed tree and fixed geometry; bit identical across runs. */
+    CKL_SCAN_CUB               /**< cub::DeviceScan, the baseline. */
+} ckl_scan_algo_t;
+
+/**
  * @brief Numeric library version, 10000 * major + 100 * minor + patch.
  * @return 10100 for release 1.1.0.
  */
@@ -497,6 +561,57 @@ CKL_EXPORT ckl_status_t ckl_fft_c2c(ckl_handle_t h, int64_t n, int64_t batch, co
 CKL_EXPORT ckl_status_t ckl_conv_r2r(ckl_handle_t h, int64_t signal_length, const float* signal,
                                      int64_t filter_length, const float* filter, float* out,
                                      ckl_conv_algo_t algo, ckl_conv_algo_t* chosen);
+
+/**
+ * @brief Device wide reduction of n elements to one.
+ * @param h Handle supplying the stream; the plan keeps its own workspace.
+ * @param n Number of elements; zero writes the operator's identity and succeeds.
+ * @param dtype Element type of in and out.
+ * @param op Binary operator to combine with.
+ * @param in Device pointer to n elements.
+ * @param out Device pointer to one element.
+ * @param algo Requested rung, or CKL_REDUCE_AUTO.
+ * @param chosen Optional out-param receiving the rung taken; may be NULL. When
+ *        non-NULL it is written on success and on failure alike.
+ * @return CKL_STATUS_SUCCESS, or the failure status; ckl_last_error carries the detail.
+ * @note An explicitly named algo is never rerouted. Only CKL_REDUCE_AUTO
+ *       chooses, and chosen reports where it landed. Setting
+ *       CKL_REDUCE_DETERMINISTIC in the environment makes it choose the
+ *       deterministic rung, which chosen then reports.
+ * @note This entry point keeps a one entry plan cache keyed on the length and
+ *       the element type, because building a plan per call would put the
+ *       workspace allocation and the CUB storage query inside whatever the
+ *       caller was timing. A benchmark should build a ckl::ScanPlan of its own:
+ *       the cache holds one plan, so alternating between two lengths rebuilds on
+ *       every call.
+ * @note Asynchronous on the handle's stream.
+ */
+CKL_EXPORT ckl_status_t ckl_reduce(ckl_handle_t h, int64_t n, ckl_scan_dtype_t dtype,
+                                   ckl_scan_op_t op, const void* in, void* out,
+                                   ckl_reduce_algo_t algo, ckl_reduce_algo_t* chosen);
+
+/**
+ * @brief Device wide prefix scan of n elements.
+ * @param h Handle supplying the stream; the plan keeps its own workspace.
+ * @param n Number of elements; zero succeeds and writes nothing.
+ * @param dtype Element type of in and out.
+ * @param op Binary operator to combine with.
+ * @param exclusive Non zero for an exclusive scan, zero for an inclusive one.
+ * @param in Device pointer to n elements.
+ * @param out Device pointer to n elements; it may equal in, and every rung runs
+ *        in place when it does.
+ * @param algo Requested rung, or CKL_SCAN_AUTO.
+ * @param chosen Optional out-param receiving the rung taken; may be NULL. When
+ *        non-NULL it is written on success and on failure alike.
+ * @return CKL_STATUS_SUCCESS, or the failure status; ckl_last_error carries the detail.
+ * @note An explicitly named algo is never rerouted. Only CKL_SCAN_AUTO chooses,
+ *       and chosen reports where it landed.
+ * @note The same one entry plan cache as ckl_reduce, and for the same reason.
+ * @note Asynchronous on the handle's stream.
+ */
+CKL_EXPORT ckl_status_t ckl_scan(ckl_handle_t h, int64_t n, ckl_scan_dtype_t dtype,
+                                 ckl_scan_op_t op, int exclusive, const void* in, void* out,
+                                 ckl_scan_algo_t algo, ckl_scan_algo_t* chosen);
 
 #ifdef __cplusplus
 } /* extern "C" */

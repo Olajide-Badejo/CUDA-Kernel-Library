@@ -44,6 +44,7 @@
 // has not been populated.
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -68,6 +69,7 @@
 #include "matrix_cache.hpp"
 #include "ckl/nvml_monitor.hpp"
 #include "reference.hpp"
+#include "ckl/scan.hpp"
 #include "ckl/sparse.hpp"
 #include "ckl/trsm.hpp"
 #include "ckl/types.hpp"
@@ -434,7 +436,8 @@ bool decide_flush(const Options& opt, std::size_t working_set, std::size_t l2) {
         return false;
     }
     return opt.family == "gemv" || opt.family == "spmv" || opt.family == "fft" ||
-           opt.family == "conv" || working_set <= l2;
+           opt.family == "conv" || opt.family == "reduce" || opt.family == "scan" ||
+           working_set <= l2;
 }
 
 void run_timed(const Options& opt, const ckl::Context& ctx, cudaStream_t stream, Measured& out,
@@ -1383,6 +1386,276 @@ Measured bench_conv(const Options& opt, const ckl::Context& ctx, cudaStream_t st
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// Reduction and scan
+// ---------------------------------------------------------------------------
+//
+// Two families out of one plan, and the same chosen assertion the tuned families
+// carry. The oracle is a double precision host sum rather than a vendor call:
+// CUB is the baseline of record here, and using the baseline as the oracle would
+// make a rung that agreed with CUB by being CUB indistinguishable from a rung
+// that was right.
+//
+// The tolerance is the shape derived one from ckl::scan_tolerance, except for the
+// two rungs that finish through a single global atomic, whose last combine is a
+// serial accumulation and whose error therefore grows with the length of that
+// chain rather than with its square root. tests/test_scan.cpp derives both, and
+// this file uses the same two constants so a benchmark cannot pass a residual
+// the test suite would fail.
+
+struct ReduceVariantEntry {
+    const char* name;
+    ckl::ReduceAlgo algo;
+};
+
+const ReduceVariantEntry kReduceVariants[] = {
+    {"atomic", ckl::ReduceAlgo::kAtomic},
+    {"shared_tree", ckl::ReduceAlgo::kSharedTree},
+    {"shuffle", ckl::ReduceAlgo::kShuffle},
+    {"vec4", ckl::ReduceAlgo::kVec4},
+    {"single_pass", ckl::ReduceAlgo::kSinglePass},
+    {"two_pass", ckl::ReduceAlgo::kTwoPass},
+    {"deterministic", ckl::ReduceAlgo::kDeterministic},
+    {"kahan", ckl::ReduceAlgo::kKahan},
+    {"auto", ckl::ReduceAlgo::kAuto},
+    {"baseline_cub_reduce", ckl::ReduceAlgo::kCub},
+};
+
+struct ScanVariantEntry {
+    const char* name;
+    ckl::ScanAlgo algo;
+};
+
+const ScanVariantEntry kScanVariants[] = {
+    {"hillis_steele", ckl::ScanAlgo::kHillisSteele},
+    {"blelloch", ckl::ScanAlgo::kBlelloch},
+    {"three_kernel", ckl::ScanAlgo::kThreeKernel},
+    {"reduce_then_scan", ckl::ScanAlgo::kReduceThenScan},
+    {"lookback", ckl::ScanAlgo::kLookback},
+    {"deterministic", ckl::ScanAlgo::kDeterministic},
+    {"auto", ckl::ScanAlgo::kAuto},
+    {"baseline_cub_scan", ckl::ScanAlgo::kCub},
+};
+
+// The serial error model's constant, and which rungs it applies to. Both match
+// tests/test_scan.cpp; docs/scan.md carries the calibration.
+constexpr double kScanSerialToleranceC = 16.0;
+
+long long reduce_serial_chain(ckl::ReduceAlgo algo, long long n) {
+    switch (algo) {
+        case ckl::ReduceAlgo::kAtomic:
+            return n;
+        case ckl::ReduceAlgo::kShuffle:
+            return (n + 255) / 256;
+        default:
+            return 0;
+    }
+}
+
+double reduce_tolerance_for(ckl::ReduceAlgo algo, long long n) {
+    const long long chain = reduce_serial_chain(algo, n);
+    if (chain > 0) {
+        return kScanSerialToleranceC * static_cast<double>(chain) *
+               static_cast<double>(FLT_EPSILON);
+    }
+    return ckl::scan_tolerance(n);
+}
+
+Measured bench_reduce(const Options& opt, const ckl::Context& ctx, cudaStream_t stream) {
+    Measured out;
+    out.entry_point = "ckl_reduce";
+
+    const long long n = opt.m;
+    const ReduceVariantEntry* entry = nullptr;
+    for (const ReduceVariantEntry& e : kReduceVariants) {
+        if (opt.variant == e.name) {
+            entry = &e;
+        }
+    }
+    if (entry == nullptr) {
+        fail_json("variant", "unknown reduce variant " + opt.variant, 3);
+    }
+    if (n <= 0) {
+        fail_json("shape", "the reduce family takes the element count in m", 3);
+    }
+
+    ckl::ScanPlan plan(n);
+    const ckl::ReduceAlgo resolved =
+        entry->algo == ckl::ReduceAlgo::kAuto ? plan.query_reduce() : entry->algo;
+    if (!plan.supports_reduce(resolved, ckl::ScanOp::kSum)) {
+        fail_json("variant",
+                  std::string("this plan refuses ") + ckl::reduce_algo_name(resolved) + ": " +
+                      plan.reduce_refusal(resolved, ckl::ScanOp::kSum),
+                  3);
+    }
+
+    out.plan_algo = ckl::reduce_algo_name(plan.query_reduce());
+    out.declared_model_bytes = plan.reduce_model_bytes(resolved);
+    out.working_set_bytes = static_cast<std::size_t>(n) * sizeof(float);
+    out.transform_length = static_cast<int>(std::min<long long>(n, 2147483647));
+
+    const std::vector<float> host = ckl::random_matrix(static_cast<int>(n), 1, opt.seed);
+    ckl::DeviceBuffer<float> in(host.size());
+    in.copy_from_host(host);
+    ckl::DeviceBuffer<float> single(1);
+    single.zero();
+
+    {
+        double reference = 0.0;
+        double scale = 0.0;
+        for (float x : host) {
+            reference += static_cast<double>(x);
+            scale = std::max(scale, std::fabs(static_cast<double>(x)));
+        }
+        if (scale <= 0.0) {
+            scale = 1.0;
+        }
+        ckl::ReduceAlgo chosen = ckl::ReduceAlgo::kAuto;
+        const ckl::Status st = ckl::reduce(plan, entry->algo, ckl::ScanOp::kSum, in.data(),
+                                           single.data(), &chosen, stream);
+        if (st != ckl::Status::kSuccess) {
+            fail_json("dispatch",
+                      std::string("ckl::reduce returned ") + ckl::status_string(st) + " for algo " +
+                          ckl::reduce_algo_name(entry->algo) + "; " + library_detail(),
+                      7);
+        }
+        CKL_CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (chosen != resolved) {
+            fail_json("dispatch",
+                      std::string("variant ") + opt.variant + " asked for " +
+                          ckl::reduce_algo_name(resolved) + " and dispatch reports " +
+                          ckl::reduce_algo_name(chosen) +
+                          "; a benchmark that measures a path its row does not name is a defect",
+                      8);
+        }
+        out.chosen = ckl::reduce_algo_name(chosen);
+        // One output element, so the residual is built directly rather than
+        // through scaled_residual, which is written for a vector.
+        const double got = static_cast<double>(single.to_host()[0]);
+        out.verify.worst = std::fabs(got - reference * opt.verify_perturb) / scale;
+        out.verify.index = 0;
+        out.verify.got = got;
+        out.verify.oracle = reference;
+        out.verify.scale = scale;
+        out.verify_tol = reduce_tolerance_for(resolved, n);
+        require_verified(out);
+    }
+
+    const ckl::ReduceAlgo run_algo = entry->algo;
+    auto launch = [&plan, &in, &single, run_algo](cudaStream_t s) {
+        const ckl::Status st =
+            ckl::reduce(plan, run_algo, ckl::ScanOp::kSum, in.data(), single.data(), nullptr, s);
+        if (st != ckl::Status::kSuccess) {
+            fail_json("launch",
+                      std::string("ckl::reduce returned ") + ckl::status_string(st) +
+                          " inside the timing loop",
+                      5);
+        }
+    };
+    run_timed(opt, ctx, stream, out, launch, nullptr);
+    return out;
+}
+
+Measured bench_scan(const Options& opt, const ckl::Context& ctx, cudaStream_t stream) {
+    Measured out;
+    out.entry_point = "ckl_scan";
+
+    const long long n = opt.m;
+    const ScanVariantEntry* entry = nullptr;
+    for (const ScanVariantEntry& e : kScanVariants) {
+        if (opt.variant == e.name) {
+            entry = &e;
+        }
+    }
+    if (entry == nullptr) {
+        fail_json("variant", "unknown scan variant " + opt.variant, 3);
+    }
+    if (n <= 0) {
+        fail_json("shape", "the scan family takes the element count in m", 3);
+    }
+    // n in the k position selects the exclusive scan, so a sweep can carry both
+    // without a flag the row would not record.
+    const bool exclusive = opt.k != 0;
+
+    ckl::ScanPlan plan(n);
+    const ckl::ScanAlgo resolved =
+        entry->algo == ckl::ScanAlgo::kAuto ? plan.query_scan() : entry->algo;
+    if (!plan.supports_scan(resolved, ckl::ScanOp::kSum)) {
+        fail_json("variant",
+                  std::string("this plan refuses ") + ckl::scan_algo_name(resolved) + ": " +
+                      plan.scan_refusal(resolved, ckl::ScanOp::kSum),
+                  3);
+    }
+
+    out.plan_algo = ckl::scan_algo_name(plan.query_scan());
+    out.declared_model_bytes = plan.scan_model_bytes(resolved);
+    out.working_set_bytes = 2 * static_cast<std::size_t>(n) * sizeof(float);
+    out.transform_length = static_cast<int>(std::min<long long>(n, 2147483647));
+
+    const std::vector<float> host = ckl::random_matrix(static_cast<int>(n), 1, opt.seed);
+    ckl::DeviceBuffer<float> in(host.size());
+    in.copy_from_host(host);
+    ckl::DeviceBuffer<float> dst(host.size());
+    dst.zero();
+
+    {
+        std::vector<float> reference(host.size());
+        double running = 0.0;
+        double scale = 0.0;
+        for (std::size_t i = 0; i < host.size(); ++i) {
+            if (exclusive) {
+                reference[i] = static_cast<float>(running);
+                running += static_cast<double>(host[i]);
+            } else {
+                running += static_cast<double>(host[i]);
+                reference[i] = static_cast<float>(running);
+            }
+            scale = std::max(scale, std::fabs(static_cast<double>(host[i])));
+        }
+        if (scale <= 0.0) {
+            scale = 1.0;
+        }
+        ckl::ScanAlgo chosen = ckl::ScanAlgo::kAuto;
+        const ckl::Status st = ckl::scan(plan, entry->algo, ckl::ScanOp::kSum, exclusive, in.data(),
+                                         dst.data(), &chosen, stream);
+        if (st != ckl::Status::kSuccess) {
+            fail_json("dispatch",
+                      std::string("ckl::scan returned ") + ckl::status_string(st) + " for algo " +
+                          ckl::scan_algo_name(entry->algo) + "; " + library_detail(),
+                      7);
+        }
+        CKL_CUDA_CHECK(cudaStreamSynchronize(stream));
+        if (chosen != resolved) {
+            fail_json("dispatch",
+                      std::string("variant ") + opt.variant + " asked for " +
+                          ckl::scan_algo_name(resolved) + " and dispatch reports " +
+                          ckl::scan_algo_name(chosen) +
+                          "; a benchmark that measures a path its row does not name is a defect",
+                      8);
+        }
+        out.chosen = ckl::scan_algo_name(chosen);
+        out.verify =
+            scaled_residual(dst.to_host(), reference,
+                            filled(host.size(), static_cast<float>(scale)), opt.verify_perturb);
+        out.verify_tol = ckl::scan_tolerance(n);
+        require_verified(out);
+    }
+
+    const ckl::ScanAlgo run_algo = entry->algo;
+    auto launch = [&plan, &in, &dst, run_algo, exclusive](cudaStream_t s) {
+        const ckl::Status st = ckl::scan(plan, run_algo, ckl::ScanOp::kSum, exclusive, in.data(),
+                                         dst.data(), nullptr, s);
+        if (st != ckl::Status::kSuccess) {
+            fail_json("launch",
+                      std::string("ckl::scan returned ") + ckl::status_string(st) +
+                          " inside the timing loop",
+                      5);
+        }
+    };
+    run_timed(opt, ctx, stream, out, launch, nullptr);
+    return out;
+}
+
 Measured bench_trsm(const Options& opt, ckl::Context& ctx, cudaStream_t stream) {
     const int m = opt.m;
     const int n = opt.n;
@@ -1678,6 +1951,10 @@ int main(int argc, char** argv) {
         measured = bench_fft(opt, ctx, stream);
     } else if (opt.family == "conv") {
         measured = bench_conv(opt, ctx, stream);
+    } else if (opt.family == "reduce") {
+        measured = bench_reduce(opt, ctx, stream);
+    } else if (opt.family == "scan") {
+        measured = bench_scan(opt, ctx, stream);
     } else if (opt.family == "trsm") {
         measured = bench_trsm(opt, ctx, stream);
     } else {
@@ -1740,6 +2017,22 @@ int main(int argc, char** argv) {
         row.boolean("power_law", measured.power_law);
         // The number of record for percent of roof. Nothing measures it here;
         // the ncu round does, and until it runs the field says so.
+        row.str("dram_bytes_sum", "pending ncu round");
+    }
+    if (opt.family == "reduce" || opt.family == "scan") {
+        // The declared model is the denominator of every effective GB/s this
+        // family quotes, and the number a measured dram__bytes.sum is checked
+        // against. A row without it could not be checked at all.
+        row.integer("model_bytes", measured.declared_model_bytes);
+        row.integer("elements", measured.transform_length);
+        row.boolean("exclusive", opt.k != 0);
+        row.integer("cub_version", ckl::ScanPlan::cub_version());
+        row.num("effective_gbs",
+                measured.stats.median_ms > 0.0
+                    ? static_cast<double>(measured.declared_model_bytes) /
+                          (measured.stats.median_ms / 1000.0) / 1.0e9
+                    : 0.0,
+                3);
         row.str("dram_bytes_sum", "pending ncu round");
     }
     if (opt.family == "fft" || opt.family == "conv") {

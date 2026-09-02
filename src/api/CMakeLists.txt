@@ -30,13 +30,13 @@ add_library(ckl_api
 # ckl::Context by reference, so a consumer of ckl_api constructs one itself.
 target_link_libraries(ckl_api
     PUBLIC ckl_headers ckl_core
-    PRIVATE ckl_gemm ckl_gemv ckl_sparse ckl_fft ckl_trsm CUDA::cublas
+    PRIVATE ckl_gemm ckl_gemv ckl_sparse ckl_fft ckl_scan ckl_trsm CUDA::cublas
 )
 
-# src/ is on the private include path for two headers: sparse/spmv_launch.hpp and
-# fft/fft_internal.hpp, which declare how the SpMV and FFT dispatchers reach into
-# a plan built in another library. Neither is installed and no public header
-# includes either.
+# src/ is on the private include path for three headers: sparse/spmv_launch.hpp,
+# fft/fft_internal.hpp and scan/scan_internal.hpp, which declare how the SpMV,
+# FFT and scan dispatchers reach into a plan built in another library. None is
+# installed and no public header includes any of them.
 target_include_directories(ckl_api PRIVATE "${PROJECT_SOURCE_DIR}/src")
 
 ckl_configure_library(ckl_api api)
