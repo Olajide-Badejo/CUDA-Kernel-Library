@@ -72,6 +72,11 @@ enum class TVariant {
     kTile5,
     kSplitK,
     kStreamK,
+    // The reference line. It is not in all_tvariants because it refuses shapes
+    // whose n or k is not a multiple of 8, and the suites below run 1x1x1 and
+    // 65x33x17 at every variant they are given. It gets the same three error
+    // measurements over the shapes it does take, in a suite of its own.
+    kCutlass,
 };
 
 // Family index of a tile variant, or -1 for the rungs that are not one.
@@ -131,6 +136,8 @@ const char* tvariant_name(TVariant v) {
             return "split_k";
         case TVariant::kStreamK:
             return "stream_k";
+        case TVariant::kCutlass:
+            return "cutlass";
     }
     return "unknown";
 }
@@ -189,6 +196,9 @@ void launch_kernel(TVariant v, const std::uint16_t* a, const std::uint16_t* b, f
             return;
         case TVariant::kStreamK:
             ckl::gemm_stream_k(ha, hb, c, m, n, k, alpha, beta, 0, nullptr, 0, stream);
+            return;
+        case TVariant::kCutlass:
+            ckl::gemm_cutlass(ha, hb, c, m, n, k, alpha, beta, stream);
             return;
         default:
             ckl::gemm_tile_family(ha, hb, c, m, n, k, alpha, beta, tile_index_of(v), stream);
@@ -587,6 +597,179 @@ TEST_P(TensorVariant, ZeroKAppliesBetaOnly) {
 
 INSTANTIATE_TEST_SUITE_P(Tensor, TensorVariant, ::testing::ValuesIn(all_tvariants()),
                          tvariant_param_name);
+
+// ---------------------------------------------------------------------------
+// The CUTLASS reference line
+// ---------------------------------------------------------------------------
+//
+// Same gates as the hand written rungs (1e-5 against the same precision cuBLAS
+// oracle, tol(k) against a double precision reference over the rounded inputs,
+// a storage roundoff bound against the original FP32 data), over the shapes the
+// rung accepts. It refuses everything else instead of rerouting, and the last
+// test here is what holds it to that.
+
+const std::vector<Shape>& cutlass_shapes() {
+    static const std::vector<Shape> shapes = {
+        {128, 128, 128, "square_aligned"},   {256, 128, 64, "non_square_aligned"},
+        {129, 256, 192, "m_predicated"},     {127, 128, 128, "m_below_one_tile"},
+        {7, 8, 8, "smaller_than_one_tile"},  {1, 8, 16, "single_row"},
+        {256, 128, 320, "non_square_large"},
+    };
+    return shapes;
+}
+
+class CutlassShape : public GpuTestWithParam<Shape> {};
+
+TEST_P(CutlassShape, MatchesOracleAndReference) {
+    expect_tensor_matches(TVariant::kCutlass, GetParam(), 1.0f, 0.0f, 2101);
+}
+
+std::string cutlass_shape_name(const ::testing::TestParamInfo<Shape>& info) {
+    return info.param.label;
+}
+
+INSTANTIATE_TEST_SUITE_P(Tensor, CutlassShape, ::testing::ValuesIn(cutlass_shapes()),
+                         cutlass_shape_name);
+
+class CutlassAlphaBeta : public GpuTestWithParam<AlphaBeta> {};
+
+TEST_P(CutlassAlphaBeta, TileAlignedAndPredicated) {
+    const AlphaBeta ab = GetParam();
+    {
+        SCOPED_TRACE("tile aligned 128x128x128");
+        expect_tensor_matches(TVariant::kCutlass, Shape{128, 128, 128, "aligned"}, ab.alpha,
+                              ab.beta, 2201);
+    }
+    {
+        SCOPED_TRACE("predicated 65x32x16");
+        expect_tensor_matches(TVariant::kCutlass, Shape{65, 32, 16, "predicated"}, ab.alpha,
+                              ab.beta, 2207);
+    }
+}
+
+std::string cutlass_ab_name(const ::testing::TestParamInfo<AlphaBeta>& info) {
+    return info.param.label;
+}
+
+INSTANTIATE_TEST_SUITE_P(Tensor, CutlassAlphaBeta, ::testing::ValuesIn(alpha_beta_cases()),
+                         cutlass_ab_name);
+
+class Cutlass : public GpuTest {};
+
+TEST_F(Cutlass, BetaZeroDoesNotReadC) {
+    const Shape s{128, 128, 128, "beta_zero"};
+    for (const FillKind& fill : non_finite_fills()) {
+        SCOPED_TRACE(fill.label);
+        Case c = make_case(TVariant::kCutlass, s, 2301);
+        c.c0.assign(elems(s.m, s.n), fill.value);
+        const Outputs out = run_both(TVariant::kCutlass, c, s, 1.0f, 0.0f);
+        ASSERT_TRUE(ckl::all_finite(out.kernel))
+            << "cutlass read C while beta was zero (C was " << fill.label << ")";
+        const std::vector<float> zeros(elems(s.m, s.n), 0.0f);
+        const ckl::GemmRef ref =
+            ckl::gemm_reference_scaled(c.a_round, c.b_round, zeros, s.m, s.n, s.k, 1.0f, 0.0f);
+        EXPECT_LT(ckl::max_scaled_residual(out.kernel, ref), ckl::tol(s.k));
+    }
+}
+
+TEST_F(Cutlass, LargeK) {
+    {
+        SCOPED_TRACE("small m and n");
+        expect_tensor_matches(TVariant::kCutlass, Shape{64, 64, 8192, "64x64x8192"}, 1.25f, 0.5f,
+                              2401);
+    }
+    {
+        SCOPED_TRACE("tile aligned");
+        expect_tensor_matches(TVariant::kCutlass, Shape{128, 128, 8192, "128x128x8192"}, 1.0f, 0.0f,
+                              2411);
+    }
+}
+
+TEST_F(Cutlass, ZeroDimensionsLeaveTheOutputAlone) {
+    const float canary = -12345.75f;
+    const std::vector<Shape> empty_shapes = {{0, 64, 32, "m0"}, {64, 0, 32, "n0"}};
+    for (const auto& s : empty_shapes) {
+        SCOPED_TRACE(s.label);
+        const std::size_t guard = elems(64, 64);
+        const auto fa = ckl::random_matrix(64, s.k, ckl::test::seed_stream(2501));
+        const auto fb = ckl::random_matrix(s.k, 64, ckl::test::seed_stream(2502));
+        const Bits a_bits = to_storage(TVariant::kCutlass, fa);
+        const Bits b_bits = to_storage(TVariant::kCutlass, fb);
+
+        ckl::DeviceBuffer<std::uint16_t> da(a_bits.size());
+        ckl::DeviceBuffer<std::uint16_t> db(b_bits.size());
+        ckl::DeviceBuffer<float> dc(guard);
+        da.copy_from_host(a_bits);
+        db.copy_from_host(b_bits);
+        dc.copy_from_host(std::vector<float>(guard, canary));
+
+        launch_kernel(TVariant::kCutlass, da.data(), db.data(), dc.data(), s.m, s.n, s.k, 1.25f,
+                      0.5f, nullptr);
+        CKL_CUDA_CHECK(cudaDeviceSynchronize());
+        const auto out = dc.to_host();
+        for (std::size_t i = 0; i < guard; ++i) {
+            ASSERT_EQ(out[i], canary) << "element " << i << " was written for an empty output";
+        }
+    }
+}
+
+// An empty contraction is C = beta * C, and beta zero clears rather than scales,
+// because BLAS says C is not read when beta is zero and 0 * NaN is still NaN.
+TEST_F(Cutlass, ZeroKAppliesBetaOnly) {
+    const int m = 64;
+    const int n = 64;
+    const auto c0 = ckl::random_matrix(m, n, ckl::test::seed_stream(2601));
+    ckl::DeviceBuffer<std::uint16_t> da(1);
+    ckl::DeviceBuffer<std::uint16_t> db(1);
+    da.zero();
+    db.zero();
+    {
+        SCOPED_TRACE("beta 0.5 scales C");
+        ckl::DeviceBuffer<float> dc(c0.size());
+        dc.copy_from_host(c0);
+        launch_kernel(TVariant::kCutlass, da.data(), db.data(), dc.data(), m, n, 0, 1.25f, 0.5f,
+                      nullptr);
+        CKL_CUDA_CHECK(cudaDeviceSynchronize());
+        const auto out = dc.to_host();
+        for (std::size_t i = 0; i < out.size(); ++i) {
+            ASSERT_FLOAT_EQ(out[i], 0.5f * c0[i]) << "element " << i;
+        }
+    }
+    {
+        SCOPED_TRACE("beta 0 clears C without reading it");
+        const std::vector<float> nan_c(elems(m, n), std::numeric_limits<float>::quiet_NaN());
+        ckl::DeviceBuffer<float> dc(nan_c.size());
+        dc.copy_from_host(nan_c);
+        launch_kernel(TVariant::kCutlass, da.data(), db.data(), dc.data(), m, n, 0, 1.25f, 0.0f,
+                      nullptr);
+        CKL_CUDA_CHECK(cudaDeviceSynchronize());
+        const auto out = dc.to_host();
+        for (std::size_t i = 0; i < out.size(); ++i) {
+            ASSERT_EQ(out[i], 0.0f) << "element " << i << " came back " << out[i];
+        }
+    }
+}
+
+// The shape rule, and the promise that a refusal is a throw rather than a
+// quietly different kernel. A CUTLASS row that measured a hand kernel would be
+// worse than no row at all.
+TEST_F(Cutlass, RefusesTheShapesItCannotRunRatherThanRerouting) {
+    EXPECT_TRUE(ckl::gemm_cutlass_supports(129, 256, 192));
+    EXPECT_TRUE(ckl::gemm_cutlass_supports(1, 8, 8));
+    EXPECT_FALSE(ckl::gemm_cutlass_supports(128, 129, 128)) << "n is not a multiple of 8";
+    EXPECT_FALSE(ckl::gemm_cutlass_supports(128, 128, 129)) << "k is not a multiple of 8";
+
+    ckl::DeviceBuffer<std::uint16_t> da(elems(128, 132));
+    ckl::DeviceBuffer<std::uint16_t> db(elems(132, 128));
+    ckl::DeviceBuffer<float> dc(elems(128, 128));
+    da.zero();
+    db.zero();
+    dc.zero();
+    EXPECT_THROW(ckl::gemm_cutlass(reinterpret_cast<const __half*>(da.data()),
+                                   reinterpret_cast<const __half*>(db.data()), dc.data(), 128, 128,
+                                   132, 1.0f, 0.0f, nullptr),
+                 ckl::Error);
+}
 
 // ---------------------------------------------------------------------------
 // Fusion

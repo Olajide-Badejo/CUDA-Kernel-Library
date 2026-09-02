@@ -130,7 +130,7 @@ struct Options {
         "  families: gemm gemv spmv fft conv trsm\n"
         "  dtypes:   fp32 fp16 bf16\n"
         "  gemm variants: naive tiled register cp_async wmma mma_ptx mma_ldm mma_opt auto\n"
-        "                 tile_<BM>x<BN>x<BK> splitk streamk\n"
+        "                 tile_<BM>x<BN>x<BK> splitk streamk cutlass\n"
         "                 baseline_cublas_default baseline_cublas_autotune\n"
         "  gemv variants: naive warp vectorized baseline_cublas\n"
         "  spmv variants: naive warp vector merge sell bsr auto\n"
@@ -570,6 +570,11 @@ const VariantEntry kGemmVariants[] = {
     {"mma_opt", "fp16", ckl::Algo::kMmaOpt, false},
     {"splitk", "fp16", ckl::Algo::kSplitK, false},
     {"streamk", "fp16", ckl::Algo::kStreamK, false},
+    // The reference line, not a vendor baseline: it is a third line on the
+    // ladder chart rather than a row the sweep joins onto every other row. It
+    // goes through ckl::gemm like any named rung, so nothing below has to know
+    // it is CUTLASS.
+    {"cutlass", "fp16", ckl::Algo::kCutlass, false},
     {"auto", "", ckl::Algo::kAuto, false},
     {"baseline_cublas_default", "", ckl::Algo::kCublas, true},
     {"baseline_cublas_autotune", "", ckl::Algo::kCublas, true},

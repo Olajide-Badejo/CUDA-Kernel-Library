@@ -326,6 +326,53 @@ CKL_EXPORT void gemm_bias_relu(float* c, const float* bias, int m, int n,
                                cudaStream_t stream = nullptr);
 
 // ---------------------------------------------------------------------------
+// The CUTLASS reference line
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Whether the CUTLASS rung can run this shape.
+ * @param m Rows of A and C.
+ * @param n Columns of B and C.
+ * @param k Contraction extent.
+ * @return True when the shape meets the vector access rule below.
+ * @note Row major A has leading dimension k and row major B and C have leading
+ *       dimension n, and the mainloop moves 16 bytes per access, so n and k have
+ *       to be divisible by 8. m is free: the M edge is predicated.
+ */
+CKL_EXPORT bool gemm_cutlass_supports(int m, int n, int k);
+
+/**
+ * @brief The block tile, warp split and K step the CUTLASS rung is instantiated at.
+ * @return The threadblock shape and the warp counts along M and N.
+ * @note Reported from the template parameters themselves rather than from a
+ *       comment, so docs and benchmark rows cannot drift from what was compiled.
+ */
+CKL_EXPORT GemmTile gemm_cutlass_tile();
+
+/**
+ * @brief The CUTLASS reference line: an Ampere style multistage FP16 tensor GEMM.
+ * @param a Device pointer to A, m by k, row major, half precision.
+ * @param b Device pointer to B, k by n, row major, half precision.
+ * @param c Device pointer to C, m by n, row major, single precision.
+ * @param m Rows of A and C.
+ * @param n Columns of B and C.
+ * @param k Contraction extent.
+ * @param alpha Scale on the product.
+ * @param beta Scale on the incoming C; when zero, C is not read.
+ * @param stream Stream to enqueue on; nullptr means the default stream.
+ * @throws ckl::Error with Status::kNotSupported when gemm_cutlass_supports is
+ *         false for the shape, or when the device is below compute capability
+ *         8.0.
+ * @note cutlass::gemm::device::GemmUniversal over arch::Sm80, OpClassTensorOp,
+ *       a 128x128x32 threadblock tile, a 64x64x32 warp tile, instruction shape
+ *       16x8x16 and a three stage cp.async mainloop. The shape it refuses it
+ *       refuses; it is never rerouted to another rung, because a CUTLASS row
+ *       that measured a hand kernel would be worse than no row at all.
+ */
+CKL_EXPORT void gemm_cutlass(const __half* a, const __half* b, float* c, int m, int n, int k,
+                             float alpha, float beta, cudaStream_t stream = nullptr);
+
+// ---------------------------------------------------------------------------
 // The tile family, split-K and stream-K
 // ---------------------------------------------------------------------------
 

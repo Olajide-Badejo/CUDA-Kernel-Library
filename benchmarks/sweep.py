@@ -401,7 +401,14 @@ def variant_matrix(quick: bool) -> list[Config]:
     for v in fp32:
         for shape in cube(GEMM_FP32_SIZES if not quick else [1024, 2048]):
             rows.append(Config("gemm", v, "fp32", shape))
-    fp16 = ["wmma", "mma_ptx", "mma_ldm", "mma_opt"] if not quick else ["wmma", "mma_opt"]
+    # cutlass is the reference line, so it runs at the same tensor shapes the
+    # hand written FP16 rungs do: a third line on the ladder needs the same x
+    # axis as the other two or the chart is a comparison of nothing.
+    fp16 = (
+        ["wmma", "mma_ptx", "mma_ldm", "mma_opt", "cutlass"]
+        if not quick
+        else ["wmma", "mma_opt", "cutlass"]
+    )
     for v in fp16:
         for shape in cube(GEMM_TENSOR_SIZES if not quick else [2048, 4096]):
             rows.append(Config("gemm", v, "fp16", shape))

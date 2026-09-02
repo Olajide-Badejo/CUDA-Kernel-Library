@@ -138,6 +138,7 @@ int required_cc(Algo a) {
         case Algo::kTileFamily:
         case Algo::kSplitK:
         case Algo::kStreamK:
+        case Algo::kCutlass:
             return 80;
         default:
             return 0;
@@ -201,6 +202,18 @@ std::string why_not(Algo a, const GemmDesc& d) {
             // No divisibility clause: the family predicates its edges, so every
             // shape runs the same mainloop with masked tails.
             return is_fp16_in(d) ? "" : "this rung is FP16 in and FP32 out only";
+        case Algo::kCutlass:
+            if (!is_fp16_in(d)) {
+                return "this rung is FP16 in and FP32 out only";
+            }
+            // The CUTLASS mainloop predicates the M edge but moves 16 bytes per
+            // access along the contiguous axis, which is k for row major A and n
+            // for row major B and C. The rule is the library's own, asked of the
+            // rung rather than assumed here.
+            return gemm_cutlass_supports(static_cast<int>(d.m), static_cast<int>(d.n),
+                                         static_cast<int>(d.k))
+                       ? ""
+                       : "this rung needs n and k divisible by 8";
         default:
             return "";
     }
@@ -853,6 +866,9 @@ void run_hand_kernel(const Context& ctx, const GemmPlan& plan, const GemmDesc& d
         case Algo::kMmaOpt:
             gemm_mma_opt(f16a, f16b, out, m, n, k, alpha, beta, stream);
             return;
+        case Algo::kCutlass:
+            gemm_cutlass(f16a, f16b, out, m, n, k, alpha, beta, stream);
+            return;
         case Algo::kTileFamily:
             gemm_tile_family(f16a, f16b, out, m, n, k, alpha, beta, plan.tile_index, stream);
             return;
@@ -938,12 +954,6 @@ Status gemm(Context& ctx, const GemmDesc& desc, const void* alpha, const void* a
     const Status valid = validate(desc, alpha, a, b, beta, c);
     if (valid != Status::kSuccess) {
         return valid;
-    }
-
-    if (picked == Algo::kCutlass) {
-        detail::set_last_error(std::string("gemm: algorithm ") + algo_name(picked) +
-                               " is declared for ABI stability but not implemented in 1.1.0");
-        return Status::kNotSupported;
     }
 
     // Strided batched work goes to cuBLAS. Batching the hand kernels is future

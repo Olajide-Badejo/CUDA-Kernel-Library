@@ -35,6 +35,7 @@ LADDER_ORDER = [
     ("gemm", "mma_ptx", "fp16", "mma.sync PTX"),
     ("gemm", "mma_ldm", "fp16", "mma.sync + ldmatrix"),
     ("gemm", "mma_opt", "fp16", "mma.sync + ldmatrix + swizzle"),
+    ("gemm", "cutlass", "fp16", "CUTLASS reference line"),
     ("gemm", "wmma", "bf16", "WMMA (BF16)"),
 ]
 

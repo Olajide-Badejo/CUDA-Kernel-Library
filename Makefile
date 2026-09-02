@@ -10,7 +10,8 @@ CTEST_LABELS ?=
 # report, roofline, sweep collide with directory names, so they must be phony or
 # make treats the directory as an up to date target and does nothing.
 .PHONY: all setup configure build test bench roofline sweep sweep-quick tile-sweep \
-        summary report check-style dash provenance clean help
+        summary report check-style dash provenance sass sass-diff register-study \
+        clean help
 
 help:
 	@echo "Targets:"
@@ -21,6 +22,9 @@ help:
 	@echo "  sweep        full measurement protocol sweep (needs a GPU, locked clocks)"
 	@echo "  tile-sweep   the tile family decision table (needs a GPU)"
 	@echo "  summary      rebuild summary.csv from rows already on file"
+	@echo "  sass         capture every ladder rung's SASS into experiments/sass"
+	@echo "  sass-diff    fail if the top kernel's SASS left the committed golden"
+	@echo "  register-study  reassemble the top kernel under register ceilings"
 	@echo "  check-style  run the dash and provenance gates"
 	@echo "  all          build then test then check-style"
 	@echo "  clean        remove the build tree"
@@ -64,6 +68,24 @@ tile-sweep: build
 # HEAD, and a summary never mixes commits.
 summary:
 	python3 benchmarks/sweep.py --refresh-only $(if $(SUMMARY_COMMIT),--commit $(SUMMARY_COMMIT),)
+
+# Instruction level evidence. All three read the built objects rather than the
+# GPU, so they run on any machine with the toolkit and give the same answer.
+sass: build
+	bash benchmarks/capture_sass.sh --build-dir $(BUILD_DIR)
+
+# The gate: the top kernel's SASS against the committed golden. Non zero exit and
+# a unified diff on any difference. Regenerate the golden deliberately with
+# `python3 scripts/sass_diff.py --update` when a kernel change is intended.
+sass-diff: build
+	python3 scripts/sass_diff.py --build-dir $(BUILD_DIR)
+
+# The register allocation study: the top kernel reassembled across maxrregcount
+# ceilings and blocks per SM floors, with registers, spills and occupancy filled
+# in and the throughput column left pending until the owner runs it at locked
+# clocks.
+register-study: build
+	python3 benchmarks/register_study.py --build-dir $(BUILD_DIR)
 
 check-style: dash provenance
 

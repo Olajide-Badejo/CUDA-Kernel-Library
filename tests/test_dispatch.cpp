@@ -268,9 +268,12 @@ INSTANTIATE_TEST_SUITE_P(
                     Status::kNotSupported},
         RefusalCase{"split_k_on_fp32", Algo::kSplitK, DType::kR32F, 128, Status::kNotSupported},
         RefusalCase{"stream_k_on_fp32", Algo::kStreamK, DType::kR32F, 128, Status::kNotSupported},
-        // Still declared for ABI stability and not implemented. Reporting this
-        // as anything other than kNotSupported would be the worst kind of lie.
-        RefusalCase{"cutlass", Algo::kCutlass, DType::kR32F, 128, Status::kNotSupported}),
+        // The CUTLASS reference line is FP16 in and FP32 out like the rest of
+        // the tensor rungs, and its mainloop moves 16 bytes along the contiguous
+        // axis, so a shape whose n or k is not a multiple of 8 is refused rather
+        // than quietly handed to another kernel.
+        RefusalCase{"cutlass_on_fp32", Algo::kCutlass, DType::kR32F, 128, Status::kNotSupported},
+        RefusalCase{"cutlass_unaligned", Algo::kCutlass, DType::kR16F, 100, Status::kNotSupported}),
     refusal_case_name);
 
 // ---------------------------------------------------------------------------
@@ -622,6 +625,42 @@ TEST_F(Dispatch, ChosenIsWrittenEvenWhenTheCallFails) {
               Status::kInvalidValue);
     EXPECT_EQ(chosen, Algo::kRegister) << "a caller reading chosen after a failure has to see what "
                                           "the dispatcher was aiming at";
+}
+
+// The reference line runs when a caller names it, and kAuto never lands on it.
+// A dispatcher that started choosing CUTLASS for the library's own kAuto path
+// would make every ladder comparison a comparison of CUTLASS with itself.
+TEST_F(Dispatch, CutlassRungRunsWhenNamedAndIsNeverAutoChosen) {
+    ckl::Context ctx;
+    const std::int64_t n = 256;
+    const GemmDesc named = square_desc(DType::kR16F, n, Algo::kCutlass);
+    const Operand a = make_operand(DType::kR16F, elems(n, n), 2401);
+    const Operand b = make_operand(DType::kR16F, elems(n, n), 2402);
+    const std::vector<float> c0(elems(n, n), 0.0f);
+
+    const DescRun got = run_desc(ctx, named, a, b, c0, 1.0f, 0.0f);
+    ASSERT_EQ(got.status, Status::kSuccess);
+    EXPECT_EQ(got.chosen, Algo::kCutlass);
+
+    const std::vector<double> ref =
+        ckl::gemm_reference(a.values, b.values, c0, static_cast<int>(n), static_cast<int>(n),
+                            static_cast<int>(n), 1.0f, 0.0f);
+    EXPECT_LT(ckl::relative_frobenius_error(got.c, ref), ckl::tol(static_cast<int>(n)));
+
+    for (std::int64_t side : {static_cast<std::int64_t>(256), static_cast<std::int64_t>(1024)}) {
+        const GemmDesc probe = square_desc(DType::kR16F, side, Algo::kAuto);
+        EXPECT_NE(ckl::gemm_query(ctx, probe), Algo::kCutlass)
+            << "kAuto reached for the reference line at side " << side;
+    }
+
+    // The instantiation the docs describe, read off the template rather than
+    // off a comment.
+    const ckl::GemmTile tile = ckl::gemm_cutlass_tile();
+    EXPECT_EQ(tile.m, 128);
+    EXPECT_EQ(tile.n, 128);
+    EXPECT_EQ(tile.k, 32);
+    EXPECT_EQ(tile.warps_m, 2);
+    EXPECT_EQ(tile.warps_n, 2);
 }
 
 TEST_F(Dispatch, NullChosenIsAllowed) {

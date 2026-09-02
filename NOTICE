@@ -24,6 +24,19 @@ NVML.
   whichever of these libraries it carries.
   Link: https://docs.nvidia.com/cuda/eula/
 
+CUTLASS, version 4.7.1.
+  Role: the reference line on the GEMM ladder. src/gemm/gemm_cutlass_ref.cu
+  instantiates cutlass::gemm::device::GemmUniversal over an Ampere style
+  multistage FP16 tensor core mainloop, so the hand written kernels are measured
+  against a tuned open source template library as well as against the closed
+  cuBLAS binary. See docs/cutlass.md.
+  Posture: fetched at configure time by CMake FetchContent from
+  https://github.com/NVIDIA/cutlass, pinned to the tag v4.7.1, and used as
+  headers by one translation unit. Nothing of it is vendored here, no CUTLASS
+  target is configured, no CUTLASS type appears in a public header, and no
+  CUTLASS file is installed. BSD 3-Clause License.
+  Link: https://github.com/NVIDIA/cutlass/blob/main/LICENSE.txt
+
 GoogleTest, version 1.17.0.
   Role: the test framework. Test only; no part of it reaches the installed
   library.
@@ -41,4 +54,3 @@ day that changes.
 
   cuFFT   (NVIDIA CUDA Toolkit, same license posture as the libraries above)
   CUB     (NVIDIA, BSD 3-Clause; ships inside the CUDA Toolkit as part of CCCL)
-  CUTLASS (NVIDIA, BSD 3-Clause; would be fetched, not vendored)

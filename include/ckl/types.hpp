@@ -44,11 +44,11 @@ enum class DType {
 };
 
 /**
- * @brief Every rung of the GEMM ladder plus the vendor baseline.
+ * @brief Every rung of the GEMM ladder plus the two reference lines.
  *
- * @note kCutlass is declared now and implemented in a later release; dispatch
- *       returns Status::kNotSupported for it rather than quietly picking
- *       something else.
+ * @note kAuto never picks kCutlass. It is the reference line the hand written
+ *       rungs are read against, in the same way kCublas is, so it runs when a
+ *       caller names it and not otherwise.
  */
 enum class Algo {
     kAuto,      ///< Let the dispatcher choose, and report the choice through the chosen out-param.
@@ -64,7 +64,7 @@ enum class Algo {
     kTileFamily,  ///< The tile shape family with predicated edges, FP16 in; shape chosen by plan.
     kSplitK,      ///< The tile family split along K, with a fixup reduction pass.
     kStreamK,     ///< The tile family as persistent CTAs with a stream-K remainder.
-    kCutlass,     ///< Declared for ABI stability; not implemented in 1.1.0.
+    kCutlass,     ///< The CUTLASS reference line: Ampere style multistage FP16 tensor GEMM.
     kCublas,      ///< The vendor path, which takes every shape the hand written kernels refuse.
 };
 
