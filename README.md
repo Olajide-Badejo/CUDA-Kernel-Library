@@ -47,9 +47,15 @@ in [`docs/using.md`](docs/using.md). Toolchain and build options are in
   passed the compute-bound gate.
 - Honest engineering: a plausible optimization that measured *worse* was reverted
   and written up, not hidden.
-- A complete supporting library (GEMV, TRSM, CSR SpMV, cuSOLVER), a roofline built
-  on hardware ceilings rather than on a vendor library, NVML thermal-throttle
-  gating, a clock-locked resumable benchmark sweep, CI, and two automatically
+- A real library, not a benchmark tree: `find_package(CKL)`, a pure C99 ABI with
+  no CUDA headers, and a Fortran binding whose `SGEMM` drops in for a CPU BLAS.
+- Three further hand-tuned families beyond GEMM, each against its correct vendor
+  baseline: SpMV over a real SuiteSparse suite (cuSPARSE), FFT convolution
+  (cuFFT), and scan and reduction (CUB), plus the supporting GEMV, TRSM, and
+  cuSOLVER paths.
+- A roofline built on hardware ceilings rather than on a vendor library, NVML
+  thermal-throttle gating, a clock-locked self-verifying benchmark sweep,
+  committed SASS with a diff gate, CI with no soft gates, and two automatically
   generated PDF reports.
 - A corrections register, [`docs/CORRECTIONS.md`](docs/CORRECTIONS.md), where I
   audit my own published claims against my own data and write down what did not

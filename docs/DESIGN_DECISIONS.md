@@ -27,18 +27,30 @@ Percent of cuBLAS on the same GPU is the only defensible headline for a hand
 written kernel because it cancels the hardware out of the claim. No cross GPU
 numbers appear anywhere.
 
-## Measured ceilings over datasheet
+## Measured bandwidth, hardware compute roofs
 
-The roofline uses measured bandwidth (about 540 GB/s streaming at Phase 0) and a
-measured or empirically bounded compute ceiling rather than the 672 GB/s
-datasheet peak, so the ridge point and the compute bound gate reflect what the
-machine actually delivers.
+The roofline uses measured streaming bandwidth rather than the datasheet peak.
+The compute roofs changed in 1.1.0: v1 measured cuBLAS and called it the
+ceiling, which made every percent-of-roof a percent-of-cuBLAS restated (defect
+A3); the roofs are now SM count times clock times the per-cycle FLOP rate, with
+cuBLAS drawn as a separate attainable line.
 
 ## Build and environment
 
 - Device standard is C++20 (newest nvcc 13.3 accepts for device code); host code
-  is C++23. Recorded rather than downgrading host silently.
-- `-Wpedantic` is applied to hand written host C++ only, because nvcc's generated
-  stub files under separable compilation are not ours to keep pedantic clean.
-- Repo on the Windows filesystem, built in WSL2 through a symlink, for IDE
-  visibility; revisit if CUTLASS fetch I/O over `/mnt/c` becomes a bottleneck.
+  is C++23, with the public headers requiring only C++17 of a consumer.
+- Separable compilation was dropped in 1.1.0: nothing device links, RDC blocked
+  whole program ptxas work, and an un-device-linked archive could not be
+  consumed outside CMake, which the Fortran binding needed.
+- Repo lives on the Windows filesystem and builds in WSL2; the host compiler is
+  g++-14 because GCC 15's libstdc++ breaks the nvcc 13.3 frontend (the story is
+  in `docs/building.md`). CUTLASS is fetched shallow at a pinned commit.
+
+## Where the 1.1.0 decisions live
+
+The library-shaping choices of 1.1.0 are recorded next to what they shaped: the
+packaging and visibility story in `docs/building.md`, the API contracts in
+`docs/using.md`, the measurement protocol rules in `docs/benchmarking.md`, the
+per family mechanism choices in `docs/gemm.md`, `docs/sparse.md`,
+`docs/fft.md`, and `docs/scan.md`, and every retracted or corrected claim in
+`docs/CORRECTIONS.md`.

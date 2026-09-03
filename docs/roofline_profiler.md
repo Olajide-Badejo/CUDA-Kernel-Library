@@ -24,11 +24,15 @@ circles, tensor kernels triangles, so the split reads in grayscale too.
   operation. GEMM does `2 m n k` FLOPs and, in the minimum traffic model, moves
   `(m k + k n + m n)` elements; GEMV does `2 m n` FLOPs and moves about `m n`
   elements (A dominates). These give the arithmetic intensity of each operation.
-- Empirical (`tools/roofline.cpp`): measures the ceilings on this GPU rather
-  than reading the datasheet. Streaming bandwidth from a large device to device
-  copy, the FP32 roof from cuBLAS SGEMM at 8192 cubed, the tensor roof from cuBLAS
-  FP16 GEMM at 8192 cubed. Then it times the ladder and places each variant, writing
-  `experiments/results/roofline.csv` and `roofline_ceilings.csv`.
+- Empirical (`tools/roofline.cpp`): the bandwidth ceiling is measured on this GPU
+  with a large device to device copy. The compute roofs are hardware, not a vendor
+  library: SM count times the graphics clock times 512 FLOP per cycle for FP16
+  inputs with FP32 accumulate, 256 for FP32 (defect A3 in `docs/CORRECTIONS.md`
+  retired the old cuBLAS-derived "roof"). cuBLAS is measured too, but it lands as
+  a separate attainable line, because a competitor is not a ceiling. The tool then
+  times the ladder and places each variant, writing
+  `experiments/results/roofline.csv` and `roofline_ceilings.csv` with the device
+  name, SM count, clock, and clock source recorded.
   `scripts/plot_roofline.py` renders the figure from those.
 
 ## What it shows on this machine

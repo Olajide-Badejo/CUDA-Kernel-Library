@@ -28,3 +28,17 @@ the CPU cross check at about 1e-8.
 
 Timing for TRSM is collected by the full sweep (`benchmarks/sweep.py`) alongside
 the other families.
+
+## Performance, stated honestly
+
+TRSM is the least tuned kernel in this repository: the v1-era sweep put the
+blocked solve at 31.8 percent of cuBLAS STRSM at 2048 by 256, and no diagnostic
+round was ever spent on it. The gap is structural. Block row i cannot start
+before rows 0 to i-1, so the solve is a serial chain of small diagonal
+substitutions with the machine mostly idle between trailing updates, and at a
+few hundred right hand sides the trailing GEMMs are skinny. cuBLAS instead
+inverts the diagonal blocks once and turns nearly the whole solve into large
+tuned GEMM work. That recipe (block inversion plus batched application, taken
+through the same diagnostic loop the GEMM ladder used) is the known path to
+closing the gap and is deliberately out of scope for 1.1.0, whose tuning budget
+went to the SpMV, FFT, and scan families.
