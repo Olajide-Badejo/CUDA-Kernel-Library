@@ -4,7 +4,95 @@ Notable changes per phase. Dates are ISO. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions are tagged
 at the definition of done milestones.
 
-## [Unreleased]
+## [1.1.0] - 2026-09-03
+
+The integrity release, and the release that turns the ladder into a library.
+Phase A below was written first and blocks everything else; every measured claim
+this release adds is marked pending until the locked clock sweep replaces the v1
+numbers.
+
+### Added
+
+- Packaging. `find_package(CKL)` plus `target_link_libraries(app PRIVATE
+  ckl::ckl)` works from an install prefix, verified by the standalone
+  `tests/consume` project; a config package with dependency resolution, a
+  generated version header, a pkg-config file written at install time,
+  per-component `ckl::` aliases, `BUILD_SHARED_LIBS` support with hidden
+  visibility and `CKL_EXPORT` annotations, and CMake presets (default, release,
+  multiarch, asan). Separable compilation is gone: nothing device links, and RDC
+  blocked non CMake consumers outright.
+- The public API. `ckl::Context` (lazy vendor handles, cached device properties,
+  stream and workspace), `ckl::Status`, descriptor driven `ckl::gemm` with
+  `gemm_query`, `gemm_plan`, and `gemm_workspace_size`, and family entry points
+  `ckl::spmv`, `ckl::fft`, `ckl::conv`, `ckl::reduce`, `ckl::scan`. Every
+  dispatcher writes a `chosen` out parameter on success and failure, an explicit
+  algorithm is never rerouted, and a shape a path cannot take returns
+  `kNotSupported` instead of silently falling back.
+- A pure C99 ABI in `include/ckl/ckl.h`: 21 entry points, no CUDA header, device
+  pointers and streams as `void*`, a thread local last error, device memory
+  helpers so a toolkit free consumer can manage residency, and a catch all on
+  every entry so nothing but C crosses the boundary.
+- A Fortran binding. `fortran/ckl_mod.f90` binds the whole ABI through
+  `ISO_C_BINDING`; `SGEMM`, `SGEMV`, and `STRSM` ship under the standard mangled
+  names in a separate `ckl_blas` archive behind `CKL_BLAS_ALIASES`, taking host
+  arrays and managing transfers; a conjugate gradient example validates against
+  LAPACK and passes the residual gate.
+- GEMM performance mechanisms: a corrected A tile swizzle (the old mask could
+  not separate the lanes of an ldmatrix.x4 wavefront), a three stage single
+  barrier cp.async pipeline on dynamic shared memory, a tile shape family of six
+  instantiations templated on block and warp geometry, predicated tails so any
+  shape runs the real mainloop with masked edges instead of a 25x slower scalar
+  path, two pass split-K with a real workspace answer, stream-K persistent CTAs
+  whose owners wait only downward in block index, and a waves based dispatch
+  heuristic that reads the committed tile sweep when one exists and holds the
+  reference tile when none does.
+- The CUTLASS reference line, `cutlass::gemm::device::GemmUniversal` at a pinned
+  v4.7.1, the honest FP16 instantiation on sm_120 since the SM120 collective
+  builders accept only blockscaled narrow precision kinds.
+- Three new kernel families, each with its own algo enum, plan object, C ABI
+  entry, tests, and vendor baseline measured through a cached plan: SpMV
+  (vector CSR, merge path after Merrill and Garland, SELL-C-sigma, BSR) over a
+  seven matrix SuiteSparse suite fetched by checksum plus the v1 generator;
+  FFT (Stockham radix 2 and 4, shared resident, four step, R2C, 2D with a
+  transpose study) with FFT and direct convolution and a fused pointwise
+  epilogue, against a cuFFT baseline whose callback path was actually built and
+  validated; reduction and scan ladders up to single pass decoupled look-back,
+  with a bit deterministic mode, a Kahan rung, and CUB as the named baseline.
+- Instruction level evidence: normalized SASS committed for nineteen rungs, a
+  diff gate shown red on a one line kernel perturbation, and a register
+  allocation study that had to edit PTX directives because `-maxrregcount` is
+  ignored under `__launch_bounds__`; shared memory, not registers, pins the top
+  kernel at 2 blocks per SM.
+- Testing: 844 GoogleTest cases replace seven hand rolled mains, with shape
+  derived tolerances, alpha and beta parameterization, NaN poisoned beta zero
+  inputs, dispatch honesty assertions, canary guarded zero dimension cases,
+  calibrated tolerance constants, and all four compute sanitizer tools clean on
+  the GEMM suites.
+- Measurement: benchmarks verify their output against the oracle before timing
+  anything, keep every sample, assert the dispatched path, record the cuBLAS
+  math mode from the handle that ran, flush L2 where the working set is cache
+  resident, isolate launch overhead with CUDA graphs at small shapes, and run
+  five independent processes per configuration with bootstrap confidence
+  intervals; vendor baselines are measured once and joined. The verification
+  gate caught the first `CUBLAS_GEMM_AUTOTUNE` call per shape leaving garbage
+  in C.
+- CI: eight jobs with no `continue-on-error`, pinned containers by digest,
+  actions by SHA, tools by version; a build matrix over CUDA 12.8 and 13.3
+  across five architectures with warnings as errors; install and consume, SASS
+  diff, byte stable report regeneration, Doxygen to Pages, and self hosted GPU
+  and nightly perf regression jobs that stay queued or skipped, never falsely
+  green, until a runner exists.
+- Documentation: `docs/using.md` with the load bearing contracts,
+  `docs/building.md` with the toolchain story (g++-14 is required; GCC 15's
+  libstdc++ breaks the nvcc 13.3 frontend), four runnable examples that build in
+  tree and against an installed prefix, Doxygen over every public declaration
+  with zero warnings, per family mechanism docs, `CITATION.cff`, a code of
+  conduct, `SECURITY.md`, `NOTICE`, and issue and pull request templates.
+- The report: related work over a twenty record bibliography that prints every
+  record, limitations and threats to validity, a reproducibility statement, a
+  numerical accuracy model for the headline kernel, chapters for every family,
+  and the shared memory tiling loss to naive promoted from a buried paragraph
+  to a titled section, reported as a single GPU finding.
 
 ### Fixed
 
@@ -59,13 +147,10 @@ at the definition of done milestones.
   `.clang-tidy`, `.editorconfig`, and `.gitignore` by name; they were listed as
   suffixes, which never matched anything.
 
-### Added
-
 - `docs/CORRECTIONS.md`, the corrections register: one dated entry per defect,
   what was claimed, what the repository actually shows, what changed, and what is
-  still pending.
-- `experiments/results/legacy_hashes.txt`, the allowlist of dead v1 commit hashes.
-- `make provenance`, and `make check-style` now runs it alongside the dash gate.
+  still pending. `experiments/results/legacy_hashes.txt` lists the dead v1 commit
+  hashes as a named debt, and `make provenance` runs inside `make check-style`.
 
 ### Removed
 
