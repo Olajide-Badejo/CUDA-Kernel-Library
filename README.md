@@ -94,24 +94,34 @@ the tensor pipe at 83% against the memory system at 30%.
 
 ```mermaid
 flowchart TB
-    subgraph K["Hand-written CUDA kernels"]
-        G["GEMM ladder<br/>naive to swizzled tensor core"]
-        F["GEMV, TRSM,<br/>CSR SpMV, cuSOLVER"]
+    subgraph API["Public surface"]
+        CPP["C++ API<br/>Context, descriptors,<br/>chosen-reporting dispatch"]
+        C99["C99 ABI, ckl.h<br/>no CUDA headers"]
+        F90["Fortran module +<br/>drop-in BLAS layer"]
     end
-    subgraph H["Measurement and diagnosis"]
-        NCU["Nsight Compute<br/>diagnostic rounds"]
-        RF["Roofline profiler"]
-        NV["NVML telemetry"]
-        SW["Resumable sweep"]
+    subgraph K["Hand-written kernel families"]
+        G["GEMM ladder + tile family,<br/>split-K, stream-K, CUTLASS line"]
+        SP["SpMV: vector CSR, merge path,<br/>SELL-C-sigma, BSR"]
+        FF["FFT: Stockham ladders,<br/>four-step, convolution"]
+        SC["Scan and reduce:<br/>decoupled look-back"]
+        SUP["GEMV, TRSM, cuSOLVER"]
     end
     subgraph B["Vendor baselines, same GPU"]
         CB["cuBLAS"]
         CS["cuSPARSE"]
+        CF["cuFFT"]
+        CU["CUB"]
     end
+    subgraph H["Measurement and evidence"]
+        VER["Self-verifying sweep,<br/>locked clocks, bootstrap CIs"]
+        NCU["Nsight Compute rounds"]
+        SASS["Committed SASS + diff gate"]
+        SAN["Four sanitizer tools"]
+    end
+    API --> K
     K -->|timed against| B
     K --> H
-    NCU -->|one change per round| G
-    H --> R["Main and debug PDF reports"]
+    H --> R["Report, corrections register,<br/>CI gates"]
 ```
 
 ## Results at a glance (this RTX 5070)
