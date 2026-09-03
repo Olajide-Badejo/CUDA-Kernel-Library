@@ -144,6 +144,7 @@ Options parse(int argc, char** argv) {
 
 }  // namespace
 
+// NOLINTNEXTLINE(bugprone-exception-escape): a ckl::Error here is fatal by design
 int main(int argc, char** argv) {
     const Options opt = parse(argc, argv);
 

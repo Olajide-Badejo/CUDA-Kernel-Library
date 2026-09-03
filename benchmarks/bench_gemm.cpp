@@ -38,6 +38,7 @@ double bench_one(const Variant& v, const ckl::DeviceBuffer<float>& da,
 
 }  // namespace
 
+// NOLINTNEXTLINE(bugprone-exception-escape): a ckl::Error here is fatal by design
 int main(int argc, char** argv) {
     std::vector<int> sizes = {256, 512, 1024, 2048, 4096};
     if (argc > 1) {

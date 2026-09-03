@@ -1,0 +1,7 @@
+# actionlint cannot know which labels a self hosted runner will carry, so it
+# reports `gpu` as an unknown runner label. This declares it. The runner that
+# will answer to it does not exist yet; docs/building.md has the registration
+# steps and says so plainly.
+self-hosted-runner:
+  labels:
+    - gpu

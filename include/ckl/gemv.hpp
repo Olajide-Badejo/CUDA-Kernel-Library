@@ -35,8 +35,8 @@ namespace ckl {
  * @note Simple and coalescing poor: adjacent threads read down a column of A,
  *       one row apart in memory. It is the honest baseline for this family.
  */
-CKL_EXPORT void gemv_naive(const float* a, const float* x, float* y, int m, int n, float alpha, float beta,
-                cudaStream_t stream = nullptr);
+CKL_EXPORT void gemv_naive(const float* a, const float* x, float* y, int m, int n, float alpha,
+                           float beta, cudaStream_t stream = nullptr);
 
 /**
  * @brief One warp per output row with a shfl reduction.
@@ -52,8 +52,8 @@ CKL_EXPORT void gemv_naive(const float* a, const float* x, float* y, int m, int 
  *       a shfl reduction, so adjacent lanes read adjacent A elements and the row
  *       read coalesces.
  */
-CKL_EXPORT void gemv_warp(const float* a, const float* x, float* y, int m, int n, float alpha, float beta,
-               cudaStream_t stream = nullptr);
+CKL_EXPORT void gemv_warp(const float* a, const float* x, float* y, int m, int n, float alpha,
+                          float beta, cudaStream_t stream = nullptr);
 
 /**
  * @brief One warp per row with float4 loads of A and x.
@@ -69,7 +69,7 @@ CKL_EXPORT void gemv_warp(const float* a, const float* x, float* y, int m, int n
  *       gemv_warp. The float4 loads need A and x 16 byte aligned.
  */
 CKL_EXPORT void gemv_vectorized(const float* a, const float* x, float* y, int m, int n, float alpha,
-                     float beta, cudaStream_t stream = nullptr);
+                                float beta, cudaStream_t stream = nullptr);
 
 /**
  * @brief cuBLAS SGEMV oracle and baseline, producing the same row major result.
@@ -83,7 +83,7 @@ CKL_EXPORT void gemv_vectorized(const float* a, const float* x, float* y, int m,
  * @param stream Stream to enqueue on; nullptr means the default stream.
  * @note Runs on the process wide default Context and takes its lock.
  */
-CKL_EXPORT void gemv_cublas(const float* a, const float* x, float* y, int m, int n, float alpha, float beta,
-                 cudaStream_t stream = nullptr);
+CKL_EXPORT void gemv_cublas(const float* a, const float* x, float* y, int m, int n, float alpha,
+                            float beta, cudaStream_t stream = nullptr);
 
 }  // namespace ckl

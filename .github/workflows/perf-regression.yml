@@ -1,0 +1,89 @@
+# The nightly performance gate: a quick sweep on the self hosted machine against
+# the committed baseline, per (family, variant, dtype, shape).
+#
+# Two things keep this from being a gate that cannot fail, and one keeps it from
+# being a gate that fails for nothing:
+#
+#   The job does not exist until the baseline does. experiments/results/
+#   perf_baseline.csv is the owner's locked clock sweep, and until it is
+#   committed the job's `if` is false and GitHub records a skipped conclusion.
+#   A skip is visibly not a pass; a green job with no comparison in it would be
+#   a lie.
+#
+#   scripts/perf_regression.py exits non-zero on a regression, on a baseline row
+#   with no measurement, and on a row measured while the GPU was throttled.
+#   There is no continue-on-error here.
+#
+#   A row counts as a regression only when the median is more than 5 percent
+#   slower AND the two bootstrap intervals do not overlap. The sweep already
+#   records the interval; ignoring it would page someone for noise.
+---
+name: perf-regression
+
+on:
+  schedule:
+    # 04:00 UTC. Nothing else is scheduled against the runner then.
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: perf-regression
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # A GitHub hosted job whose only work is to look for the baseline file. It
+  # exists because hashFiles is not available in a job level `if`, and the
+  # comparison job has to be genuinely skipped rather than run and passed.
+  baseline:
+    runs-on: ubuntu-latest
+    outputs:
+      present: ${{ steps.look.outputs.present }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Look for the committed baseline
+        id: look
+        run: |
+          if [ -f experiments/results/perf_baseline.csv ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "baseline found, the comparison will run"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No experiments/results/perf_baseline.csv. \
+            The comparison is skipped, not passed. Commit the owner's locked \
+            clock sweep summary as that file to switch this job on."
+          fi
+
+  perf-regression:
+    needs: baseline
+    if: needs.baseline.outputs.present == 'true'
+    runs-on: [self-hosted, gpu]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Configure and build
+        run: >
+          cmake -S . -B build-perf -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_CUDA_ARCHITECTURES=native
+          -DCKL_WERROR=ON
+          && cmake --build build-perf --parallel
+
+      - name: Quick sweep against the baseline
+        # The sweep locks the clock itself and refuses to run unlocked unless it
+        # is told to, so a night when the runner cannot take the lock fails here
+        # rather than producing numbers nobody should compare.
+        run: python3 scripts/perf_regression.py --sweep-arg --bench --sweep-arg build-perf/benchmarks/bench_all
+
+      - name: Upload the sweep output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: perf-regression-${{ github.run_id }}
+          path: |
+            experiments/results/sweep.jsonl
+            experiments/results/summary.csv
+          if-no-files-found: warn

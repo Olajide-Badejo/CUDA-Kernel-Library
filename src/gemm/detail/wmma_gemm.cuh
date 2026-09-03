@@ -41,16 +41,16 @@ constexpr int kBN = 64;
 constexpr int kBK = 16;
 constexpr int kWarpsM = 2;
 constexpr int kWarpsN = 2;
-constexpr int kWarps = kWarpsM * kWarpsN;     // 4
-constexpr int kThreads = kWarps * 32;         // 128
-constexpr int kWarpTileM = kBM / kWarpsM;     // 32
-constexpr int kWarpTileN = kBN / kWarpsN;     // 32
+constexpr int kWarps = kWarpsM * kWarpsN;  // 4
+constexpr int kThreads = kWarps * 32;      // 128
+constexpr int kWarpTileM = kBM / kWarpsM;  // 32
+constexpr int kWarpTileN = kBN / kWarpsN;  // 32
 // Used only inside the guarded device body, so below the architecture floor
 // they have no reader and nvcc's unreferenced variable diagnostic, which is an
 // error under CKL_WERROR, would fire.
 [[maybe_unused]] constexpr int kMFrags = kWarpTileM / kWmmaM;  // 2
 [[maybe_unused]] constexpr int kNFrags = kWarpTileN / kWmmaN;  // 2
-constexpr int kMinArch = 80;                  // bf16 WMMA fragments
+constexpr int kMinArch = 80;                                   // bf16 WMMA fragments
 
 __device__ inline float to_float(__half h) {
     return __half2float(h);

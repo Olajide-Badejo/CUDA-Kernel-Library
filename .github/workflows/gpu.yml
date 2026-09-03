@@ -1,0 +1,76 @@
+# The jobs that need a GPU in the machine. Separate from ci.yml because they
+# need a self hosted runner, and a workflow whose only job is queued forever
+# would otherwise sit in the middle of the checks list on every pull request.
+#
+# Until the owner registers a runner with the labels below, every run of this
+# workflow queues and eventually times out. That is the honest state: the checks
+# have not run. It is not dressed up as a pass anywhere, and docs/building.md
+# has the registration steps.
+---
+name: gpu
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # Not cancel-in-progress. There is one GPU, a cancelled ctest run can leave
+  # the device in a state the next run has to clean up, and a queue of one is
+  # cheaper than a flaky first test.
+  group: gpu-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  gpu:
+    runs-on: [self-hosted, gpu]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Configure and build
+        # native picks up whatever card the runner has. The examples are ctest
+        # cases with the gpu label, so they are built here and run below.
+        run: >
+          cmake -S . -B build-gpu -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_CUDA_ARCHITECTURES=native
+          -DCKL_WERROR=ON
+          && cmake --build build-gpu --parallel
+
+      - name: ctest -L gpu
+        run: ctest --test-dir build-gpu -L gpu --output-on-failure
+
+      - name: compute-sanitizer memcheck on the GEMM suites
+        run: |
+          compute-sanitizer --tool memcheck --error-exitcode 1 \
+            ./build-gpu/tests/ckl_test_gemm
+          compute-sanitizer --tool memcheck --error-exitcode 1 \
+            ./build-gpu/tests/ckl_test_gemm_tensor
+
+      - name: compute-sanitizer racecheck on the GEMM suites
+        # --num-cuda-barriers 65536 for the same reason docs/cutlass.md and
+        # docs/scan.md give: the tool tracks a fixed number of cuda::barrier
+        # objects and these suites launch past the default budget, which it
+        # reports as an internal error rather than a hazard.
+        run: |
+          compute-sanitizer --tool racecheck --error-exitcode 1 \
+            --num-cuda-barriers 65536 ./build-gpu/tests/ckl_test_gemm
+          compute-sanitizer --tool racecheck --error-exitcode 1 \
+            --num-cuda-barriers 65536 ./build-gpu/tests/ckl_test_gemm_tensor
+
+      - name: compute-sanitizer initcheck on the GEMM suites
+        run: |
+          compute-sanitizer --tool initcheck --error-exitcode 1 \
+            ./build-gpu/tests/ckl_test_gemm
+          compute-sanitizer --tool initcheck --error-exitcode 1 \
+            ./build-gpu/tests/ckl_test_gemm_tensor
+
+      - name: compute-sanitizer synccheck on the GEMM suites
+        run: |
+          compute-sanitizer --tool synccheck --error-exitcode 1 \
+            --num-cuda-barriers 65536 ./build-gpu/tests/ckl_test_gemm
+          compute-sanitizer --tool synccheck --error-exitcode 1 \
+            --num-cuda-barriers 65536 ./build-gpu/tests/ckl_test_gemm_tensor

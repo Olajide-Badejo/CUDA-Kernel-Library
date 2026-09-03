@@ -1,3 +1,15 @@
+# Everything that can be checked without a GPU. The two jobs that need one live
+# in gpu.yml and perf-regression.yml, because they run on a self hosted runner
+# and on a schedule rather than on every push.
+#
+# Rules this file keeps to, from the build spec's Section 15 and ground rule 8:
+#   No continue-on-error anywhere. A step that cannot fail is not a check.
+#   Every third party action is pinned to a full commit SHA, and every container
+#   image to a digest. A tag is a moving name and moves the gate with it.
+#   Every tool whose output the tree is asserted clean under is version pinned:
+#   clang-format, clang-tidy, ruff and yamllint in requirements-dev.txt,
+#   matplotlib and numpy in requirements.txt.
+---
 name: ci
 
 on:
@@ -5,63 +17,377 @@ on:
     branches: [main]
   pull_request:
 
+# A superseded run has nothing to say. Pushes to the same ref cancel the run
+# they replace; nothing here has a side effect that a cancel could corrupt.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
+  # ---------------------------------------------------------------------------
+  # style: format, lint, static analysis, and the two repository gates.
+  #
+  # It runs inside the CUDA container rather than on a bare runner because
+  # clang-tidy needs a compile database, and configuring one needs the toolkit
+  # headers that every host translation unit here includes.
+  # ---------------------------------------------------------------------------
   style:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Dash gate (hard rule)
-        run: python3 scripts/check_no_dashes.py .
-      - name: Ruff
-        run: |
-          pip install ruff
-          ruff check .
-      - name: clang-format
-        # Best effort: clang-format output varies across major versions, so a
-        # version mismatch with the local toolchain should not fail the build.
-        continue-on-error: true
-        run: |
-          sudo apt-get update && sudo apt-get install -y clang-format
-          find include src tests benchmarks -type f \( -name '*.cpp' -o -name '*.hpp' \
-            -o -name '*.cu' -o -name '*.cuh' \) -print0 \
-            | xargs -0 clang-format --dry-run --Werror
-
-  build:
-    # Compile the sm_120 code without a GPU. Uses a CUDA 13 devel container to
-    # match the CUDA 13 APIs the code relies on (the NVML versioned temperature
-    # and clocks event queries, and cudaDeviceProp without clockRate). Warnings as
-    # errors are off here because the container's host GCC differs from the
-    # author's machine and its warning set differs; the zero warning gate is
-    # enforced locally.
-    runs-on: ubuntu-latest
     container:
-      image: nvidia/cuda:13.0.1-devel-ubuntu24.04
+      image: nvidia/cuda:13.3.1-devel-ubuntu24.04@sha256:4ff859525f99de5782aa73607ce24219b07dddd48d12b97c1c301d7e1cfb0a87
     steps:
-      - name: Install build tools
+      - name: Container tools
+        # git goes in before the checkout so actions/checkout clones with git and
+        # leaves a real .git behind. The provenance gate resolves commit hashes
+        # against history, and a tarball checkout has none.
         run: |
           apt-get update
-          apt-get install -y git cmake ninja-build
-      - uses: actions/checkout@v4
+          apt-get install -y --no-install-recommends \
+            ca-certificates cmake git ninja-build python3 python3-pip
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          fetch-depth: 0
+
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Cache pip
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: ~/.cache/pip
+          key: pip-style-${{ runner.os }}-${{ hashFiles('requirements-dev.txt') }}
+
+      - name: Install the pinned style tools
+        # --break-system-packages because the container's python3 is the distro
+        # one and PEP 668 marks it externally managed. There is nothing else in
+        # this container to break.
+        run: |
+          python3 -m pip install --break-system-packages -r requirements-dev.txt
+          clang-format --version
+          clang-tidy --version | head -2
+          ruff --version
+
+      - name: clang-format
+        run: |
+          find include src tests benchmarks examples tools -type f \
+            \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.hpp' \
+               -o -name '*.cu' -o -name '*.cuh' \) -print0 \
+            | xargs -0 clang-format --dry-run --Werror
+
+      - name: ruff
+        run: ruff check .
+
+      - name: yamllint over the workflows
+        run: yamllint .github/workflows
+
+      - name: Dash gate
+        run: python3 scripts/check_no_dashes.py .
+
+      - name: Provenance gate
+        run: python3 scripts/check_provenance.py
+
+      - name: Configure the analysis build
+        # CMAKE_CXX_SCAN_FOR_MODULES=OFF keeps GCC's -fmodules-ts,
+        # -fdeps-format and -fmodule-mapper out of the compile database; clang
+        # rejects all three and every file would come back as a parse error
+        # instead of a finding. Nothing is compiled here: clang-tidy reads the
+        # database, and the generated headers it needs are written at configure
+        # time.
+        run: >
+          cmake -S . -B build-tidy -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_CUDA_ARCHITECTURES=120-real
+          -DCMAKE_CXX_SCAN_FOR_MODULES=OFF
+          -DCKL_WERROR=OFF
+
+      - name: clang-tidy
+        run: python3 scripts/run_clang_tidy.py -p build-tidy
+
+  # ---------------------------------------------------------------------------
+  # build-matrix: every shipped architecture, on both ends of the supported
+  # toolkit range, with warnings as errors.
+  #
+  # 12.8 is the floor because it is the first toolkit that emits sm_120 SASS
+  # (root CMakeLists enforces it), and 13.3 is the newest release and the one
+  # the SASS golden was assembled by. Both images are pinned by digest.
+  #
+  # The 12.8 cells leave the benchmarks out, and that is a real limitation
+  # rather than a convenience. benchmarks/bench_all.cpp names
+  # CUBLAS_GEMM_AUTOTUNE, which cuBLAS added in CUDA 13; on 12.8 the compiler
+  # says "'CUBLAS_GEMM_AUTOTUNE' was not declared in this scope". The library,
+  # the tools, the tests and the examples all compile on 12.8 with warnings as
+  # errors, so the floor still means something: what this project ships builds
+  # there. Only the measurement driver needs 13.
+  # ---------------------------------------------------------------------------
+  build-matrix:
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        toolkit: ['12.8', '13.3']
+        arch: ['80-real', '86-real', '89-real', '90-real', '120-real']
+        include:
+          - toolkit: '12.8'
+            image: nvidia/cuda:12.8.1-devel-ubuntu24.04@sha256:520292dbb4f755fd360766059e62956e9379485d9e073bbd2f6e3c20c270ed66
+            bench: 'OFF'
+          - toolkit: '13.3'
+            image: nvidia/cuda:13.3.1-devel-ubuntu24.04@sha256:4ff859525f99de5782aa73607ce24219b07dddd48d12b97c1c301d7e1cfb0a87
+            bench: 'ON'
+    steps:
+      - name: Container tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates ccache cmake git ninja-build python3
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@e42e6681d2906409c5dde4a315af6214eaa890ee  # v1.2
+        with:
+          key: cuda${{ matrix.toolkit }}-${{ matrix.arch }}
+          max-size: 500M
+
+      - name: Cache the FetchContent sources
+        # CUTLASS is a 220 MB shallow clone and GoogleTest another one, both at
+        # a pinned tag, both fetched at configure time. Keyed on the files that
+        # name the tags so a bump misses the cache instead of using a stale tree.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: .fetchcontent
+          key: fetchcontent-${{ hashFiles('src/gemm/CMakeLists.txt', 'tests/CMakeLists.txt') }}
+
       - name: Configure
         run: >
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_CUDA_ARCHITECTURES=120 -DCKL_WERROR=OFF
-      - name: Build (nvcc codegens sm_120 without a GPU present)
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_CUDA_ARCHITECTURES=${{ matrix.arch }}
+          -DCKL_WERROR=ON
+          -DCKL_BUILD_BENCH=${{ matrix.bench }}
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache
+          -DFETCHCONTENT_BASE_DIR=${{ github.workspace }}/.fetchcontent
+
+      - name: Build
+        # No GPU is needed to codegen for any of these architectures.
         run: cmake --build build --parallel
 
-  report:
-    # Build both PDFs from the committed summary and figures. No GPU or CUDA
-    # toolkit needed; this checks that the report pipeline reproduces from data.
+  # ---------------------------------------------------------------------------
+  # install-consume: the promise that a stranger can use this from an install
+  # prefix. Builds, installs, then builds tests/consume/ through find_package
+  # and examples/ standalone, both with no access to the source tree's targets.
+  #
+  # Running the examples needs a GPU, so they are only compiled here; the gpu
+  # workflow runs them as ctest cases.
+  # ---------------------------------------------------------------------------
+  install-consume:
     runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:13.3.1-devel-ubuntu24.04@sha256:4ff859525f99de5782aa73607ce24219b07dddd48d12b97c1c301d7e1cfb0a87
     steps:
-      - uses: actions/checkout@v4
-      - name: Install LaTeX and plotting dependencies
+      - name: Container tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates ccache cmake git ninja-build pkg-config python3
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@e42e6681d2906409c5dde4a315af6214eaa890ee  # v1.2
+        with:
+          key: install-consume
+          max-size: 500M
+
+      - name: Cache the FetchContent sources
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: .fetchcontent
+          key: fetchcontent-${{ hashFiles('src/gemm/CMakeLists.txt', 'tests/CMakeLists.txt') }}
+
+      - name: Configure and build
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES=120-real \
+            -DCKL_WERROR=ON \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
+            -DFETCHCONTENT_BASE_DIR="$GITHUB_WORKSPACE/.fetchcontent"
+          cmake --build build --parallel
+
+      - name: Install to a prefix
+        run: cmake --install build --prefix "$GITHUB_WORKSPACE/prefix"
+
+      - name: The installed package answers find_package
+        run: |
+          cmake -S tests/consume -B build-consume -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/prefix"
+          cmake --build build-consume --parallel
+
+      - name: The examples build standalone against the prefix
+        run: |
+          cmake -S examples -B build-examples -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/prefix"
+          cmake --build build-examples --parallel
+
+      - name: pkg-config finds the installed library
+        run: |
+          PKG_CONFIG_PATH="$GITHUB_WORKSPACE/prefix/lib/pkgconfig" pkg-config --modversion ckl
+          PKG_CONFIG_PATH="$GITHUB_WORKSPACE/prefix/lib/pkgconfig" pkg-config --cflags --libs ckl
+
+  # ---------------------------------------------------------------------------
+  # sass-diff: the top kernel's instruction stream against the committed golden.
+  #
+  # The container has to be CUDA 13.3. The golden records the assembler that
+  # produced it and scripts/sass_diff.py refuses to compare a capture from a
+  # different toolkit, so a 13.0 or a 14.0 image would fail the job for a reason
+  # that is not a regression. 13.3.1 carries nvcc 13.3.73, which is the toolkit
+  # named in the golden's header.
+  # ---------------------------------------------------------------------------
+  sass-diff:
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:13.3.1-devel-ubuntu24.04@sha256:4ff859525f99de5782aa73607ce24219b07dddd48d12b97c1c301d7e1cfb0a87
+    steps:
+      - name: Container tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates ccache cmake git ninja-build python3
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@e42e6681d2906409c5dde4a315af6214eaa890ee  # v1.2
+        with:
+          key: sass-diff
+          max-size: 500M
+
+      - name: Cache the FetchContent sources
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: .fetchcontent
+          key: fetchcontent-${{ hashFiles('src/gemm/CMakeLists.txt', 'tests/CMakeLists.txt') }}
+
+      - name: Build the GEMM objects
+        # The capture reads the built objects with cuobjdump, so only the kernel
+        # library has to exist. sm_120 is the architecture the golden is for.
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES=120-real \
+            -DCKL_WERROR=ON \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
+            -DFETCHCONTENT_BASE_DIR="$GITHUB_WORKSPACE/.fetchcontent"
+          cmake --build build --target ckl_gemm --parallel
+
+      - name: Diff the top kernel against the golden
+        run: python3 scripts/sass_diff.py --build-dir build
+
+  # ---------------------------------------------------------------------------
+  # report: the figures and tables rebuild from the committed results, byte for
+  # byte, and both PDFs compile.
+  #
+  # The image is pinned by digest, which pins TeX Live to Ubuntu 24.04's. What
+  # actually decides the git diff is matplotlib, because it writes its own
+  # rasteriser output into the PNG and its bundled FreeType into the PDF; that
+  # is pinned in requirements.txt and the Makefile sets SOURCE_DATE_EPOCH so the
+  # PDF timestamp is not a moving part either.
+  # ---------------------------------------------------------------------------
+  report:
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
+    steps:
+      - name: Container tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates git make python3 python3-pip \
+            texlive-latex-extra texlive-fonts-recommended texlive-science latexmk
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Cache pip
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: ~/.cache/pip
+          key: pip-report-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install the pinned plotting stack
+        run: |
+          python3 -m pip install --break-system-packages -r requirements.txt
+          python3 -c "import matplotlib, numpy; print(matplotlib.__version__, numpy.__version__)"
+
+      - name: Rebuild the report from committed data
+        run: make report
+
+      - name: The figures and tables on file are the ones the data produces
+        run: git diff --exit-code report/figures report/tables
+
+      - name: Upload the PDFs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: reports
+          path: reports/*.pdf
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # docs: Doxygen with zero warnings, published to Pages from main.
+  #
+  # WARN_AS_ERROR is set in the Doxyfile, so a header that loses its tags fails
+  # the job rather than shipping an empty page.
+  # ---------------------------------------------------------------------------
+  docs:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install Doxygen
         run: |
           sudo apt-get update
-          sudo apt-get install -y texlive-latex-extra texlive-fonts-recommended \
-            texlive-science latexmk python3-matplotlib python3-numpy
-      - name: Build reports from committed data
-        run: make report
+          sudo apt-get install -y --no-install-recommends doxygen graphviz
+
+      - name: Build the API documentation
+        run: doxygen Doxyfile
+
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b  # v5
+
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa  # v3
+        with:
+          path: docs/api/html
+
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e  # v4

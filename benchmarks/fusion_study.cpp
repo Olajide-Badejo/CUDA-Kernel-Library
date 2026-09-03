@@ -26,6 +26,7 @@
 #include "ckl/gemm.hpp"
 #include "reference.hpp"
 
+// NOLINTNEXTLINE(bugprone-exception-escape): a ckl::Error here is fatal by design
 int main(int argc, char** argv) {
     const int n = argc > 1 ? std::atoi(argv[1]) : 4096;
 

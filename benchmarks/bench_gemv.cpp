@@ -29,6 +29,7 @@ double gemv_gbps(int m, int n, double ms) {
 
 }  // namespace
 
+// NOLINTNEXTLINE(bugprone-exception-escape): a ckl::Error here is fatal by design
 int main(int argc, char** argv) {
     std::vector<int> sizes = {1024, 2048, 4096, 8192};
     if (argc > 1) {

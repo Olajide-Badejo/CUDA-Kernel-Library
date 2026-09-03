@@ -71,4 +71,6 @@ int run() {
 
 }  // namespace
 
-int main() { return run(); }
+int main() {
+    return run();
+}

@@ -37,7 +37,7 @@ constexpr int kWarpN = kBN / kWarpsN;             // 32
 // error under CKL_WERROR, would fire.
 [[maybe_unused]] constexpr int kMTiles = kWarpM / 16;  // 2 (m16 per mma)
 [[maybe_unused]] constexpr int kNTiles = kWarpN / 8;   // 4 (n8 per mma)
-constexpr int kMinArch = 80;                      // mma.sync.aligned.m16n8k16
+constexpr int kMinArch = 80;                           // mma.sync.aligned.m16n8k16
 
 // The PTX below only assembles on sm_80 and newer, and an unused device
 // function still reaches ptxas, so the helpers sit inside the same guard as

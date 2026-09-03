@@ -33,12 +33,12 @@ inline void scal_all(cublasHandle_t h, std::int64_t count, float beta, float* x)
         cudaStream_t stream = nullptr;
         const cublasStatus_t gs = cublasGetStream(h, &stream);
         if (gs != CUBLAS_STATUS_SUCCESS) {
-            throw Error(Status::kExecutionFailed,
-                        "cuBLAS error " + std::to_string(static_cast<int>(gs)) +
-                            ": cublasGetStream");
+            throw Error(
+                Status::kExecutionFailed,
+                "cuBLAS error " + std::to_string(static_cast<int>(gs)) + ": cublasGetStream");
         }
-        CKL_CUDA_CHECK(cudaMemsetAsync(x, 0, static_cast<std::size_t>(count) * sizeof(float),
-                                       stream));
+        CKL_CUDA_CHECK(
+            cudaMemsetAsync(x, 0, static_cast<std::size_t>(count) * sizeof(float), stream));
         return;
     }
     constexpr std::int64_t kChunk = 1073741824;  // 2^30 elements per call

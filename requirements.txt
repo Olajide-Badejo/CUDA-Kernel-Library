@@ -1,7 +1,19 @@
 # Python dependencies for the sweep driver, the report asset generation, and the
 # roofline plot. Install with `pip install -r requirements.txt` in a virtual
-# environment, or use the distribution packages (on Ubuntu: apt install
-# python3-matplotlib python3-numpy). Versions are floors, not pins.
-matplotlib>=3.8
-numpy>=1.26
-tqdm>=4.66
+# environment.
+#
+# These are exact pins, not floors, and that changed in 1.1.0. The report job
+# runs `make report` and then `git diff --exit-code report/figures
+# report/tables`, so the figures a fresh machine draws have to be the same bytes
+# as the ones on file. matplotlib writes the rasteriser's own output into the
+# PNG and its bundled FreeType into the PDF, so two different matplotlib wheels
+# produce two different files from the same numbers and the gate goes red for a
+# reason that has nothing to do with the results. Measured: matplotlib 3.10.7
+# from PyPI and Debian's 3.10.7+dfsg1 disagree on 3068 bytes of ladder.png.
+#
+# The committed figures were drawn by exactly these wheels with
+# SOURCE_DATE_EPOCH set (the Makefile's report target sets it). Bumping a pin
+# means regenerating report/figures in the same change.
+matplotlib==3.10.7
+numpy==2.3.5
+tqdm==4.67.3

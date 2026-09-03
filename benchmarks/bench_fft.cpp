@@ -186,6 +186,7 @@ Options parse(int argc, char** argv) {
 
 }  // namespace
 
+// NOLINTNEXTLINE(bugprone-exception-escape): a ckl::Error here is fatal by design
 int main(int argc, char** argv) {
     const Options opt = parse(argc, argv);
     const int n = 1 << opt.log2n;
@@ -459,8 +460,7 @@ int main(int argc, char** argv) {
                 auto tlaunch = [&ta, &tb, side, v](cudaStream_t s) {
                     ckl::fft_transpose(ta.data(), tb.data(), side, side, 1, v, nullptr, 1.0f, s);
                 };
-                ckl::TimingOptions ttiming = timing;
-                const ckl::TimingStats one = ckl::time_stream_ex(tlaunch, ttiming);
+                const ckl::TimingStats one = ckl::time_stream_ex(tlaunch, timing);
                 share = total.median_ms > 0.0 ? 2.0 * one.median_ms / total.median_ms : 0.0;
             }
             char share_text[24] = "0.0% (no transpose)";

@@ -7,11 +7,48 @@ BUILD_TYPE ?= Release
 GENERATOR ?= Ninja
 CTEST_LABELS ?=
 
+# Appended to every configure this file runs. It exists because the host
+# compiler is not always the default one: on a machine whose default GCC is 15,
+# nvcc 13.3 cannot parse libstdc++'s `if consteval`, and the fix is
+#   make build CMAKE_EXTRA="-DCMAKE_CXX_COMPILER=g++-14 -DCMAKE_CUDA_HOST_COMPILER=g++-14"
+# See the host compiler section of docs/building.md. The CI containers ship
+# GCC 13 and need nothing here.
+CMAKE_EXTRA ?=
+
+# The style tools, overridable so a checkout can point at a pip venv:
+#   make check-style CLANG_FORMAT=.venv/bin/clang-format CLANG_TIDY=.venv/bin/clang-tidy
+# The versions of record are in requirements-dev.txt, and they are exact. The
+# tree is formatted for clang-format 20.1.7; version 19 accepts 13 files that
+# 20.1.7 rewrites, so "whatever clang-format is on this machine" is not a gate.
+CLANG_FORMAT ?= clang-format
+CLANG_TIDY ?= clang-tidy
+RUFF ?= ruff
+YAMLLINT ?= yamllint
+
+# clang-tidy reads a compile database, and CMake's Ninja generator writes GCC's
+# module scanning flags into every C++ command line. clang rejects those, so the
+# analysis build is its own tree configured with scanning off. Nothing is
+# compiled in it; the headers clang-tidy needs are generated at configure time.
+TIDY_BUILD_DIR ?= $(BUILD_DIR)/tidy
+
+# Reproducible figures. matplotlib stamps the wall clock into a PDF unless this
+# is set, and the report job diffs report/figures byte for byte. The value is a
+# fixed instant (2025-01-01T00:00:00Z) rather than a commit date, because the
+# same data has to draw the same bytes on every machine and every branch.
+SOURCE_DATE_EPOCH ?= 1735689600
+export SOURCE_DATE_EPOCH
+
+# Everything clang-format and clang-tidy have an opinion about.
+STYLE_SOURCES := $(shell find include src tests benchmarks examples tools -type f \
+    \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.hpp' \
+       -o -name '*.cu' -o -name '*.cuh' \) 2>/dev/null)
+
 # report, roofline, sweep collide with directory names, so they must be phony or
 # make treats the directory as an up to date target and does nothing.
 .PHONY: all setup configure build test bench roofline sweep sweep-quick tile-sweep \
-        summary report check-style dash provenance sass sass-diff register-study \
-        clean help
+        summary report check-style style format format-check tidy tidy-configure \
+        ruff yamllint dash provenance doxygen sass sass-diff register-study \
+        perf-regression clean help
 
 help:
 	@echo "Targets:"
@@ -25,12 +62,17 @@ help:
 	@echo "  sass         capture every ladder rung's SASS into experiments/sass"
 	@echo "  sass-diff    fail if the top kernel's SASS left the committed golden"
 	@echo "  register-study  reassemble the top kernel under register ceilings"
-	@echo "  check-style  run the dash and provenance gates"
+	@echo "  perf-regression  tonight's quick sweep against the committed baseline"
+	@echo "  format       rewrite every source file the way clang-format wants it"
+	@echo "  format-check clang-format, read only, non zero on any difference"
+	@echo "  tidy         clang-tidy over the host translation units"
+	@echo "  doxygen      build the API documentation, zero warnings"
+	@echo "  check-style  the whole style gate, exactly what the CI style job runs"
 	@echo "  all          build then test then check-style"
 	@echo "  clean        remove the build tree"
 
 setup configure:
-	cmake -S . -B $(BUILD_DIR) -G $(GENERATOR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE)
+	cmake -S . -B $(BUILD_DIR) -G $(GENERATOR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) $(CMAKE_EXTRA)
 
 build: configure
 	cmake --build $(BUILD_DIR)
@@ -87,7 +129,46 @@ sass-diff: build
 register-study: build
 	python3 benchmarks/register_study.py --build-dir $(BUILD_DIR)
 
-check-style: dash provenance
+# The style gate, in the order the CI style job runs it. Every step here fails
+# the build on its own; none of them is advisory.
+check-style: format-check ruff yamllint dash provenance tidy
+
+# An alias, because `make style` is what fingers type.
+style: check-style
+
+format:
+	$(CLANG_FORMAT) -i $(STYLE_SOURCES)
+
+format-check:
+	@$(CLANG_FORMAT) --version
+	$(CLANG_FORMAT) --dry-run --Werror $(STYLE_SOURCES)
+
+ruff:
+	$(RUFF) check .
+
+yamllint:
+	$(YAMLLINT) .github/workflows
+
+tidy-configure:
+	cmake -S . -B $(TIDY_BUILD_DIR) -G $(GENERATOR) \
+	    -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+	    -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
+	    -DCKL_WERROR=OFF $(CMAKE_EXTRA)
+
+tidy: tidy-configure
+	CLANG_TIDY=$(CLANG_TIDY) python3 scripts/run_clang_tidy.py -p $(TIDY_BUILD_DIR)
+
+# Zero warnings, because the Doxyfile sets WARN_AS_ERROR. A header that loses
+# its tags fails here rather than shipping an empty page.
+doxygen:
+	doxygen Doxyfile
+
+# Tonight's quick sweep against the committed baseline. Needs a GPU, and needs
+# experiments/results/perf_baseline.csv to exist; without it the script says so
+# and exits non-zero rather than passing on no evidence.
+perf-regression: build
+	python3 scripts/perf_regression.py --sweep-arg --bench \
+	    --sweep-arg $(BUILD_DIR)/benchmarks/bench_all
 
 dash:
 	python3 scripts/check_no_dashes.py .

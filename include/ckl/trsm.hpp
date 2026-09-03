@@ -32,7 +32,8 @@ namespace ckl {
  *       sequentially down the rows. Kept as the honest baseline.
  * @note Asynchronous. Synchronize on stream before reading B.
  */
-CKL_EXPORT void trsm_naive(const float* a, float* b, int m, int n, float alpha, cudaStream_t stream = nullptr);
+CKL_EXPORT void trsm_naive(const float* a, float* b, int m, int n, float alpha,
+                           cudaStream_t stream = nullptr);
 
 /**
  * @brief Blocked triangular solve: diagonal block solves plus GEMM style trailing updates.
@@ -46,7 +47,7 @@ CKL_EXPORT void trsm_naive(const float* a, float* b, int m, int n, float alpha, 
  *       subtracts its contribution from the trailing rows.
  */
 CKL_EXPORT void trsm_blocked(const float* a, float* b, int m, int n, float alpha,
-                  cudaStream_t stream = nullptr);
+                             cudaStream_t stream = nullptr);
 
 /**
  * @brief cuBLAS STRSM oracle and baseline, same row major result.
@@ -59,6 +60,6 @@ CKL_EXPORT void trsm_blocked(const float* a, float* b, int m, int n, float alpha
  * @note Runs on the process wide default Context and takes its lock.
  */
 CKL_EXPORT void trsm_cublas(const float* a, float* b, int m, int n, float alpha,
-                 cudaStream_t stream = nullptr);
+                            cudaStream_t stream = nullptr);
 
 }  // namespace ckl

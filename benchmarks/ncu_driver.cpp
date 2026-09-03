@@ -62,6 +62,7 @@ void run(LaunchFn launch, int n, int launches) {
 
 }  // namespace
 
+// NOLINTNEXTLINE(bugprone-exception-escape): a ckl::Error here is fatal by design
 int main(int argc, char** argv) {
     if (argc < 3) {
         std::fprintf(stderr, "usage: %s <variant> <size> [launches]\n", argv[0]);

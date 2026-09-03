@@ -508,7 +508,9 @@ TileChoice choose_tile(const Context& ctx, const GemmDesc& d) {
         if (bps <= 0) {
             continue;  // this device cannot host the shape at all
         }
-        if (bar > 0.0 && swept->gflops[static_cast<std::size_t>(i)] < bar) {
+        // bar is only ever positive when swept is non null, but the null check
+        // is written out so the invariant lives next to the dereference.
+        if (swept != nullptr && bar > 0.0 && swept->gflops[static_cast<std::size_t>(i)] < bar) {
             continue;
         }
         const GemmTile t = gemm_tile_family_shape(i);

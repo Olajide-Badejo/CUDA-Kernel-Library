@@ -56,8 +56,8 @@ std::vector<float2> random_signal(int count, std::uint64_t seed) {
     const std::vector<float> flat = ckl::random_matrix(2 * count, 1, seed);
     std::vector<float2> out(static_cast<std::size_t>(count));
     for (int i = 0; i < count; ++i) {
-        out[static_cast<std::size_t>(i)] = make_float2(flat[static_cast<std::size_t>(2 * i)],
-                                                       flat[static_cast<std::size_t>(2 * i) + 1]);
+        const std::size_t at = 2 * static_cast<std::size_t>(i);
+        out[static_cast<std::size_t>(i)] = make_float2(flat[at], flat[at + 1]);
     }
     return out;
 }
@@ -600,8 +600,8 @@ TEST_F(FftPlanState, ThePassCountsAreTheOnesTheTrafficModelDeclares) {
     EXPECT_EQ(plan.passes(ckl::FftAlgo::kCufft), 0);
 
     const long long n = 1 << 20;
-    EXPECT_EQ(plan.model_bytes(ckl::FftAlgo::kFourStep), 5 * 16 * n);
-    EXPECT_EQ(plan.model_bytes(ckl::FftAlgo::kRadix2Global), 20 * 16 * n);
+    EXPECT_EQ(plan.model_bytes(ckl::FftAlgo::kFourStep), 5LL * 16 * n);
+    EXPECT_EQ(plan.model_bytes(ckl::FftAlgo::kRadix2Global), 20LL * 16 * n);
     EXPECT_EQ(plan.model_bytes(ckl::FftAlgo::kCufft), 0);
 
     // The twiddle band brackets the honest answer: the low end is the whole

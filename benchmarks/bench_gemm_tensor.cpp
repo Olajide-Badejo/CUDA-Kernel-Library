@@ -71,6 +71,7 @@ void bench_precision(const char* type_name, int sz, KernelFn kernel, OracleFn or
 
 }  // namespace
 
+// NOLINTNEXTLINE(bugprone-exception-escape): a ckl::Error here is fatal by design
 int main(int argc, char** argv) {
     std::vector<int> sizes = {512, 1024, 2048, 4096, 8192};
     if (argc > 1) {

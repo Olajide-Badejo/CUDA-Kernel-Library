@@ -26,9 +26,9 @@ namespace {
 
 void check(cublasStatus_t s, const char* expr) {
     if (s != CUBLAS_STATUS_SUCCESS) {
-        throw Error(s == CUBLAS_STATUS_ARCH_MISMATCH ? Status::kArchMismatch
-                                                     : Status::kExecutionFailed,
-                    std::string("cuBLAS error ") + cublasGetStatusName(s) + ": " + expr);
+        throw Error(
+            s == CUBLAS_STATUS_ARCH_MISMATCH ? Status::kArchMismatch : Status::kExecutionFailed,
+            std::string("cuBLAS error ") + cublasGetStatusName(s) + ": " + expr);
     }
 }
 
@@ -48,8 +48,8 @@ void gemv_cublas(const float* a, const float* x, float* y, int m, int n, float a
         // NaN or uninitialized y is legal input and scaling it would keep the
         // NaN. Every hand written variant already honors this.
         if (beta == 0.0f) {
-            CKL_CUDA_CHECK(cudaMemsetAsync(y, 0, static_cast<std::size_t>(m) * sizeof(float),
-                                           stream));
+            CKL_CUDA_CHECK(
+                cudaMemsetAsync(y, 0, static_cast<std::size_t>(m) * sizeof(float), stream));
             return;
         }
         check(cublasSscal(h, m, &beta, y, 1), "cublasSscal");

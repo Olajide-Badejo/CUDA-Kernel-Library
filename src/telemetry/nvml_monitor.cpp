@@ -46,19 +46,22 @@ struct NvmlMonitor::Impl {
         NvmlSample s{};
         s.time_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         unsigned int v = 0;
-        if (nvmlDeviceGetClockInfo(device, NVML_CLOCK_SM, &v) == NVML_SUCCESS)
+        if (nvmlDeviceGetClockInfo(device, NVML_CLOCK_SM, &v) == NVML_SUCCESS) {
             s.sm_clock_mhz = v;
+        }
         nvmlTemperature_t temp{};
         temp.version = nvmlTemperature_v1;
         temp.sensorType = NVML_TEMPERATURE_GPU;
         if (nvmlDeviceGetTemperatureV(device, &temp) == NVML_SUCCESS) {
             s.temperature_c = static_cast<unsigned int>(temp.temperature);
         }
-        if (nvmlDeviceGetPowerUsage(device, &v) == NVML_SUCCESS)
+        if (nvmlDeviceGetPowerUsage(device, &v) == NVML_SUCCESS) {
             s.power_mw = v;
+        }
         nvmlUtilization_t util{};
-        if (nvmlDeviceGetUtilizationRates(device, &util) == NVML_SUCCESS)
+        if (nvmlDeviceGetUtilizationRates(device, &util) == NVML_SUCCESS) {
             s.gpu_util_pct = util.gpu;
+        }
         unsigned long long reasons = 0;
         if (nvmlDeviceGetCurrentClocksEventReasons(device, &reasons) == NVML_SUCCESS) {
             s.throttle_reasons = reasons;
@@ -86,8 +89,15 @@ NvmlMonitor::NvmlMonitor(unsigned int sample_interval_ms, int device_index)
 
 NvmlMonitor::~NvmlMonitor() {
     if (impl_) {
-        if (impl_->running.load()) {
-            stop();
+        // stop() joins the sampling thread, and join() throws on a broken
+        // thread state. Out of a destructor that would terminate the process
+        // during unwinding, so the shutdown path swallows it: the samples are
+        // already lost at this point and there is nobody left to tell.
+        try {
+            if (impl_->running.load()) {
+                stop();
+            }
+        } catch (...) {  // NOLINT(bugprone-empty-catch)
         }
         if (impl_->nvml_ok) {
             nvmlShutdown();

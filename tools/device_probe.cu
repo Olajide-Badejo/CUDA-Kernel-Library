@@ -81,10 +81,10 @@ int cores_per_sm(int major, int minor) {
         case 75:  // Turing
         case 80:  // Ampere GA100
             return 64;
-        case 86:  // Ampere GA10x
-        case 87:  // Orin
-        case 89:  // Ada
-        case 90:  // Hopper
+        case 86:   // Ampere GA10x
+        case 87:   // Orin
+        case 89:   // Ada
+        case 90:   // Hopper
         case 100:  // Blackwell datacenter
         case 120:  // Blackwell consumer
             return 128;

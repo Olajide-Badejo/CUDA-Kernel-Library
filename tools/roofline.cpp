@@ -138,6 +138,7 @@ double measure_variant_fp16(Fn fn, int n) {
 
 }  // namespace
 
+// NOLINTNEXTLINE(bugprone-exception-escape): a ckl::Error here is fatal by design
 int main() {
     int device = 0;
     CKL_CUDA_CHECK(cudaGetDevice(&device));
@@ -196,9 +197,10 @@ int main() {
         CKL_CUDA_CHECK(cudaDeviceGetAttribute(&core_clock_khz, cudaDevAttrClockRate, device));
         clock_mhz = static_cast<double>(core_clock_khz) / 1000.0;
         clock_source = "cuda_boost_clock_attribute";
-        std::printf("WARNING: NVML unavailable (%s); the compute roofs below use the boost "
-                    "clock, which the GPU does not hold under load.\n",
-                    telemetry.note.empty() ? "no detail" : telemetry.note.c_str());
+        std::printf(
+            "WARNING: NVML unavailable (%s); the compute roofs below use the boost "
+            "clock, which the GPU does not hold under load.\n",
+            telemetry.note.empty() ? "no detail" : telemetry.note.c_str());
     }
 
     const double sms = static_cast<double>(prop.multiProcessorCount);
@@ -254,8 +256,9 @@ int main() {
 
     std::FILE* csv = std::fopen("experiments/results/roofline.csv", "w");
     if (csv != nullptr) {
-        std::fprintf(csv, "label,intensity_flop_per_byte,achieved_gflops,roof_gflops,ceiling,"
-                          "bound,clock_mhz\n");
+        std::fprintf(csv,
+                     "label,intensity_flop_per_byte,achieved_gflops,roof_gflops,ceiling,"
+                     "bound,clock_mhz\n");
     }
     for (const auto& p : points) {
         const double peak = p.tensor ? tensor_roof : fp32_roof;

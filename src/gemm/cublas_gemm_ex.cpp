@@ -31,9 +31,9 @@ namespace {
 
 void check(cublasStatus_t s, const char* expr) {
     if (s != CUBLAS_STATUS_SUCCESS) {
-        throw Error(s == CUBLAS_STATUS_ARCH_MISMATCH ? Status::kArchMismatch
-                                                     : Status::kExecutionFailed,
-                    std::string("cuBLAS error ") + cublasGetStatusName(s) + ": " + expr);
+        throw Error(
+            s == CUBLAS_STATUS_ARCH_MISMATCH ? Status::kArchMismatch : Status::kExecutionFailed,
+            std::string("cuBLAS error ") + cublasGetStatusName(s) + ": " + expr);
     }
 }
 

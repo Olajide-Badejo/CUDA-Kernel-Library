@@ -22,9 +22,9 @@ namespace {
 
 void check(cusolverStatus_t s, const char* expr) {
     if (s != CUSOLVER_STATUS_SUCCESS) {
-        throw Error(Status::kExecutionFailed, std::string("cuSOLVER error ") +
-                                                  std::to_string(static_cast<int>(s)) + ": " +
-                                                  expr);
+        throw Error(
+            Status::kExecutionFailed,
+            std::string("cuSOLVER error ") + std::to_string(static_cast<int>(s)) + ": " + expr);
     }
 }
 
@@ -132,8 +132,8 @@ void DenseSolver::solve_cholesky(float* a, float* b, int n, int nrhs, Fill fill)
           "cusolverDnSpotrf");
     if (int info = read_info(impl_->info); info != 0) {
         throw Error(Status::kExecutionFailed, "Cholesky factorization failed, leading minor " +
-                                                 std::to_string(info) +
-                                                 " is not positive definite");
+                                                  std::to_string(info) +
+                                                  " is not positive definite");
     }
     check(cusolverDnSpotrs(impl_->handle, uplo, n, nrhs, a, n, b, n, impl_->info.data()),
           "cusolverDnSpotrs");

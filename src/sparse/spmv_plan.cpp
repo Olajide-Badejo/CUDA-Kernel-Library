@@ -347,8 +347,10 @@ void SpmvPlan::Impl::build_sell(const std::vector<int>& host_col,
                 const std::size_t at = static_cast<std::size_t>(base) +
                                        static_cast<std::size_t>(j) * kSliceHeight +
                                        static_cast<std::size_t>(lane);
-                cols[at] = host_col[static_cast<std::size_t>(start + j)];
-                vals[at] = host_val[static_cast<std::size_t>(start + j)];
+                const std::size_t from =
+                    static_cast<std::size_t>(start) + static_cast<std::size_t>(j);
+                cols[at] = host_col[from];
+                vals[at] = host_val[from];
             }
         }
     }

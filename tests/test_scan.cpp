@@ -1024,7 +1024,8 @@ TEST_F(ScanSlow, ReductionAt2To28) {
         period_sum += static_cast<double>(x);
         period_magnitude = std::max(period_magnitude, std::fabs(static_cast<double>(x)));
     }
-    const double exact = period_sum * static_cast<double>(n / 1024);
+    const long long periods = n / 1024;
+    const double exact = period_sum * static_cast<double>(periods);
 
     ckl::DeviceBuffer<float> in(static_cast<std::size_t>(n));
     fill_repeating(in, pattern, n);

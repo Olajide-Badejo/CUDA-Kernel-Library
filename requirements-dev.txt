@@ -1,0 +1,15 @@
+# The style gate's tooling, pinned to the exact versions the tree is clean
+# under. Kept apart from requirements.txt because nothing here is needed to run
+# a benchmark or build a report; it is what `make style` and the CI style job
+# install.
+#
+# Why PyPI rather than apt: clang-format's output moves between major versions.
+# The same 13 files that clang-format 19 accepts, clang-format 20.1.7 rewrites,
+# so "install clang-format" resolves to a different gate on every runner image.
+# These wheels carry the LLVM binaries at an exact version, install the same way
+# on this machine and on a GitHub runner, and need no apt pinning or LLVM
+# tarball. The tree is formatted for clang-format 20.1.7 and nothing else.
+clang-format==20.1.7
+clang-tidy==20.1.0
+ruff==0.15.22
+yamllint==1.35.1

@@ -84,7 +84,8 @@ static void run_sgemm_case(ckl_handle_t h) {
         float beta = 0.0f;
         s = ckl_gemm_ex(h, CKL_ROW_MAJOR, CKL_OP_N, CKL_OP_N, N, N, N, &alpha, da, CKL_R_32F, N, db,
                         CKL_R_32F, N, &beta, dc, CKL_R_32F, N, CKL_ALGO_MMA_OPT, &chosen);
-        check(s == CKL_STATUS_NOT_SUPPORTED, "explicit mma_opt on 8x8x8 is CKL_STATUS_NOT_SUPPORTED");
+        check(s == CKL_STATUS_NOT_SUPPORTED,
+              "explicit mma_opt on 8x8x8 is CKL_STATUS_NOT_SUPPORTED");
         check(chosen == CKL_ALGO_MMA_OPT, "chosen names the algorithm that was asked for");
     }
 

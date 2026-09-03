@@ -176,6 +176,7 @@ double largest_magnitude(const std::vector<float>& in) {
 
 }  // namespace
 
+// NOLINTNEXTLINE(bugprone-exception-escape): a ckl::Error here is fatal by design
 int main(int argc, char** argv) {
     const Options opt = parse(argc, argv);
     if (opt.n <= 0) {

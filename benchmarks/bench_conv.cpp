@@ -198,6 +198,7 @@ double verify(const Bench& b, int verify_len, double perturb) {
 
 }  // namespace
 
+// NOLINTNEXTLINE(bugprone-exception-escape): a ckl::Error here is fatal by design
 int main(int argc, char** argv) {
     const Options opt = parse(argc, argv);
     const int n = 1 << opt.log2n;

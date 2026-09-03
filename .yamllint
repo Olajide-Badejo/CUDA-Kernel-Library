@@ -1,0 +1,17 @@
+# yamllint for the workflow files. Two rules from the default set are turned
+# off, and nothing else is relaxed.
+#
+# line-length: a container image pinned by digest is a 121 character token that
+# cannot be wrapped. Wrapping the ones that could be wrapped and leaving the
+# rest would make the rule advisory, and an advisory rule is not a rule.
+#
+# truthy: `on:` is the workflow trigger key, and GitHub requires that spelling.
+# yamllint reads it as the YAML 1.1 boolean and asks for `true`. The document
+# start marker is present in every file, so document-start stays on.
+extends: default
+
+rules:
+  line-length: disable
+  truthy:
+    allowed-values: ['true', 'false']
+    check-keys: false

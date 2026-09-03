@@ -1,8 +1,34 @@
 # A focused clang-tidy set: bug prone patterns, portability, performance, and a
 # few readability checks, without the noisy ones that fight CUDA idioms. Enforced
 # in CI over the host translation units (device code is checked by nvcc warnings).
+# Run it with `make tidy`; the version of record is clang-tidy 20.1.0, pinned in
+# requirements-dev.txt so CI and this machine analyse with the same binary.
+#
+# Why each check below is switched off, one line each:
+#   bugprone-easily-swappable-parameters: GEMM signatures are (m, n, k) by
+#     convention and renaming them would be worse than the risk.
+#   bugprone-narrowing-conversions: the tree casts int extents to size_t on
+#     purpose and says so with static_cast at every site.
+#   bugprone-macro-parentheses: CKL_RUN_REDUCE and CKL_RUN_SCAN take a type as a
+#     macro argument, and parenthesising a type does not compile.
+#   performance-avoid-endl: the flagged writes are one line diagnostics where a
+#     flush is what is wanted.
+#   performance-enum-size: the flagged enums are function local test tags held in
+#     a single variable, so a narrower base type saves nothing.
+#   clang-analyzer-optin.core.EnumCastOutOfRange and clang-analyzer-cplusplus.Move:
+#     the only sites are tests that cast an out of range value to an enum, and
+#     call a method on a moved from object, on purpose, to prove the library
+#     rejects both. Silencing the tests would delete the thing being tested.
+#   clang-analyzer-unix.Stream: matrix_cache checks the return of every fread and
+#     reports a truncated file, which is exactly the case the checker warns the
+#     code might not handle.
+#   clang-diagnostic-sign-conversion and clang-diagnostic-implicit-float-conversion:
+#     these come from -Wconversion in the compile database. GCC 14, the compiler
+#     of record, builds the whole tree clean with that flag; clang disagrees only
+#     about int to size_t index arithmetic it cannot prove non negative.
 Checks: >
   bugprone-*,
+  clang-analyzer-*,
   performance-*,
   portability-*,
   modernize-use-nullptr,
@@ -10,7 +36,36 @@ Checks: >
   readability-braces-around-statements,
   -bugprone-easily-swappable-parameters,
   -bugprone-narrowing-conversions,
-  -performance-avoid-endl
-WarningsAsErrors: ''
+  -bugprone-macro-parentheses,
+  -performance-avoid-endl,
+  -performance-enum-size,
+  -clang-analyzer-optin.core.EnumCastOutOfRange,
+  -clang-analyzer-cplusplus.Move,
+  -clang-analyzer-unix.Stream,
+  -clang-diagnostic-sign-conversion,
+  -clang-diagnostic-implicit-float-conversion
+
+# Every check that survives the list above is an error, not a warning. An empty
+# WarningsAsErrors is a gate that cannot fail (ground rule 8), so the enabled set
+# is repeated here rather than left to a default.
+WarningsAsErrors: >
+  bugprone-*,
+  clang-analyzer-*,
+  performance-*,
+  portability-*,
+  modernize-use-nullptr,
+  modernize-use-override,
+  readability-braces-around-statements,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -bugprone-macro-parentheses,
+  -performance-avoid-endl,
+  -performance-enum-size,
+  -clang-analyzer-optin.core.EnumCastOutOfRange,
+  -clang-analyzer-cplusplus.Move,
+  -clang-analyzer-unix.Stream,
+  -clang-diagnostic-sign-conversion,
+  -clang-diagnostic-implicit-float-conversion
+
 HeaderFilterRegex: 'include/ckl/.*'
 FormatStyle: file
