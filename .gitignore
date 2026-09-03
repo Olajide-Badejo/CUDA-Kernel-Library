@@ -24,9 +24,12 @@ experiments/results/summary_*.csv
 *.nsys-rep
 *.sqlite
 
-# LaTeX build junk
+# LaTeX build junk. Both documents build out of report/ into report/build/, and
+# the PDFs are not committed: they are attached to the GitHub release at tag time.
+# reports/ was the old committed-PDF directory and is gone; it stays listed so a
+# stale working copy does not put the binaries back.
 report/build/
-report_debug/build/
+/reports/
 *.aux
 *.log
 *.out

@@ -1,0 +1,94 @@
+\section{Sparse matrix vector multiplication}
+\label{sec:sparse}
+
+SpMV is the family where the v1 report was most wrong, so it is the family that
+got rebuilt rather than extended. Two things were broken. The denominator was
+contaminated: the cuSPARSE wrapper built its descriptors and sized and allocated
+its workspace inside the timed region, so the vendor paid a per call setup my
+kernels never paid, and the percentages that came out of that (283, 174 and 127
+percent of cuSPARSE) were nonsense in my favour. And the benchmark ran one
+synthetic skewed matrix, which cannot separate the kernels that this family exists
+to separate.
+
+\subsection{A matrix suite, not a size list}
+
+A sparse kernel's performance is a function of the degree distribution, not of the
+dimension, so a size list can only ever confirm the winner that a single matrix
+already picked. The family now runs over a suite of real matrices named in
+\texttt{experiments/matrix\_manifest.csv}, plus one seeded generator, and every row
+of the summary names its matrix rather than a shape. Matrices are fetched ahead of
+time by \texttt{scripts/fetch\_matrices.py}; nothing downloads a matrix mid sweep,
+because a download inside a measurement is a measurement of the network.
+
+\subsection{The plan, and the structural fix for the timing defect}
+
+\texttt{ckl::SpmvPlan} is built once per matrix and owns everything that does not
+change between calls: the cuSPARSE handle, the CSR and dense vector descriptors, a
+workspace for each vendor algorithm, the analysis the vendor's second algorithm
+needs, the histogram of nonzeros per row, the lane width that histogram implies,
+and the SELL-C-sigma and BSR conversions. Running a variant through the plan
+enqueues kernel launches and nothing else.
+
+That makes the v1 defect impossible through the public path rather than merely
+fixed: there is no entry point in 1.1.0 that builds a descriptor per call. And the
+claim is checked rather than asserted. \texttt{bench\_spmv} arms a CUPTI runtime
+callback on the allocation and free entry points around its timed lambda and exits
+non-zero if the counter moves. A \texttt{-{}-gate-red} switch restores the v1 per
+call allocation on purpose so the gate can be watched failing; with the allocation
+back in, every variant reads about fifty percent slower, which is the size of the
+effect that got into the v1 report.
+
+\subsection{The variants and what each one fixes}
+
+Six kernels, each reachable by name with \texttt{chosen} reporting what ran.
+
+\emph{Naive} is one thread per row, the CSR scalar baseline of Bell and
+Garland~\cite{bell2009}: a long row makes its thread run far longer than its warp
+neighbours, and the warp retires at the speed of its slowest row. \emph{Warp} is
+one 32 lane warp per row with a shuffle reduction, the vector variant of the same
+paper: a long row is split 32 ways and the reads coalesce within a row.
+\emph{Vector} narrows that to a lane group of 2, 4, 8, 16 or 32 chosen from the
+plan's histogram and templated on the width, which fixes the lane waste the warp
+variant pays on regular matrices, where a full warp idles 25 lanes and still runs
+five reduction steps to combine nothing.
+
+\emph{Merge} is Merrill and Garland's merge based decomposition~\cite{merrill2016spmv}.
+The merge of the row end offsets with the nonzero indices has exactly $m + nnz$
+steps whatever the degree distribution, so cutting it into equal diagonal segments
+gives every thread exactly $\lceil (m + nnz) / \text{threads} \rceil$ units of
+work, and a second pass adds in the partials of rows that straddle a segment
+boundary. That is the imbalance the warp variant still carries when it hands one
+4700 nonzero row to a single warp while its neighbours finish four element rows.
+
+\emph{Sell} is SELL-C-sigma~\cite{kreutzer2014} with C equal to 32, one warp per
+slice and one lane per row, rows sorted by length inside a window of sigma rows and
+padded to the slice maximum, so the inner loop is a 128 byte column read with no
+row pointer indirection at all. It fixes the uncoalesced walk both CSR kernels do
+across row boundaries and pays for it in padding, which the summary records as a
+padding ratio so the trade is visible rather than implied. \emph{Bsr} is block CSR,
+the stretch item: an $r$ by $r$ dense block shares one column index and one span of
+the vector across $r^2$ values. It exists for the two matrices with dense blocking
+and does nothing for the graph classes, and its baseline is the vendor's block
+routine rather than the general one.
+
+\subsection{What is measured}
+
+Table \ref{tab:spmv} is the suite table. It is generated from whatever SpMV rows
+the committed summary carries, keyed on the matrix name where the schema has one.
+The v1 rows do not name a matrix and their percent of cuSPARSE is withdrawn under
+correction A2, so the generator prints the withdrawal rather than the number: the
+denominator those percentages were divided by included setup work, and no honest
+figure can be recovered from them after the fact. What does survive from v1 is the
+kernel to kernel comparison, because both hand written variants were timed
+identically: the warp per row kernel is about 1.6 times the thread per row kernel
+on a skewed degree matrix. The suite level result, and every percent of cuSPARSE,
+is pending the 1.1.0 sweep.
+
+\begin{table}[htbp]
+\centering
+\input{tables/spmv_suite.tex}
+\caption{CSR SpMV rows in the committed summary. Percent of cuSPARSE is withdrawn
+for the v1 rows under correction A2 (setup work inside the vendor's timed region);
+the matrix suite result is pending.}
+\label{tab:spmv}
+\end{table}

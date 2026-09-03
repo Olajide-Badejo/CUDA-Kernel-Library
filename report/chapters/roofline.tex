@@ -1,0 +1,45 @@
+\section{Roofline analysis}
+\label{sec:roofline}
+
+Figure \ref{fig:roofline} places the kernels against the ceilings. The bandwidth
+ceiling is measured on this GPU. The compute roofs are the hardware's, computed as
+48 SMs times the SM clock times 512 FLOP per cycle for FP16 inputs with FP32
+accumulate, and 256 FLOP per cycle for FP32.
+
+That distinction is the whole point of the chapter, and it is a correction. An
+earlier version of this profiler set the roof to a cuBLAS measurement, which turns
+every "percent of roof" into "percent of cuBLAS" drawn on log axes and makes the
+chart look like evidence while carrying none. cuBLAS is drawn instead as a dashed
+attainable line, and it reaches 97.2 percent of the tensor roof, which is itself
+the best available evidence that 512 FLOP per cycle is the right rate for this
+part.
+
+The GEMM variants sit far to the right of both ridges, in the compute bound region,
+with the top kernel at 84.1 percent of the tensor roof. GEMV sits at 0.5 FLOP per
+byte on the bandwidth diagonal in the memory bound region. Those two points at
+opposite ends of the intensity axis are the evidence behind the compute bound claim
+and behind the tile choice.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\textwidth]{roofline.pdf}
+\caption{Roofline on the RTX 5070. The bandwidth ceiling is measured; the compute
+roofs are the hardware's, and cuBLAS is a dashed attainable line rather than a
+ceiling. \rooflinecaption}
+\label{fig:roofline}
+\end{figure}
+
+The chart is built to take four families rather than one. The profiler emits an
+operating point per variant and the plotter draws whichever points the CSV carries,
+so the SpMV, FFT and scan points join the chart when their sweep rows land without
+a code change. The caption above names which families are on the chart today and
+which are pending, and it is generated rather than written, so it cannot claim a
+family that is not there.
+
+The roofline also settles one epilogue fusion decision, which is the smallest and
+cleanest use of the model in the project. A standalone bias plus ReLU pass has an
+arithmetic intensity of 0.167 FLOP per byte and is therefore firmly memory bound.
+Folding it into a compute bound GEMM removes a pure bandwidth pass rather than
+saving arithmetic, and the measured saving on the fused shape is 8.4 percent. That
+is the fusion argument in miniature: the win is in the pass not taken, not in the
+FLOP not executed~\cite{dao2022}.

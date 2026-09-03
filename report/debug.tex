@@ -1,0 +1,148 @@
+% The debug report. Its narrative comes from docs/ENGINEERING_LOG.md: every
+% incident told here has a dated entry in that file, and an incident that is not
+% in the log does not belong in this document. Built by `make report` alongside
+% main.tex, out of the same directory.
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage[hidelinks]{hyperref}
+\usepackage{parskip}
+
+\title{CUDA Kernel Library: Debug Report}
+\author{Olajide Badejo}
+\date{2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This is the companion to the main report: the dated record of the real problems
+hit while building the library, grouped by theme. Each entry is symptom, root
+cause, the fix and why, and how it was verified. The failed diagnostic round, where
+a plausible change measured worse and was reverted, is here too as an equal rank
+result, and so is the audit where I read my own published claims back against my
+own data and found seven defects. Every incident in this document has a dated
+entry in \texttt{docs/ENGINEERING\_LOG.md}; nothing is told here that is not in the
+log.
+\end{abstract}
+
+\newpage
+
+\section{Toolchain and build}
+
+\paragraph{CMake targeted the wrong architecture.} The first device probe build
+compiled sm\_75 despite the top CMakeLists setting the architecture to 120. Root
+cause: the architecture was set after the project command, inside a guard that was
+already false because project seeds a default. Fix: set it before project so
+enable\_language reads it. Verified by the rebuild compiling sm\_120 and running on
+the card.
+
+\paragraph{CUDA 13 removed clockRate and memoryClockRate.} The probe failed to
+compile because both fields were removed from cudaDeviceProp in CUDA 13 (deprecated
+in 12.x). Fix: query the same values through cudaDeviceGetAttribute. Verified: the
+probe prints 14001 MHz memory clock and 2625 MHz core clock, matching the
+datasheet.
+
+\paragraph{Pedantic warnings on generated stubs.} With the pedantic warning set
+forwarded to the host compiler, the build failed on line directives inside nvcc
+generated stub files under separable compilation. Fix: keep the pedantic flag on
+hand written host code only, and forward just the standard warning set to the nvcc
+host pass. Device code still gets warnings as errors. Verified by a clean build.
+
+\paragraph{Deprecated NVML calls.} The telemetry monitor drew deprecation warnings
+from the CUDA 13 NVML for the temperature and throttle reason queries. Fix: move to
+the versioned temperature struct and the events reason query. Verified: warning
+free build, the zero warning gate holds.
+
+\paragraph{nvcc 13.3 cannot parse GCC 15.2's libstdc++.} A default configure on
+this machine fails during the first CUDA compilation, inside a libstdc++ header,
+with a parse error on \texttt{if consteval}. The error names a system header and no
+file of mine, which is what makes it hard: it reads like a broken toolkit. Root
+cause: the machine's default host compiler is GCC 15.2, whose libstdc++ uses
+\texttt{if consteval} in headers nvcc pulls in, and the nvcc 13.3 frontend does not
+accept that form. nvcc runs its own C++ frontend over host code before the host
+compiler ever sees it, so whether the host compiler supports the construct is not
+the relevant question. Options were to wait for a toolkit whose frontend accepts
+it, to patch or shadow the offending header, or to pin the host compiler. Fix: pin
+both the C++ and the CUDA host compiler to g++-14.3, with a make variable so a
+checkout on a differently configured machine can pass it in one place, and state
+the pin and the reason in the host compiler section of the building
+documentation. Verified: clean configure and full build under g++-14.3 on this
+machine; the CI containers ship GCC 13 and need no flag at all.
+
+\section{The ncu permission fight in WSL2}
+
+\paragraph{ERR\_NVGPUCTRPERM, and root did not help.} Nsight Compute refused to
+read GPU performance counters for both the normal user and root. Root cause: under
+WSL2 the CUDA driver is the Windows driver reached through the paravirtualization
+layer, so counter access is gated by the Windows driver policy, not by any Linux
+user. The diagnostic rounds are the core of the project and depend on this, so it
+had to be cleared first. Fix: on the Windows side, set the driver policy to allow
+all users to read the counters (the registry value under the nvlddmkm key), then
+reboot. Verified: the ncu probe on a trivial copy kernel then returned no error and
+a populated table (DRAM throughput 86 percent, the expected memory bound signature
+of a copy), and the first diagnostic round ran cleanly.
+
+\section{A diagnostic round that failed}
+
+\paragraph{The three stage pipeline made the top kernel slower.} Hypothesis: the
+top tensor kernel's residual latency exposure came from too shallow a software
+pipeline, so deepen the cp.async pipeline from two stages to three. Result: slower,
+from about 80 to 74 percent of cuBLAS. Root cause: the third shared buffer raised
+shared memory use from 32 KB to 48 KB per block and cut how many blocks fit per SM,
+and the two stage pipeline was already hiding the global load latency (DRAM only 13
+percent at 4096 cubed), so the depth was spent on the wrong bottleneck. Fix:
+reverted to the two stage kernel and confirmed it back at 79.7 percent with
+correctness intact. The genuine lever, found in the next round, was a shared memory
+swizzle to remove bank conflicts. This entry is kept because the reverted change is
+as much a result as the one that worked: it is the evidence that the swizzle, not
+more pipelining, was the right call.
+
+\section{The audit: reading my own claims back against my own data}
+
+This one is not a build failure. Preparing the 1.1.0 release I read the shipped
+report and README back against the results files they were supposed to have come
+from, and they did not agree. Seven defects came out of it, each with its own
+mechanism. The full register is \texttt{docs/CORRECTIONS.md}; what follows is the
+incident and what was done about it.
+
+\paragraph{What the audit found.} The provenance was broken: every summary row and
+every diagnostic round metadata file carried a commit hash that no longer resolved,
+because I had rewritten the repository history after the data was produced. The
+numbers were real and their audit trail was not. Two vendor baselines carried setup
+work inside the timed region, the cuSPARSE wrapper building descriptors and sizing
+and allocating its workspace on every call, and the TRSM benchmark restoring its
+right hand side between the event records. The roofline set its compute roof to a
+cuBLAS measurement, which quietly turned every percent of roof into a percent of
+cuBLAS drawn on log axes. The sweep never locked the clock, so rows measured at
+1042 MHz sat beside rows measured at 2880 MHz. Several claims were stronger than
+the data behind them, including a flat percentage quoted from the best shape. Two
+of the nine diagnostic rounds pointed at no committed profiler page. And the
+pipeline could not reproduce itself: the roofline CSV was gitignored, the asset
+generator skipped the figure and exited zero, and a clean clone rebuilt the report
+around a stale committed PNG and reported success.
+
+\paragraph{The fix was one gate per defect, not one edit per defect.} An edit fixes
+the instance; a gate fixes the class, and every one of these defects was a class.
+A provenance script resolves every recorded hash in git and fails on a dead one,
+with the known dead hashes listed as a standing debt rather than deleted. The
+sparse plan makes per call descriptor construction impossible through the public
+path, and an allocation gate armed on CUPTI callbacks fails any run that allocates
+inside a timed region. The roofline draws hardware roofs and puts cuBLAS on a
+dashed attainable line. The sweep refuses to run without a locked clock.
+Unsupported claims are withdrawn in the register rather than quietly reworded. And
+the asset generator treats a missing input as a hard error, so a report that cannot
+be rebuilt from the tree fails loudly instead of reusing a picture whose input is
+gone.
+
+\paragraph{How it was verified.} The style gate runs the provenance check and the
+dash check on every invocation. The report target regenerates every figure and
+table from the committed results, and CI diffs them byte for byte against what is
+on file, with the plotting stack pinned exactly because two matplotlib wheels draw
+two different files from the same numbers. The allocation gate was watched failing
+on purpose, with the old per call allocation restored deliberately, before it was
+trusted. And the corrections register ships in the published tree, because a
+project whose selling point is honest measurement does not get to quietly delete
+the part where the measurement was wrong.
+
+\end{document}

@@ -57,9 +57,11 @@ in [`docs/using.md`](docs/using.md). Toolchain and build options are in
 
 ## Headline result: the GEMM optimization ladder
 
-Each rung isolates one technique so the speedup can be attributed to a cause. Bar
-length is absolute throughput; the percent is of cuBLAS **at the same precision**
-(FP32 kernels vs cuBLAS SGEMM, tensor kernels vs cuBLAS FP16/BF16).
+Each rung isolates one technique so the speedup can be attributed to a cause. The
+chart is percent of cuBLAS against shape, every rung at every swept size, because
+a single shape hides the fact that the curve is not flat. The percent is of cuBLAS
+**at the same precision** (FP32 kernels vs cuBLAS SGEMM, tensor kernels vs cuBLAS
+FP16/BF16), so the two groups are not comparable as absolute speed.
 
 ![GEMM optimization ladder](report/figures/ladder.png)
 
@@ -144,13 +146,23 @@ is pending; until it lands, read every percent above as provisional.
 Full per-shape data with clocks, temperature, and throttle flags:
 [`experiments/results/summary.csv`](experiments/results/summary.csv).
 
-## Reports (PDF, open in GitHub's viewer)
+## Reports (PDF)
 
-- **[Main report](reports/main_report.pdf)** - the design and optimization
-  narrative, roofline analysis, and results, generated from the live data.
-- **[Debug report](reports/debug_report.pdf)** - the dated engineering log:
-  toolchain fights, the WSL2 profiler-permission fix, and the diagnostic round
-  that failed and was reverted.
+The PDFs are not committed to the tree. They are built from the committed results
+files and attached to each GitHub release, so a link here points at the release
+asset rather than at a binary in `git`:
+
+- **[main_report.pdf](../../releases/latest)** (attached to the release) - the
+  design and optimization narrative, related work, the negative result, the
+  numerical accuracy model, roofline analysis, limitations, and a reproducibility
+  statement, all generated from the live data.
+- **[debug_report.pdf](../../releases/latest)** (attached to the release) - the
+  dated engineering log: toolchain fights, the WSL2 profiler-permission fix, the
+  diagnostic round that failed and was reverted, and the audit of my own claims.
+
+Build them locally with `make report`, which regenerates every figure and table
+from `experiments/results/` and writes `report/build/main.pdf` and
+`report/build/debug.pdf`. It needs no GPU and no CUDA toolkit.
 
 ## The method
 

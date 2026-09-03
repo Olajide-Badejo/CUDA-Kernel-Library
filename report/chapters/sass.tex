@@ -1,0 +1,114 @@
+\section{Reading the machine code}
+\label{sec:sass}
+
+Source level reasoning about a GPU kernel is a hypothesis about what the compiler
+did. Disassembling it is the check. Every rung of the ladder, the whole tile
+family, the stream-K and split-K kernels and the CUTLASS reference line are
+captured to SASS under \texttt{experiments/sass/}, normalized so the captures
+diff, and the top kernel's capture is a committed golden. This is the
+microbenchmarking-and-disassembly method of Jia and colleagues~\cite{jia2018}
+applied at a much smaller scale: not to reverse engineer the part, but to check my
+own claims about my own kernels.
+
+Everything in this section is a compile time fact. None of it needs a GPU, none of
+it moves with the clock, and none of it is pending.
+
+\subsection{The golden gate}
+
+\texttt{scripts/sass\_diff.py} recaptures the top kernel from a fresh build and
+compares it to the committed golden, exiting non-zero with a unified diff on any
+difference. Ground rule 8 of this project says a gate that cannot fail is not a
+gate, so both halves were demonstrated before it was trusted: rebuilding with no
+source change passes, and adding one stray factor to one line of the epilogue
+fails with the extra \texttt{FMUL} in the diff alongside the register allocation
+that shifted around it. When a kernel change is intended the golden is regenerated
+in the same commit as the kernel, so a reviewer sees exactly what moved in the
+instruction stream.
+
+The gate runs locally through \texttt{make sass-diff} and not yet in CI, for a
+reason worth recording rather than papering over: the container build job runs a
+13.0.1 toolkit image and this golden was assembled by nvcc 13.3.73. Two assemblers
+give two answers and the job would fail on the header line before it reached an
+instruction. Either the container moves to the toolkit the golden names, or the
+golden is regenerated on the container's toolkit and this machine becomes the one
+that disagrees. That is an ownership decision and it is open.
+
+\subsection{What the instruction mix shows}
+
+Counted from the committed captures, per kernel body, which for the mainloop rungs
+is one K stage of the software pipeline. Three readings stand out.
+
+The ladder's story is visible in the mix. The \texttt{mma\_ptx} rung reads
+fragments scalar out of shared memory: 24 \texttt{LDS}, no \texttt{LDSM} at all,
+for 8 \texttt{HMMA}. Adding \texttt{ldmatrix} replaces those with 42
+\texttt{LDSM} and gets 56 \texttt{HMMA} out of the same shape. The top kernel adds
+\texttt{cp.async}, and its 12 \texttt{LDGSTS} are the first instructions on this
+ladder that move global data into shared memory without passing through a
+register.
+
+The barrier count collapses when the pipeline deepens. The WMMA and
+\texttt{ldmatrix} rungs run 14 \texttt{BAR} per body; the top kernel and the whole
+tile family run one. With three or more stages the buffer written at iteration $s$
+was last read at iteration $s-1$, which the iteration-$s$ barrier already fences,
+so one barrier per K stage is enough.
+
+And the top kernel and the CUTLASS reference line amortize \texttt{ldmatrix}
+identically, at 2.67 \texttt{HMMA} per \texttt{LDSM} on both sides. Whatever
+separates those two kernels in wall clock, it is not how many \texttt{mma.sync}
+each \texttt{ldmatrix} feeds. Their epilogues, by contrast, are opposites: the top
+kernel has zero \texttt{STS} and stores 64 bit pairs straight from the fragment
+layout, while CUTLASS runs 128 \texttt{STS} and 74 \texttt{LDS} to stage the
+accumulator through shared memory into fully coalesced stores. Which trade wins on
+this part is the first thing the gap analysis of Section \ref{sec:cutlass} should
+settle.
+
+\subsection{The register allocation study}
+
+\texttt{benchmarks/register\_study.py} reassembles the top kernel across register
+ceilings and blocks per SM floors and writes
+\texttt{experiments/results/register\_study.csv}. Table \ref{tab:registers} is
+generated from that file. Every column in it is a compile time fact except
+throughput, which reads pending and stays that way until the owner runs it at
+locked clocks.
+
+\begin{table}[htbp]
+\centering
+\input{tables/register_study.tex}
+\caption{The register allocation study, from
+\texttt{experiments/results/register\_study.csv}. Registers, spills, occupancy and
+the limiter are compile time facts from ptxas; throughput is pending.}
+\label{tab:registers}
+\end{table}
+
+There is a trap in running this study that is worth stating, because it costs an
+hour to rediscover. \texttt{nvcc -maxrregcount} is ignored for a kernel carrying
+\texttt{\_\_launch\_bounds\_\_}, and so is \texttt{ptxas -maxrregcount} when the
+PTX carries \texttt{.maxntid}. Launch bounds win, by design. The kernel declares
+\texttt{\_\_launch\_bounds\_\_(256)}, so a naive sweep returns the same register
+count in every row and the table says nothing. The study therefore emits PTX once
+with the build's own flags and edits one performance tuning directive in a copy of
+it.
+
+Three readings come out of the table, all of them compile time facts rather than
+performance claims.
+
+\textbf{109 registers are free.} A ceiling of 111 lands the kernel at 109 with no
+spill at all, and 96 costs only 12 bytes each way. The kernel does not need 122
+registers; ptxas simply has no reason to use fewer when nothing asks it to.
+
+\textbf{Nothing is bought by asking.} The occupancy arithmetic on this part is
+65536 registers, 100 KB of shared memory and 48 warps per SM. At 256 threads and
+49152 bytes of shared memory per block, shared memory alone allows two blocks per
+SM, and it stays the binding constraint at every register count in the table. At
+64 registers the register file would allow four blocks; the shared memory budget
+still allows two. Cutting registers buys spill traffic and no residency.
+
+\textbf{The blocks per SM floor is the same lever from the other end.} Asking for
+three blocks per SM produces exactly the same register count and spill volume that
+the matching \texttt{maxrregcount} ceiling produces, because ptxas arrives there
+the same way.
+
+The practical consequence is that the occupancy lever on this kernel is the shared
+memory budget and not the register budget, which is a useful thing to know before
+spending a round on register pressure. What it does not tell me is whether higher
+occupancy would be faster, because that is a measurement and it is pending.

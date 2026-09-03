@@ -1,0 +1,10 @@
+\begin{tabular}{lllr}
+\toprule
+decomposition & shapes it targets & what it fixes & measured speedup \\
+\midrule
+data parallel & one CTA per output tile & the baseline decomposition & measured (the ladder rows above) \\
+predicated tails & shapes the tile does not divide & one mainloop for every shape, no silent reroute & pending \\
+split-K & few waves, long contraction & idle SMs when the output is smaller than one wave & pending \\
+stream-K & few waves, any contraction & the same, without a full extra pass over C & pending \\
+\bottomrule
+\end{tabular}

@@ -1,0 +1,81 @@
+\section{FFT and convolution}
+\label{sec:fft}
+
+The FFT family is new in 1.1.0. Its mechanisms are implemented and tested; its
+performance rows are pending the sweep, and Table \ref{tab:fft} says so in every
+cell that would carry a number.
+
+\subsection{Stockham, and why there is no bit reversal pass}
+
+The transform is Stockham autosort~\cite{vanloan1992}. Each stage writes to a
+second buffer with the digit permutation folded into the output address, so every
+stage reads and writes contiguous runs. At stride $p$ a thread owns one butterfly:
+it reads elements $j$ and $j + n/2$ of the source, twists the second by
+$\exp(-2\pi i k / 2p)$ with $k = j \bmod p$, and writes the sum and the difference
+to their permuted destinations. The radix 4 and radix 8 stages are the same
+statement with $R$ in place of 2, and there is exactly one implementation of each
+in the tree, called from two translation units, because a radix 8 DFT written
+twice is a radix 8 DFT that will eventually disagree with itself.
+
+The in place alternative needs a separate bit reversal pass whose access pattern is
+a scatter across the whole array, one sector per element at large $n$. On a family
+that is already memory bound that pass costs a full memory round trip, which is a
+whole extra pass out of the five the four step form needs. The price of avoiding it
+is the second buffer, and the shared memory budget pays it. Cooley-Tukey with a bit
+reversal pass is not implemented here and is not planned.
+
+\subsection{The four step form}
+
+For $n$ above the shared resident bound the plan factors $n = n_1 n_2$ with both
+factors at or below $2^{12}$ and runs a transpose, batched size $n_2$ transforms
+with the cross twiddle folded into the store epilogue, a transpose, batched size
+$n_1$ transforms, and a final transpose that puts the output where the caller wants
+it. Five passes, each one read and one write, so $5 \times 16n$ bytes; against
+$\log_2 n$ passes for the naive multi kernel rung that is 5 against 24 at
+$n = 2^{24}$. The cross twiddle costs no pass of its own because it rides on an
+epilogue, and neither does a fused convolution's pointwise multiply.
+
+The factorization splits $\log_2 n$ as evenly as it can, larger half first, which
+keeps both factors inside the shared resident bound for every $n$ up to $2^{24}$
+and gives both batched passes the most blocks to fill 48 SMs with. An override
+exists and is validated rather than trusted.
+
+\subsection{Convolution, and the crossover}
+
+The headline figure of this family is a crossover, not a percentage. The FFT
+path's cost barely moves with the filter length $M$; the direct path is $2NM$ FLOP
+and does not stop growing. Four variants are implemented: an FFT path with a
+standalone pointwise multiply kernel, an FFT path with the filter spectrum multiply
+folded into a store epilogue (the same epilogue fusion argument the GEMM bias study
+uses, and the same one FlashAttention makes at a larger scale~\cite{dao2022}), a
+tiled time domain kernel, and the same tiling with the taps in constant memory.
+
+Two implementation notes are worth keeping. The obvious direct tiling, a signal
+tile plus a halo of $M-1$ samples, does not survive the top of the sweep:
+$M = 16384$ is a 64 KB halo before the tile is counted. Chunking the filter instead
+holds the shared footprint at about 3 KB whatever $M$ is. And the constant memory
+bank is one per module rather than one per plan, so a plan binds its taps once and
+records that it owns them; a call from a plan that does not own the bank rebinds
+first, and a direct call from an owner that never bound throws rather than
+convolving with somebody else's filter.
+
+The crossover chart itself is generated from the committed sweep rows, with the
+crossing read out of the data by log interpolation and printed into the caption. It
+is not drawn by hand, and when the summary holds no convolution rows the generator
+removes the figure and writes the paragraph below instead of rebuilding this
+chapter around a stale picture.
+
+\input{tables/conv_crossover_block.tex}
+
+The plan's own selection rule divides the two traffic models by the two roofs of
+this part, the direct model by the FP32 roof and the FFT model by the measured DRAM
+roof. That is arithmetic and not a measurement. The crossing it predicts is exactly
+what the sweep exists to check, and the rule is provisional until the sweep runs.
+
+\begin{table}[htbp]
+\centering
+\input{tables/fft.tex}
+\caption{The FFT and convolution rungs. Traffic models are derived and stated in
+\texttt{docs/fft.md}; measured throughput and percent of cuFFT are pending.}
+\label{tab:fft}
+\end{table}

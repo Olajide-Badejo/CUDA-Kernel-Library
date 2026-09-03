@@ -1,3 +1,11 @@
+% Bibliography for the CUDA Kernel Library report.
+%
+% Every record here is cited from the prose of main.tex, and the bibliography
+% section additionally carries a \nocite{*} guard so that a record which loses
+% its last citation during an edit still prints. The v1 report shipped six
+% records, cited two, and the plain style silently dropped the other four; the
+% guard is there so that failure mode cannot come back.
+
 @inproceedings{volkov2008,
   author    = {Volkov, Vasily and Demmel, James W.},
   title     = {Benchmarking {GPUs} to Tune Dense Linear Algebra},
@@ -8,14 +16,160 @@
 }
 
 @article{williams2009,
-  author  = {Williams, Samuel and Waterman, Andrew and Patterson, David},
-  title   = {Roofline: An Insightful Visual Performance Model for Multicore Architectures},
-  journal = {Communications of the ACM},
-  volume  = {52},
-  number  = {4},
-  pages   = {65--76},
-  year    = {2009},
+  author    = {Williams, Samuel and Waterman, Andrew and Patterson, David},
+  title     = {Roofline: An Insightful Visual Performance Model for Multicore Architectures},
+  journal   = {Communications of the ACM},
+  volume    = {52},
+  number    = {4},
+  pages     = {65--76},
+  year      = {2009},
   publisher = {ACM}
+}
+
+@article{goto2008,
+  author    = {Goto, Kazushige and van de Geijn, Robert A.},
+  title     = {Anatomy of High-Performance Matrix Multiplication},
+  journal   = {ACM Transactions on Mathematical Software},
+  volume    = {34},
+  number    = {3},
+  pages     = {1--25},
+  year      = {2008},
+  publisher = {ACM}
+}
+
+@article{nath2010,
+  author    = {Nath, Rajib and Tomov, Stanimire and Dongarra, Jack},
+  title     = {An Improved {MAGMA GEMM} for {Fermi} Graphics Processing Units},
+  journal   = {International Journal of High Performance Computing Applications},
+  volume    = {24},
+  number    = {4},
+  pages     = {511--515},
+  year      = {2010},
+  publisher = {SAGE}
+}
+
+@inproceedings{markidis2018,
+  author    = {Markidis, Stefano and Der Chien, Steven Wei and Laure, Erwin and
+               Peng, Ivy Bo and Vetter, Jeffrey S.},
+  title     = {{NVIDIA} Tensor Core Programmability, Performance and Precision},
+  booktitle = {IEEE International Parallel and Distributed Processing Symposium
+               Workshops (IPDPSW)},
+  year      = {2018},
+  pages     = {522--531},
+  publisher = {IEEE}
+}
+
+@misc{jia2018,
+  author       = {Jia, Zhe and Maggioni, Marco and Staiger, Benjamin and
+                  Scarpazza, Daniele P.},
+  title        = {Dissecting the {NVIDIA} {Volta} {GPU} Architecture via Microbenchmarking},
+  year         = {2018},
+  howpublished = {arXiv:1804.06826 [cs.DC]},
+  note         = {\url{https://arxiv.org/abs/1804.06826}}
+}
+
+@inproceedings{bell2009,
+  author    = {Bell, Nathan and Garland, Michael},
+  title     = {Implementing Sparse Matrix-Vector Multiplication on
+               Throughput-Oriented Processors},
+  booktitle = {Proceedings of the Conference on High Performance Computing
+               Networking, Storage and Analysis (SC)},
+  year      = {2009},
+  pages     = {1--11},
+  publisher = {ACM}
+}
+
+@inproceedings{merrill2016spmv,
+  author    = {Merrill, Duane and Garland, Michael},
+  title     = {Merge-Based Parallel Sparse Matrix-Vector Multiplication},
+  booktitle = {Proceedings of the International Conference for High Performance
+               Computing, Networking, Storage and Analysis (SC)},
+  year      = {2016},
+  pages     = {678--689},
+  publisher = {IEEE Press}
+}
+
+@techreport{merrill2016scan,
+  author      = {Merrill, Duane and Garland, Michael},
+  title       = {Single-Pass Parallel Prefix Scan with Decoupled Look-Back},
+  institution = {NVIDIA Corporation},
+  number      = {NVR-2016-002},
+  year        = {2016}
+}
+
+@techreport{blelloch1990,
+  author      = {Blelloch, Guy E.},
+  title       = {Prefix Sums and Their Applications},
+  institution = {School of Computer Science, Carnegie Mellon University},
+  number      = {CMU-CS-90-190},
+  year        = {1990}
+}
+
+@article{kreutzer2014,
+  author    = {Kreutzer, Moritz and Hager, Georg and Wellein, Gerhard and
+               Fehske, Holger and Bishop, Alan R.},
+  title     = {A Unified Sparse Matrix Data Format for Efficient General Sparse
+               Matrix-Vector Multiplication on Modern Processors with Wide {SIMD} Units},
+  journal   = {SIAM Journal on Scientific Computing},
+  volume    = {36},
+  number    = {5},
+  pages     = {C401--C423},
+  year      = {2014},
+  publisher = {SIAM}
+}
+
+@book{vanloan1992,
+  author    = {Van Loan, Charles},
+  title     = {Computational Frameworks for the Fast Fourier Transform},
+  series    = {Frontiers in Applied Mathematics},
+  volume    = {10},
+  publisher = {Society for Industrial and Applied Mathematics},
+  year      = {1992}
+}
+
+@inproceedings{tillet2019,
+  author    = {Tillet, Philippe and Kung, H. T. and Cox, David},
+  title     = {{Triton}: An Intermediate Language and Compiler for Tiled Neural
+               Network Computations},
+  booktitle = {Proceedings of the 3rd ACM SIGPLAN International Workshop on
+               Machine Learning and Programming Languages (MAPL)},
+  year      = {2019},
+  pages     = {10--19},
+  publisher = {ACM}
+}
+
+@inproceedings{dao2022,
+  author    = {Dao, Tri and Fu, Daniel Y. and Ermon, Stefano and Rudra, Atri and
+               R{\'e}, Christopher},
+  title     = {{FlashAttention}: Fast and Memory-Efficient Exact Attention with
+               {IO}-Awareness},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  volume    = {35},
+  year      = {2022},
+  pages     = {16344--16359}
+}
+
+@inproceedings{osama2023,
+  author    = {Osama, Muhammad and Merrill, Duane and Cecka, Cris and
+               Garland, Michael and Owens, John D.},
+  title     = {{Stream-K}: Work-Centric Parallel Decomposition for Dense
+               Matrix-Matrix Multiplication on the {GPU}},
+  booktitle = {Proceedings of the 28th ACM SIGPLAN Annual Symposium on Principles
+               and Practice of Parallel Programming (PPoPP)},
+  year      = {2023},
+  pages     = {429--431},
+  publisher = {ACM},
+  note      = {arXiv:2301.03598, \url{https://arxiv.org/abs/2301.03598}}
+}
+
+@misc{cutlass,
+  author       = {Kerr, Andrew and Merrill, Duane and Demouth, Julien and
+                  Tran, John and {NVIDIA Corporation}},
+  title        = {{CUTLASS}: {CUDA} Templates for Linear Algebra Subroutines,
+                  and the {CuTe} Layout Algebra},
+  year         = {2025},
+  howpublished = {Version 4.7.1, \url{https://github.com/NVIDIA/cutlass}},
+  note         = {Commit cb4247394dd82148787aed73e5dc7cef33cbf862}
 }
 
 @manual{cudaguide,
@@ -32,15 +186,17 @@
   year         = {2026}
 }
 
-@misc{cutlass,
-  title        = {{CUTLASS}: {CUDA} Templates for Linear Algebra Subroutines},
-  author       = {{NVIDIA Corporation}},
-  howpublished = {\url{https://github.com/NVIDIA/cutlass}},
-  year         = {2026}
-}
-
 @manual{blackwell,
-  title        = {{NVIDIA Blackwell} Architecture Whitepaper},
+  title        = {{NVIDIA RTX Blackwell GPU} Architecture Whitepaper},
   organization = {NVIDIA Corporation},
   year         = {2025}
+}
+
+@misc{cloudrift,
+  author       = {{CloudRift}},
+  title        = {Beating {cuBLAS} on {RTX} 5090},
+  year         = {2025},
+  howpublished = {CloudRift engineering blog, \url{https://www.cloudrift.ai/}},
+  note         = {Reports cuBLAS dispatching Ampere generation
+                  cutlass\_80\_tensorop\_h16816gemm kernels on consumer Blackwell}
 }

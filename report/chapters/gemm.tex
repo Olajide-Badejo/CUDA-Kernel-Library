@@ -1,0 +1,121 @@
+\section{GEMM design and optimization}
+\label{sec:gemm}
+
+The ladder exists so the benchmark table attributes each gain to a cause. Table
+\ref{tab:ladder} gives the measured result at 4096 cubed; Figure \ref{fig:ladder}
+gives every rung at every swept shape, because a single shape hides the fact that
+the curve is not flat. The narrative below is the diagnostic log in brief.
+
+\begin{table}[htbp]
+\centering
+\input{tables/gemm_ladder.tex}
+\caption{GEMM ladder at 4096 cubed, each rung versus cuBLAS of the same precision,
+measured on the RTX 5070.}
+\label{tab:ladder}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\textwidth]{ladder.pdf}
+\caption{The ladder as percent of cuBLAS against shape, every rung, every swept
+size. Percent is of cuBLAS \emph{at the same precision}: the FP32 rungs are
+measured against cuBLAS SGEMM and the tensor rungs against cuBLAS FP16 or BF16,
+which is why an FP32 rung can show a higher percent than a faster tensor rung.
+\laddercaption}
+\label{fig:ladder}
+\end{figure}
+
+\subsection{The negative result: shared memory tiling loses to naive}
+\label{sec:negative}
+
+The first optimization in every CUDA course is to stage the operand tiles through
+shared memory. On this part it is a regression. The naive kernel reaches 1908
+GFLOP/s at 4096 cubed; the shared memory tiled kernel that was supposed to improve
+on it reaches 1584, which is 17 percent slower. This is the most interesting
+result in the project, and it is reported here as a section rather than as an
+aside because it inverts what the textbook says to do first.
+
+Round 1 of the diagnostic log names the mechanism, and it has two halves.
+
+The first half is what tiling costs. The tiled kernel uses a 32 by 32 block, which
+is 1024 threads, so exactly one block fits per SM: about 66.7 percent occupancy
+against the naive kernel's full occupancy. Its top warp stall reason is the MIO
+queue, the shared memory pipe. Tiling bought a shared memory bottleneck and paid
+for it with residency.
+
+The second half is what tiling was supposed to buy, and did not. The naive kernel
+is not bandwidth bound in the first place. Its L1 hit rate is 87.5 percent against
+the tiled kernel's 66.7, and its DRAM throughput is only 37 percent, because the
+cache hierarchy on this part absorbs the redundant reads that tiling exists to
+remove. The redundant traffic never reaches DRAM, so eliminating it wins nothing,
+and the shared memory staging is pure added cost.
+
+Two things follow. The technique is not wrong; the ordering is. What makes the
+tiled decomposition pay is register blocking on top of it, which is the next rung
+and a 5.5 times gain. And the finding is a single GPU finding. The mechanism is a
+statement about the ratio of cache capacity to working set, so it should invert on
+a part with a smaller last level cache, and the study that would establish that
+needs three GPUs of different generations. I do not have them. Section
+\ref{sec:limitations} names that as a limitation rather than letting the sentence
+generalize on its own.
+
+\subsection{The rest of the ladder}
+
+\paragraph{Register blocking (Round 2).} Giving each thread an 8 by 8 register tile
+lifts throughput to 10.4 TFLOP/s, 5.5 times naive and the decisive step. Warp
+cycles per issued instruction fall from 45 to 9. The new limiter is the shared read
+pipe and a 33 percent occupancy ceiling from 106 registers per thread.
+
+\paragraph{cp.async double buffering (Round 3).} Overlapping the next tile's global
+load with the current tile's math takes the FP32 kernel to 16.2 TFLOP/s, 73 percent
+of cuBLAS. The FP32 path is now occupancy limited (149 registers per thread, 17
+percent occupancy) and is accepted as the top FP32 variant, its gap diagnosed.
+
+\paragraph{Tensor cores (Rounds 4 and 5).} Moving the inner product onto the tensor
+cores with WMMA doubles throughput to 36 TFLOP/s, but the cores are starved. In the
+Round 4 detail page (\texttt{experiments/results/ncu/round04/wmma\_fp16\_4096.txt})
+the GPU Speed Of Light section reads \texttt{Compute (SM) Throughput} 53.72 percent
+against \texttt{Memory Throughput} 92.40 percent, and the row that actually names
+the culprit is \texttt{L1/TEX Cache Throughput} at 94.38 percent: the fragment loads
+saturate the shared read path while the tensor pipe idles. Dropping to mma.sync PTX
+with hand placed fragments changes nothing, which
+is the informative result: the instruction path was never the bottleneck, the
+fragment loads are.
+
+\paragraph{Toward the gate (Rounds 6 to 9).} ldmatrix on the small tile does not
+move the number either, because at a 64 by 64 tile the bytes to compute ratio is
+too high. A 128 by 128 tile with cp.async double buffering takes it to 80 percent
+of cuBLAS and flips the Speed of Light to co limited. A three stage pipeline is
+tried and reverted (it costs occupancy). The bank conflict counter then shows the
+real problem: 219 million shared load conflicts. A shared memory swizzle, applied
+identically to the stores and the loads so correctness is unconditional, cuts them
+to 33.7 million, collapses the memory Speed of Light from 76 to 30 percent, and
+lifts compute to 83 percent. The kernel now reaches 89.9 percent of cuBLAS at 4096
+cubed and 88.9 percent at 8192 cubed, and passes the compute bound gate.
+
+\subsection{The remaining gap, decomposed}
+\label{sec:gap}
+
+It is not a flat 90 percent across the range, and the shape of the shortfall is
+itself evidence. Table \ref{tab:gap} splits the gap into the part that wave
+quantization explains and the part that it does not. The quantization column is
+arithmetic, not a measurement: at a 128 by 128 tile the output is
+$\lceil m/128 \rceil \times \lceil n/128 \rceil$ tiles competing for 96 resident
+block slots (48 SMs, two blocks each, which is what the shared memory budget
+allows), and the loss is the fraction of the last wave that runs empty.
+
+\begin{table}[htbp]
+\centering
+\input{tables/gemm_gap.tex}
+\caption{The gap to cuBLAS decomposed. Throughput and percent are measured; the
+wave and quantization columns are computed from the tile geometry; the residual is
+what quantization does not account for.}
+\label{tab:gap}
+\end{table}
+
+Quantization dominates at 1024 cubed and is a minority term above 2048. The
+residual at 4096 and 8192 is a different gap, and my working hypothesis is that
+most of it is kernel selection: cuBLAS carries a family of tile shapes and chooses
+per shape, while the single rung above optimizes one fixed 128 by 128 by 32 tile.
+That hypothesis is what Section \ref{sec:mechanisms} exists to test, and it is
+labelled a hypothesis until the sweep tests it.

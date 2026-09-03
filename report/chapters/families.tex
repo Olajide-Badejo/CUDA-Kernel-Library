@@ -1,0 +1,43 @@
+\section{The dense supporting families}
+\label{sec:families}
+
+GEMV, TRSM and the cuSOLVER wrapper round out the library. Each is correct against
+the vendor library and benchmarked on the same device, and Table \ref{tab:families}
+is generated from whichever of them the committed summary carries rows for.
+
+GEMV is a bandwidth benchmark in disguise. Its arithmetic intensity is fixed near
+0.5 FLOP per byte whatever the size, so the warp and vectorized kernels reach both
+cuBLAS and the measured streaming bandwidth, while the naive kernel is coalescing
+limited and never gets near either. On the roofline it sits on the bandwidth
+diagonal, which is the point of including it: the same chart that shows GEMM far
+into the compute bound region shows GEMV pinned to the memory bound one.
+
+Three GEMV rows in the table read above 100 percent of cuBLAS, and one of them,
+the warp kernel at 2048, reads 208.6. That is not a result, it is the same defect
+correction A2 names: the v1 harness carried setup work inside a vendor timed
+region, and A2 lists this row explicitly as one of the consequences visible in the
+committed data. It stays in the table because deleting an inconvenient row is
+worse than printing it next to its explanation, and the number will be replaced,
+not repaired, when the sweep is re-run.
+
+TRSM reduces most of its work to a GEMM style trailing update. The blocked kernel
+agrees with cuBLAS to about $10^{-7}$, which is a correctness result and not a
+performance one: on speed it reaches 381 GFLOP/s against cuBLAS STRSM's 1200, so
+31.8 percent, and closing that gap is open work. The naive column at a time kernel
+is kept in the table as the honest baseline rather than deleted for being slow.
+Both percentages are provisional: correction A2 records that the v1 TRSM benchmark
+restored its right hand side inside the timed region, on both the kernel and the
+baseline, and the fix has not been re-measured yet.
+
+The cuSOLVER LU and Cholesky paths are checked by residual, about $5.6 \times
+10^{-7}$ and $4.3 \times 10^{-7}$, rather than merely by the absence of an error
+code. They are a correctness deliverable and a RAII wrapper, not a performance
+claim, and they carry no timed row.
+
+\begin{table}[htbp]
+\centering
+\input{tables/families.tex}
+\caption{The supporting families on the RTX 5070, each versus its vendor baseline,
+generated from the families the committed summary actually carries.}
+\label{tab:families}
+\end{table}

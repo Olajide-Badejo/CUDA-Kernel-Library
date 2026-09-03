@@ -1,0 +1,68 @@
+\section{Reduction and scan}
+\label{sec:scan}
+
+Reduction and scan are the two families where the roof is entirely a bandwidth
+question, so the ladder is a ladder of passes over the input rather than of
+arithmetic. Like the FFT family, the mechanisms are implemented and tested and the
+throughput rows are pending.
+
+\subsection{The ladder is about passes, not instructions}
+
+The scan ladder has five rungs. The first is a Hillis-Steele block scan, which is
+work inefficient by construction: $O(N \log N)$ work at block scope. The second is
+Blelloch's work efficient upsweep and downsweep with bank conflict
+padding~\cite{blelloch1990}, which does $O(N)$ work and pays for it in barriers.
+Those two are block primitives, not device wide scans, so both are wrapped in the
+same scan-then-propagate decomposition the third rung uses; wrapping them in
+different ones would have made the difference between the rows two changes rather
+than one. The third rung moves about $4N$ bytes, the fourth (reduce then scan) about
+$3N$, and the fifth, decoupled look-back, about $2N$, which is the lower bound for
+the problem.
+
+Decoupled look-back~\cite{merrill2016scan} is the top rung and it carries three
+constraints that are not optional. The tile index comes from an atomic increment on
+a global counter and never from the block index, because a block that claimed index
+$k$ did so after every block holding a lower index had already started, so those
+blocks are resident and can make progress; indexing by block index would let a
+resident block wait on one the scheduler has not launched, which deadlocks. The
+status word is published with release semantics and read with acquire semantics,
+with the aggregate and the inclusive prefix sitting beside the flag as plain
+stores, which is exactly what release and acquire exist to order. And the status
+array is zeroed by a memset enqueued ahead of the kernel and never inside it,
+because a block cannot zero its own slot when a predecessor may already have read
+it. That memset is real traffic and the plan counts it in the model rather than
+leaving it out to make the top rung look cheaper.
+
+\subsection{Determinism has a price and it is measured, not defended}
+
+Floating point addition is not associative, so a reduction gives a different answer
+when it combines its partials in a different order, and every fast rung above lets
+the launch decide that order. That is not a defect; it is what a fast reduction
+costs.
+
+A deterministic rung exists for both families and makes the answer bit identical
+three ways. The block count is a pure function of the length and never asks the
+occupancy API, so the same input gives the same grid on a busy device, an idle one,
+or a different card. The element to thread mapping follows from that grid, and each
+thread combines its own elements in index order. And the two levels are combined by
+an explicit halving tree, so the shape of the tree is a property of the block size
+rather than of the schedule. Decoupled look-back cannot make that promise, because
+how many predecessors a tile has to combine depends on which of them happened to
+finish first, which is why the deterministic scan is reduce then scan and is a
+separate name rather than an alias.
+
+The artifact for that claim is committed:
+\texttt{experiments/results/scan\_determinism.txt} holds the output hashes from ten
+consecutive runs at $N = 2^{24}$ and $N = 2^{28}$. It is a determinism artifact
+produced at unlocked clocks, not a performance artifact, and it is valid as such:
+the value it records is a property of the arithmetic and has nothing to do with how
+fast the machine was running. The cost of determinism is a benchmark row of its own
+next to the fast rungs, and that row is pending.
+
+\begin{table}[htbp]
+\centering
+\input{tables/scan.tex}
+\caption{The reduction and scan ladders. Bytes moved per element is derived from
+the decomposition; throughput and percent of CUB are pending the sweep.}
+\label{tab:scan}
+\end{table}

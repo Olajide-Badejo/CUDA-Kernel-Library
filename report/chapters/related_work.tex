@@ -1,0 +1,78 @@
+\section{Related work}
+\label{sec:related}
+
+Nothing in this library is a new algorithm. Every technique on the ladder has a
+paper behind it, and the contribution here is the measurement discipline applied
+to one part, not the invention. It is worth saying where each idea comes from,
+because the interesting results below are the places where the received wisdom
+does not survive contact with this GPU.
+
+\paragraph{Blocked dense GEMM.} The layered blocking that every fast GEMM uses,
+packing panels so that the innermost kernel streams from the fastest level of the
+hierarchy, is Goto and van de Geijn's anatomy~\cite{goto2008}. The GPU restatement
+of it, and the observation that register blocking rather than shared memory
+tiling is what actually buys the throughput, is Volkov and Demmel~\cite{volkov2008}.
+Nath, Tomov and Dongarra showed on Fermi that the winning tile is a property of
+the shape and the part rather than a constant, and that autotuning over a family
+of instantiations is how you find it~\cite{nath2010}; that argument is why Section
+\ref{sec:mechanisms} ships six tile shapes rather than one.
+
+\paragraph{Template libraries and compilers.} CUTLASS is the reference
+implementation of the whole Ampere style multistage mainloop, and its CuTe layout
+algebra is the vocabulary the swizzle and the fragment layouts in this project are
+most easily described in~\cite{cutlass}. Section \ref{sec:cutlass} runs a CUTLASS
+instantiation as a rung on my own ladder rather than citing it from a distance.
+Triton attacks the same problem from the compiler side, generating the tiled
+kernel from a higher level description~\cite{tillet2019}; I write the mainloop by
+hand here because the point of the exercise is to see the machine, but Triton is
+the honest answer to why most people should not.
+
+\paragraph{Tensor cores and their numerics.} Markidis and colleagues measured what
+the WMMA path actually costs numerically, and established the shape of the error
+model this report reuses in Section \ref{sec:accuracy}: FP16 inputs with FP32
+accumulate, where the input rounding term rather than the accumulation term
+dominates~\cite{markidis2018}. Jia and colleagues dissected the tensor pipeline by
+microbenchmarking, which is the method Section \ref{sec:sass} borrows at a smaller
+scale when it reads the instruction mix out of the SASS instead of trusting the
+source~\cite{jia2018}.
+
+\paragraph{Work decomposition.} Stream-K is Osama, Merrill, Cecka, Garland and
+Owens~\cite{osama2023}: instead of cutting every tile the same way, cut only the
+work that would have left SMs idle, which is exactly the wave quantization problem
+Section \ref{sec:gap} measures at 1024 cubed. The implementation in
+\texttt{src/gemm} follows that paper's decomposition, with the partial reduction
+protocol described in Section \ref{sec:mechanisms}.
+
+\paragraph{Fusion.} FlashAttention is the clearest statement of the fusion
+argument this report uses for its epilogue study: when a pass is memory bound, the
+win comes from not making the pass at all, and the way to see that is to count
+bytes rather than FLOP~\cite{dao2022}. The bias plus ReLU epilogue in Section
+\ref{sec:roofline} is the same argument at a much smaller scale.
+
+\paragraph{Sparse.} Bell and Garland set the CSR baselines that the naive and warp
+per row kernels in Section \ref{sec:sparse} are~\cite{bell2009}. Merrill and
+Garland's merge based formulation removes the load imbalance those two still
+carry, by giving every thread an equal share of the merge of row offsets with
+nonzero indices~\cite{merrill2016spmv}. Kreutzer and colleagues' SELL-C-sigma is
+the other direction, changing the storage format so the inner loop coalesces at
+the cost of padding~\cite{kreutzer2014}. Both are implemented here.
+
+\paragraph{Scan.} Blelloch's work efficient formulation is the classical
+result~\cite{blelloch1990}, and it is a rung on the scan ladder rather than the top
+of it. The top rung is Merrill and Garland's decoupled look-back, which reaches the
+memory bound of the problem by making one pass instead of three and paying for it
+with a device scope handshake between tiles~\cite{merrill2016scan}.
+
+\paragraph{FFT.} The Stockham autosort formulation, and the four step algorithm
+that makes a transform larger than shared memory into a sequence of resident sub
+transforms, are both in Van Loan's framework treatment~\cite{vanloan1992}. Section
+\ref{sec:fft} follows that formulation directly.
+
+\paragraph{This part specifically.} Two sources bear on why a hand written kernel
+has room against cuBLAS here at all. The RTX Blackwell whitepaper gives the
+machine~\cite{blackwell}, and an independent analysis of cuBLAS on consumer
+Blackwell reports it dispatching Ampere generation
+\texttt{cutlass\_80\_tensorop\_h16816gemm} kernels for FP16 GEMM~\cite{cloudrift}.
+I have not reproduced that dispatch analysis on my own card, so I carry it as
+context for why the gap exists rather than as a result of mine; Section
+\ref{sec:limitations} says so again.

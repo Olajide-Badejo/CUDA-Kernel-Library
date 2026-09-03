@@ -1,0 +1,27 @@
+\section{Introduction}
+
+The aim is narrow on purpose: take one operation, GEMM, and push a hand written
+kernel from a fair first pass to the point where Nsight Compute reports it as
+compute bound and it lands within about ten percent of cuBLAS on this specific
+card. The discipline that makes the result trustworthy is the comparison policy.
+Percent of cuBLAS on the same device is the only headline used, because it cancels
+the hardware out of the claim. No number in this report comes from anywhere but a
+run of this code on this machine, and each is traceable to a results file and a
+commit hash.
+
+Two things follow from taking that policy seriously. The first is that a
+measurement which contradicts the textbook is still a measurement: the shared
+memory tiled kernel loses to the naive one on this part, and rather than being
+skipped it becomes Section \ref{sec:negative}. The second is that a number I have
+not measured yet does not get written down. Every table in this report that
+covers a 1.1.0 family reads \emph{pending} in its performance columns, and the
+generator that writes those tables refuses to invent a value to fill them.
+
+The machine is an RTX 5070 (Blackwell GB205, compute capability 12.0, sm\_120, 48
+SMs, 12 GB GDDR7), running CUDA Toolkit 13.3 inside WSL2. The ceilings used
+throughout are measured, not read from the datasheet: about 579 GB/s streaming
+bandwidth, 23 TFLOP/s FP32, and 65 TFLOP/s tensor core (best cuBLAS FP16). The
+architecture reference for the part is the RTX Blackwell
+whitepaper~\cite{blackwell}, and the instruction level references are the CUDA
+programming guide~\cite{cudaguide} and the PTX ISA~\cite{ptxisa} shipped with
+toolkit 13.3.

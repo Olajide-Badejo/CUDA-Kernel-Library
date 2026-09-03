@@ -1,0 +1,20 @@
+\section{Background}
+
+\paragraph{Roofline.} The roofline model bounds attainable performance by
+$\min(\text{peak compute}, \text{peak bandwidth} \times \text{arithmetic
+intensity})$~\cite{williams2009}. The ridge, peak compute over peak bandwidth,
+separates the memory bound region (left) from the compute bound region (right).
+GEMM at large $N$ has an arithmetic intensity that grows with $N$, so it lives far
+to the right of the ridge; a slow GEMM is therefore an implementation gap, not an
+algorithmic ceiling.
+
+\paragraph{Blocking theory.} The decisive step from a shared memory tiled kernel
+to a fast one is register blocking: each thread computes many outputs, which lifts
+the arithmetic intensity per thread and the work done per shared memory
+instruction. This follows Volkov and Demmel~\cite{volkov2008}, and the diagnostic
+rounds below confirm it on Blackwell.
+
+\paragraph{Tensor pipeline.} The fifth generation tensor cores raise the compute
+ceiling far above the FP32 units. Reaching that ceiling means feeding the cores
+fast enough, which is a shared memory problem: the fragment loads, not the matrix
+multiply instructions, are what saturate first.

@@ -95,3 +95,71 @@ confirmed back at 79.7 percent with correctness intact. Recorded as a failed rou
 (Round 8 hypothesis) rather than kept. The genuine remaining levers are the ones
 named in DIAGNOSTIC_LOG Round 7: a swizzled shared layout, more register reuse, or
 split K for the large shapes, not a deeper pipeline.
+
+## 2026-08-31: nvcc 13.3 cannot parse GCC 15.2's libstdc++, host compiler pinned to g++-14
+
+Symptom: a default configure on this machine fails during the first CUDA
+compilation, inside a libstdc++ header, with a parse error on `if consteval`. The
+error names a system header and no file of mine, so it reads like a broken
+toolkit rather than a host compiler mismatch.
+
+Root cause: the machine's default host compiler is GCC 15.2. Its libstdc++ uses
+`if consteval` in headers that nvcc's frontend pulls in, and the nvcc 13.3
+frontend does not accept that form. nvcc runs its own C++ frontend over host code
+before handing anything to the host compiler, so "the host compiler supports it"
+is not the relevant question.
+
+Options: (a) wait for a toolkit whose frontend accepts it; (b) patch or shadow the
+offending header; (c) pin the host compiler to a version whose libstdc++ nvcc 13.3
+can parse. Chose (c): (a) blocks the build on somebody else's release schedule and
+(b) means shipping a project that edits the user's system headers.
+
+Fix: the build pins `CMAKE_CXX_COMPILER` and `CMAKE_CUDA_HOST_COMPILER` to
+g++-14.3, and the Makefile carries a `CMAKE_EXTRA` hook so a checkout on a machine
+with a different default can pass it in one variable. `docs/building.md` states
+the pin and the reason in its host compiler section, because a user who hits this
+sees a libstdc++ error and has no way to guess the cause. Verified: configure and
+full build clean under g++-14.3 on this machine, and the CI containers, which ship
+GCC 13, need no flag at all.
+
+## 2026-08-31: audited my own published claims against my own data, A1 to A7
+
+Symptom: not a build failure. Preparing the 1.1.0 release I read the shipped
+report and README back against the results files they were supposed to have come
+from, and they did not agree.
+
+Root cause: seven distinct defects, each with its own mechanism, recorded in full
+in `docs/CORRECTIONS.md` and summarized here so the log carries the incident.
+**A1**, provenance: all 60 summary rows and all eight `round_meta.txt` files carry
+commit hashes that no longer resolve, because I rewrote the repository history
+after the data was produced. The numbers are real; their audit trail is not.
+**A2**, timed regions: the cuSPARSE wrapper built descriptors and sized and
+allocated its workspace inside every call and the harness timed all of it, and the
+TRSM benchmark restored its right hand side inside the timed window. **A3**, the
+roofline: the compute roof was set to a cuBLAS measurement, which made every
+"percent of roof" a restatement of "percent of cuBLAS" drawn on log axes. **A4**,
+clocks: the sweep never locked them, so rows taken at 1042 MHz sit beside rows
+taken at 2880 MHz. **A5**, claims the data does not support, including a flat
+percent quoted from the best shape. **A6**, two of the nine diagnostic rounds
+point at no committed ncu page. **A7**, the pipeline could not reproduce itself:
+the roofline CSV was gitignored, the asset generator skipped the figure and exited
+zero, and a clean clone rebuilt the report around a stale committed PNG and
+reported success.
+
+Fix: one gate per defect rather than one edit per defect, because an edit fixes
+the instance and a gate fixes the class. `scripts/check_provenance.py` resolves
+every recorded hash and fails on a dead one, with the known dead v1 hashes listed
+as a standing debt. The SpMV plan makes per call descriptor construction
+impossible through the public path, and an allocation gate armed on CUPTI
+callbacks fails any run that allocates inside a timed region. The roofline draws
+hardware roofs and puts cuBLAS on a dashed attainable line. The sweep refuses to
+run without a locked clock. Unsupported claims are withdrawn in the register
+rather than quietly reworded. And `gen_report_assets.py` treats a missing input as
+a hard error, so the report fails loudly instead of reusing a picture whose input
+is gone.
+
+Verified: `make check-style` runs the provenance gate and the dash gate on every
+invocation; `make report` regenerates every figure and table from the committed
+results and CI diffs them byte for byte; the allocation gate was watched failing
+on purpose with `--gate-red` before it was trusted; and the corrections register
+ships in the published tree rather than being deleted with the defects.

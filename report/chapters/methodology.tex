@@ -1,0 +1,35 @@
+\section{Methodology}
+\label{sec:method}
+
+\paragraph{Timing.} Every measurement uses CUDA events with warmup launches then
+timed repetitions, reported as the median so a single slow rep does not move the
+headline. NVML samples power, clocks, temperature, and throttle reasons on a
+background thread during every sweep; a throttled run is rerun after cooldown
+rather than reported. The 1.1.0 protocol adds five independent process repeats per
+configuration with a bootstrap confidence interval, a locked graphics clock that
+the sweep refuses to run without, vendor baselines measured once per shape, a
+shuffled order with cooldowns, and an allocation gate that fails a run if any
+setup allocation happens inside a timed region. The exact protocol is
+\texttt{docs/benchmarking.md}, and Section \ref{sec:repro} states which of the
+numbers in this build of the report were produced under it.
+
+\paragraph{What a row of the summary is.} A shape can carry more than one
+measurement: L2 flushed and unflushed, stream launched and graph launched, one
+inner launch or several. Those are answers to different questions, so they are
+different rows, and exactly one row per measurement is marked canonical: the one
+the protocol would quote on its own. The tables in this report read canonical
+rows, and the generator says so when it falls back.
+
+\paragraph{Diagnostic rounds.} After each ladder rung, one Nsight Compute round:
+capture the Speed of Light, occupancy, memory workload, and warp stall reasons;
+name the top limiter; state a hypothesis; apply exactly one change; re-measure.
+Each round is one dated entry backed by an ncu report. This loop, not any single
+kernel, is the method.
+
+\paragraph{Nothing is hand placed.} Every table and every figure in this document
+is written by \texttt{scripts/gen\_report\_assets.py} from the committed results
+files, and a missing input is a hard error rather than a reason to reuse the
+picture already on disk. That rule exists because the v1 pipeline did the
+opposite: the roofline CSV was gitignored, the generator skipped the figure and
+exited zero, and a clean clone rebuilt the report around a stale committed PNG and
+reported success. That is defect A7 in the corrections register.

@@ -45,15 +45,36 @@ MEM_TINT = "#4C78A8"      # cool: memory bound region
 COMPUTE_TINT = "#E69F00"  # warm: compute bound region
 ATTAINABLE_TINT = "#7A5C00"  # the cuBLAS attainable lines, distinct from the roofs
 
-# Friendlier display names and the precision each kernel runs in.
+# Friendlier display names and the precision each kernel runs in. The SpMV, FFT
+# and scan entries are the hooks for the 1.1.0 families: the profiler emits an
+# operating point per variant and this plotter draws whatever the CSV carries, so
+# those points join the chart when their rows land, with no code change here. A
+# label that is not in this table is drawn under its own name rather than dropped.
 DISPLAY = {
     "gemm_naive": ("GEMM naive", "fp32"),
     "gemm_cp_async": ("GEMM cp.async", "fp32"),
     "gemm_wmma_fp16": ("GEMM WMMA", "tensor"),
     "gemm_mma_opt": ("GEMM mma + swizzle (top)", "tensor"),
     "gemv_warp": ("GEMV warp", "fp32"),
+    "spmv_warp": ("CSR SpMV warp", "fp32"),
+    "spmv_merge": ("CSR SpMV merge", "fp32"),
+    "spmv_sell": ("SpMV SELL-C-sigma", "fp32"),
+    "fft_four_step": ("FFT four step", "fp32"),
+    "fft_shared": ("FFT shared resident", "fp32"),
+    "scan_lookback": ("scan look-back", "fp32"),
+    "reduce_vec4": ("reduction vectorized", "fp32"),
     "cublas_attainable": ("cuBLAS FP16 (attainable)", "tensor"),
 }
+
+# Which family each label belongs to, for the generated caption. The caption has
+# to name the families that are actually on the chart and the ones that are not,
+# because "the roofline carries four families" is a claim and it has to be true of
+# the picture rather than of the plan.
+FAMILY_OF = {
+    "gemm": "GEMM", "gemv": "GEMV", "spmv": "SpMV", "fft": "FFT",
+    "conv": "convolution", "scan": "scan", "reduce": "reduction",
+}
+CAPTION_FAMILIES = ["gemm", "gemv", "spmv", "fft", "scan"]
 
 # Drawn as a dashed attainable line, not as a kernel marker.
 ATTAINABLE_LABEL = "cublas_attainable"
@@ -225,8 +246,38 @@ def main() -> int:
     pdf = out_dir / "roofline.pdf"
     fig.savefig(png, dpi=150)
     fig.savefig(pdf)
+
+    write_caption(out_dir.parent / "tables", points)
     print(f"wrote {png} and {pdf}")
     return 0
+
+
+def write_caption(tables_dir: Path, points: list[dict[str, str]]) -> None:
+    """Name the families that are on the chart, and the ones that are not.
+
+    Generated rather than written, so the caption cannot claim a family whose
+    points are absent. The 1.1.0 spec asks the roofline to carry GEMM, SpMV, FFT
+    and scan; until those sweeps run it carries what it carries and says so.
+    """
+    drawn = set()
+    for p in points:
+        if p["label"] == ATTAINABLE_LABEL:
+            continue
+        drawn.add(p["label"].split("_")[0])
+    present = [FAMILY_OF[f] for f in CAPTION_FAMILIES if f in drawn]
+    absent = [FAMILY_OF[f] for f in CAPTION_FAMILIES if f not in drawn]
+    parts = ["Families on the chart: " + ", ".join(present) + "."]
+    if absent:
+        parts.append("Pending, with no operating points in the committed profiler "
+                     "output yet: " + ", ".join(absent) + ". The plotter draws "
+                     "whatever the CSV carries, so those points appear here when "
+                     "their sweep rows land.")
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    # A macro definition, not bare text: an \input inside a \caption breaks when
+    # hyperref writes the caption to the list of figures, so main.tex loads this
+    # file in the preamble and the figure uses the macro.
+    (tables_dir / "roofline_caption.tex").write_text(
+        "\\newcommand{\\rooflinecaption}{" + " ".join(parts) + "}\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

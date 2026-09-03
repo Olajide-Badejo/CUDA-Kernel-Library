@@ -1,0 +1,139 @@
+\section{The 1.1.0 GEMM mechanisms}
+\label{sec:mechanisms}
+
+Section \ref{sec:gap} ends on a hypothesis: the residual gap to cuBLAS is mostly
+kernel selection. The four mechanisms in this section are what test it. All four
+are implemented, tested and profiled at compile time; none of them has a
+throughput number yet, because the tile sweep that produces those numbers runs
+under the locked clock protocol and that is an owner action. Every performance
+column below therefore reads \emph{pending}, and the generator that writes these
+tables leaves it that way rather than filling it from a model. The mechanisms are
+documented in full in \texttt{docs/gemm.md}.
+
+\subsection{The tile family}
+
+Rung 6 is one block shape, 128 by 128 with a K step of 32. The family templates
+the mainloop on the tuple of block extents and the warp arrangement, and ships six
+instantiations. Every warp tile is 64 by 32, which is why the accumulator stays at
+64 registers across the whole family: the shapes differ in shared memory footprint
+and in how badly they quantize against 48 SMs, not in register pressure. Nothing
+spills. The register and shared memory columns in Table \ref{tab:tiles} come from
+\texttt{nvcc -{}-resource-usage} at sm\_120, so they are compile time facts and are
+filled in; the throughput column is the one waiting on the sweep. The shape
+constraints are \texttt{static\_assert}s rather than comments: three stages inside
+the 99 KB per block opt-in, warps inside the 48 an SM carries, the staging work
+dividing evenly across the block, and a warp tile that the \texttt{m16n8k16} shape
+divides.
+
+Shipping a family rather than a constant is the Nath, Tomov and Dongarra
+argument~\cite{nath2010}: which tile wins is a property of the shape and the part,
+and the way to find out is to instantiate them all and measure.
+
+\begin{table}[htbp]
+\centering
+\input{tables/gemm_tiles.tex}
+\caption{The tile family. Registers and shared memory are compile time facts from
+the resource usage report; relative throughput awaits the locked clock tile sweep.}
+\label{tab:tiles}
+\end{table}
+
+\subsection{Predicated tails}
+
+Before 1.1.0 a shape not divisible by the tile rerouted to the WMMA kernel, and
+one not divisible by 64 by 64 by 16 rerouted again to a scalar kernel with one
+thread per output element. Nothing warned, and no benchmark measured what that
+cost. The family predicates its edges instead, so every shape runs the same
+mainloop with masked edges. The staging uses \texttt{cp.async}'s source size
+field: a sixteen byte chunk that is partly past an edge copies the bytes that
+exist and zero fills the rest, and one wholly past an edge copies nothing and zero
+fills all sixteen. Zeros in the staged tile contribute nothing to the dot product,
+so the mainloop carries no edge logic at all.
+
+One case defeats \texttt{cp.async} outright, and it is worth naming because it is
+not obvious. A sixteen byte copy needs a sixteen byte aligned source, and a row of
+A starts at a multiple of $k$, so an odd $k$ puts every second row on an odd
+address. Those shapes stage through plain loads and shared stores, chosen by a
+flag the launcher computes from the leading dimensions and the operand base
+addresses. The pipeline structure does not change: the barrier that already
+separates the stage writing a buffer from the iteration reading it covers a
+synchronous store just as well as an asynchronous one. The scalar half precision
+path still exists but \texttt{Algo::kAuto} never routes to it, and \texttt{chosen}
+reports whatever did run, so there is no silent fallback. Cost of the predicated
+tails relative to the aligned path: pending.
+
+\subsection{Split-K}
+
+A 1024 by 1024 output at a 128 by 128 tile is 64 blocks on a 48 SM part, which is
+the 0.67 wave row of Table \ref{tab:gap}: most of the machine idles for most of
+the call. Split-K cuts the contraction into slices, runs each as its own grid
+layer, and sums the slices in a fixup pass.
+
+Two passes rather than atomics into C, for two reasons. Atomics would make the
+result depend on the order blocks happened to retire, which is not something a
+correctness test can pin down. And they would have to read C to apply beta from
+inside the mainloop, which breaks the rule that beta equal to zero does not read
+C. So the first pass writes raw partial sums into its own plane and never touches
+C, and the second sums the planes, multiplies by alpha once, and adds beta times C
+once.
+
+The scratch is $\text{slices} \times m \times n$ floats.
+\texttt{ckl::gemm\_workspace\_size} answers with it, and a Context that already
+owns a workspace that large keeps the allocation out of the call; without one the
+driver allocates and frees its own around the launch, which is correct but is an
+allocation a benchmark must not time. The slice count a caller asks for is a
+request, because each slice is rounded up to a whole number of the tile's K step,
+and \texttt{ckl::gemm\_split\_k\_slices} reports how many were actually used.
+Speedup at the shapes where waves are scarce: pending.
+
+\subsection{Stream-K}
+
+Split-K cuts every tile the same way and pays a full extra pass over C for it.
+Stream-K only touches the tiles that would have left SMs idle~\cite{osama2023}.
+The grid is a block of persistent CTAs followed by ordinary data parallel ones:
+the data parallel CTAs take the tiles that fill whole waves, one each, and the
+stream-K CTAs share out the K iterations of what is left, which is at most two
+waves of tiles.
+
+A CTA whose share stops before the end of a tile holds only part of the sum, so it
+publishes its partial into its own plane of the workspace, fences, and raises a
+flag. The CTA that covers the tile's last K iteration waits on the flag of every
+peer whose share ended inside that tile, adds the planes into its accumulator, and
+writes C once.
+
+The direction of that wait is the safety argument and it is deliberate: an owner
+only ever waits on CTAs with a lower index than its own. Blocks are dispatched in
+increasing index order, so a resident owner implies every peer it can wait on is
+already resident or already retired. Waiting upward would require every stream-K
+CTA to be co-resident, which is an assumption about occupancy that a profiler's
+instrumentation or a future register allocation change could quietly turn into a
+hang. The data parallel CTAs never wait at all.
+
+Three orderings hold the protocol together and all three are explicit. A
+\texttt{\_\_threadfence} between the partial stores and the flag makes the partial
+visible device wide before the flag that advertises it. A
+\texttt{\_\_syncthreads} between them makes that true for every thread of the
+block and not just the one raising the flag. And the persistent loop carries a
+\texttt{\_\_syncthreads} of its own, because the shared tile buffers are reused
+from one tile to the next and the next tile's \texttt{cp.async} stores would
+otherwise race the previous tile's \texttt{ldmatrix} reads. That last one is not a
+guess: it is the barrier \texttt{compute-sanitizer -{}-tool racecheck} reports when
+it is removed. Speedup on small and odd shapes: pending.
+
+\subsection{Dispatch}
+
+\texttt{Algo::kAuto} on an FP16 input with an FP32 output now scores every tile in
+the family against the shape, using wave quantization and the shared memory
+budget, and selects a tile, a decomposition, and a slice count. The heuristic
+reads the tile sweep CSV when one is present. The committed sweep carries
+\texttt{clock\_locked=false}, which means the heuristic must not be tuned from it,
+and it is not. Table \ref{tab:decomp} is the decomposition summary; like the tile
+table, its performance columns wait on the sweep.
+
+\begin{table}[htbp]
+\centering
+\input{tables/gemm_decomp.tex}
+\caption{The decomposition mechanisms and what each one is expected to fix.
+Measured speedups are pending the locked clock sweep; the expectations are stated
+as hypotheses and are not evidence.}
+\label{tab:decomp}
+\end{table}

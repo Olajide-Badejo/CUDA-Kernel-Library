@@ -1,0 +1,121 @@
+\section{Reproducibility}
+\label{sec:repro}
+
+This section is what somebody would need to rerun the work and get the same
+answers, and an explicit statement of which numbers in this build of the report
+were produced under the current protocol and which were not.
+
+\subsection{The machine and the toolchain}
+
+\begin{itemize}
+\item GPU: NVIDIA RTX 5070, Blackwell GB205, compute capability 12.0, sm\_120, 48
+      SMs, 12 GB GDDR7.
+\item Driver: 610.62, reached from WSL2 through the Windows driver, which is why
+      the profiler counter permission is a Windows side setting and not a Linux
+      one.
+\item Toolkit: CUDA 13.3, nvcc 13.3.73. The CMake floor is toolkit 12.8, the first
+      release with sm\_120 codegen, guarded with a message rather than a link
+      error.
+\item Host compiler: g++-14.3, and this one is not optional. The system default on
+      this machine is GCC 15.2, whose libstdc++ headers use \texttt{if consteval}
+      in a form that the nvcc 13.3 frontend cannot parse, so a default configure
+      fails inside a system header with no obvious connection to this project. The
+      build pins the host compiler explicitly; \texttt{docs/building.md} carries the
+      diagnosis and the exact CMake flags.
+\item Build: CMake 4.4.0 with Ninja, release architecture list
+      \texttt{80-real;86-real;89-real;90-real;120-real;120-virtual}. Warnings are
+      errors.
+\item Report toolchain: matplotlib 3.10.7 and numpy 2.3.5, pinned exactly rather
+      than as floors, because matplotlib writes its own rasteriser output into the
+      PNG and its bundled FreeType into the PDF, so two different wheels draw two
+      different files from the same numbers. The report target exports
+      \texttt{SOURCE\_DATE\_EPOCH} to a fixed instant so the PDF timestamp is not a
+      moving part either, and CI runs
+      \texttt{git diff -{}-exit-code report/figures report/tables} after rebuilding
+      them.
+\end{itemize}
+
+\subsection{The measurement protocol}
+
+\begin{itemize}
+\item \textbf{Clocks.} The 1.1.0 sweep locks the graphics clock before it measures
+      anything and refuses to run if it cannot. \texttt{docs/benchmarking.md} says
+      what to do when the clock cannot be locked, and the answer is not to measure
+      anyway.
+\item \textbf{Timing.} CUDA events around the launch, warmup launches discarded,
+      median of the timed repetitions reported with the interquartile range beside
+      it.
+\item \textbf{Independent runs.} Five independent process repeats per
+      configuration under the 1.1.0 protocol, reduced to one row of record with a
+      bootstrap confidence interval carried in the row. The v1 sweep was a single
+      process with five warmup and twenty timed repetitions, and carries no
+      interval.
+\item \textbf{Order and thermal state.} Configurations run in shuffled order with
+      cooldowns between them. NVML samples power, clocks, temperature and throttle
+      reasons throughout; a throttled configuration fails the run rather than being
+      reported.
+\item \textbf{Baselines.} Vendor baselines are measured once per shape, in the same
+      process, on the same device, with no setup work inside the timed region. An
+      allocation gate arms a CUPTI callback on the allocation entry points around
+      each timed lambda and fails the run if the counter moves.
+\item \textbf{cuBLAS math mode.} \texttt{bench\_all} sets the math mode explicitly,
+      reads it back, and records the result in the \texttt{cublas\_math\_mode}
+      column of every row. The default is \texttt{CUBLAS\_DEFAULT\_MATH}, which
+      permits reduced precision reduction of split-K partials; the
+      \texttt{-{}-disallow-reduced-precision-reduction} flag adds
+      \texttt{CUBLAS\_MATH\_DISALLOW\_REDUCED\_PRECISION\_REDUCTION} so the effect
+      on both speed and oracle accuracy can be measured rather than assumed.
+\item \textbf{Workspace policy.} \texttt{cublasSetWorkspace} is never called, at
+      any size. One call forfeits the default pool, which is 32 MiB on this part,
+      and a baseline running without its pool is not the baseline a user would get.
+      \texttt{cublasSetStream} is called first, because it resets the workspace to
+      the default pool. On my own side, a Context that owns a workspace keeps
+      split-K and stream-K scratch allocation out of the timed call, and
+      \texttt{ckl::gemm\_workspace\_size} is how a caller sizes it.
+\item \textbf{Provenance.} Every results row records the commit that produced it,
+      and \texttt{make check-style} runs a gate that resolves each recorded hash in
+      git and fails when one does not.
+\end{itemize}
+
+\subsection{The exact targets}
+
+\begin{verbatim}
+make setup      # configure (CMake plus Ninja, sm_120)
+make build      # compile; zero warnings is a gate
+make test       # correctness against cuBLAS, cuSPARSE, cuFFT, CUB, CPU
+make sweep      # full protocol sweep -> experiments/results/summary.csv
+make roofline   # measure the ceilings and render the roofline figure
+make report     # regenerate figures and tables, then build both PDFs
+make check-style
+make all        # build, test, sweep, report, style gate
+\end{verbatim}
+
+\texttt{make report} does not need a GPU or a toolkit. It works from the committed
+results files, which is the point: a clean clone on a machine with no NVIDIA
+hardware rebuilds every figure and table in this document, and fails loudly if an
+input is missing.
+
+\subsection{Which numbers here are which}
+
+This matters more than the rest of the section, so it is stated bluntly.
+
+\textbf{Every performance number in this build of the report is v1 era.} The
+committed \texttt{experiments/results/summary.csv} is the v1 sweep: single process,
+unlocked clocks, and rows whose commit hash no longer resolves. That covers the
+GEMM ladder table, the ladder figure, the gap decomposition, the supporting families
+table, the roofline points, and every percent of a vendor library quoted anywhere in
+this document. Read them as provisional. The withdrawn cuSPARSE percentages are not
+merely provisional; they are gone, for the reason in Section \ref{sec:limitations}.
+
+\textbf{Every compile time fact here is current.} The register allocation study, the
+SASS instruction mix, the tile family's register and shared memory footprints, and
+the shape constraints are produced by the 1.1.0 toolchain from the current tree. They
+need no GPU, so they do not depend on the clock protocol at all.
+
+\textbf{Every 1.1.0 family performance number reads pending.} The tile family, the
+predicated tails, split-K, stream-K, the CUTLASS reference line, the SpMV matrix
+suite, FFT and convolution, and reduction and scan have no throughput rows in the
+committed summary, so their tables carry the word \emph{pending} in place of a
+number. The generator writes it there deliberately, and no estimate is substituted.
+The owner sweep at locked clocks is what fills them in, and it is the one action
+that closes both this section and the corrections register.

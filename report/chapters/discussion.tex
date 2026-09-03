@@ -1,0 +1,28 @@
+\section{Discussion}
+
+The result that most shaped the work is the one in Section \ref{sec:negative}:
+tiling alone loses to naive on this card, because the cache hierarchy makes the
+naive kernel's redundant traffic cheap. Register blocking, and then feeding the
+tensor cores through a swizzled shared layout, are what actually move the number.
+Stated as a rule of thumb rather than a measurement, the sequence is that a
+technique only pays when the thing it removes is actually costing something, and
+the profiler is what tells you whether it is.
+
+The remaining ten percent to cuBLAS at the large shapes, and the much larger gap at
+1024 cubed, split cleanly along that line. Table \ref{tab:gap} shows wave
+quantization owning the small shape gap, which is a decomposition problem and has
+two known answers: split-K and stream-K, both now implemented. The residual at 4096
+and 8192 is a different animal, and the hypothesis is per shape kernel selection,
+which is what the tile family exists to test. Neither statement is a measurement
+yet, and the report says so in the tables rather than in a hedge at the end.
+
+The failed three stage pipeline round is kept in the engineering log as an equal
+rank result. A plausible change measured worse and was reverted; the honest record
+of that is what makes the changes that did work believable.
+
+One broader observation, offered as an opinion rather than a finding. Most of the
+effort in this project went into measurement infrastructure, not kernels: the
+locked clock protocol, the allocation gate, the provenance check, the byte stable
+report pipeline. That ratio felt wrong while I was in it and looks right in
+hindsight, because every claim I had to withdraw in the corrections register was a
+claim the infrastructure would have caught before it was published.

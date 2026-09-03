@@ -1,0 +1,57 @@
+\section{The CUTLASS reference line}
+\label{sec:cutlass}
+
+Comparing a hand written kernel to cuBLAS answers "how close to the vendor", and
+that is the headline. It does not answer "how close to a well engineered open
+implementation of the same idea", which is the more useful question when the goal
+is to find out what my mainloop is missing. So CUTLASS runs as a rung on the same
+ladder, through the same harness, on the same shapes~\cite{cutlass}.
+
+It is pinned to release \texttt{v4.7.1}, commit
+\texttt{cb4247394dd82148787aed73e5dc7cef33cbf862}, fetched at configure time. The
+pin is a tag rather than a branch on purpose: the analysis below is about what
+this release's SM120 builders emit, and a moving pin would quietly invalidate it.
+Nothing of CUTLASS is vendored into the tree, no CUTLASS target is configured, and
+no CUTLASS type appears in a public header. It is headers, included by one
+translation unit. The full argument for the 2.x device API over a
+\texttt{CollectiveBuilder} on this part is in \texttt{docs/cutlass.md}.
+
+\paragraph{What is established now.} Correctness. The rung is held to the same
+three errors as every other tensor rung of Section \ref{sec:accuracy}: $10^{-5}$
+relative Frobenius against a same precision cuBLAS oracle, a $\text{tol}(k)$ bound
+against a double precision reference over the rounded inputs, and a storage
+roundoff bound against the FP32 data those inputs came from. It also passes the
+beta equal to zero rule, the empty output and empty contraction cases, and large
+K. The sanitizers are clean on it: memcheck, racecheck, initcheck and synccheck
+all run without an error on the tensor suite with the rung in it.
+
+\paragraph{What is not established.} Performance. The sweep already knows how to
+produce the rows, and the ladder figure has a slot for the variant, but the rows
+need locked clocks and that is owner work. Table \ref{tab:cutlassgap} is therefore
+all pending.
+
+\begin{table}[htbp]
+\centering
+\input{tables/cutlass_gap.tex}
+\caption{The gap against the CUTLASS reference line. Every cell is pending: the
+sweep at locked clocks and the profile-cuBLAS round are both owner actions, and
+nothing here will be filled in from an estimate.}
+\label{tab:cutlassgap}
+\end{table}
+
+\paragraph{Where the gap will be looked for.} Once those rows exist the difference
+gets attributed technique by technique. Five candidates, in the order I would test
+them, each a hypothesis and not a finding. CUTLASS runs 128 threads with 64 by 64
+warp tiles while \texttt{mma\_opt} runs 256 threads with 64 by 32, so the wider
+warp tile amortizes each \texttt{ldmatrix} over more \texttt{mma.sync} at the cost
+of accumulator registers; the HMMA to LDSM ratio in the SASS captures is already
+on file to test that. CUTLASS stages its accumulator through shared memory for
+coalesced global stores while \texttt{mma\_opt} stores 64 bit pairs straight from
+the fragment layout. Both run three stages, but the barrier placement and the
+depth of the register prefetch differ. The reference line predicates every edge
+while \texttt{mma\_opt} takes an aligned fast path, which should favour
+\texttt{mma\_opt} on aligned shapes, and if it does not then predication is not
+what costs. And the reference line takes 236 registers over 128 threads against
+\texttt{mma\_opt}'s 122 over 256, with neither spilling, so which of the two the
+machine actually lets sit resident is the question Section \ref{sec:sass} answers
+for one of them and not yet for the other.

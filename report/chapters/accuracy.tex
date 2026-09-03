@@ -1,0 +1,90 @@
+\section{Numerical accuracy of the headline kernel}
+\label{sec:accuracy}
+
+A kernel that is fast and wrong is not a result, and a tolerance chosen after the
+fact is not a gate. This section states the error model for the top FP16 kernel,
+what it predicts, and what the test suite measures against it.
+
+\subsection{The model}
+
+The kernel has two distinct sources of rounding and they do not have the same
+size.
+
+Inside one \texttt{mma.sync.aligned.m16n8k16} the sixteen products of a K slice
+are summed by the hardware, in FP32, in a fixed reduction network. That step
+contributes on the order of one FP32 rounding, not sixteen, and its ordering is a
+property of the instruction rather than of my code~\cite{markidis2018}.
+
+Across K the kernel accumulates those per instruction results sequentially in
+FP32, one addition per \texttt{mma.sync}, so a contraction of length $k$ carries
+$k/16$ dependent FP32 roundings.
+
+On top of both, the inputs are FP16. A value drawn from an FP32 distribution is
+rounded once on the way into the operand, before any multiply happens at all, and
+that rounding is at the FP16 unit roundoff.
+
+Putting the three together, the absolute error on one output element is bounded to
+first order by
+
+\begin{equation}
+\left| \hat{c} - c \right| \lesssim
+\left[ \frac{k}{16}\, u_{32} + u_{16} \right] \sum_{i} |a_i|\,|b_i|,
+\label{eq:model}
+\end{equation}
+
+with $u_{32} = 2^{-24}$ and $u_{16} = 2^{-11}$.
+
+The interesting part of Equation \ref{eq:model} is which term wins. At
+$k = 4096$ the accumulation term is $256 \, u_{32} \approx 1.5 \times 10^{-5}$ and
+the input rounding term is $u_{16} \approx 4.9 \times 10^{-4}$, so the input
+rounding dominates by a factor of about 30. Deepening the accumulation, or
+splitting K and reducing the partials, moves the smaller of the two terms. That is
+why the accuracy of this kernel is essentially the accuracy of FP16 storage, and
+why chasing accumulation order here would be effort spent on the term that is not
+the problem.
+
+\subsection{What is measured}
+
+Three errors are recorded by \texttt{tests/test\_gemm\_tensor.cpp}, and each
+answers a different question.
+
+Against a same precision cuBLAS oracle the kernel agrees to about $10^{-7}$
+relative Frobenius error. That is FP32 accumulate rounding and nothing else: the
+kernel is numerically the same computation cuBLAS performs, not an approximation
+of it. The correctness gate is $10^{-5}$, which the measured $10^{-7}$ clears by
+two orders of magnitude, and every tile family member is held to the same gate at
+unaligned shapes as well as aligned ones. The v1 gate was $5 \times 10^{-2}$,
+which a kernel that silently dropped its last K stage would have passed; that is
+why the number is what it is now.
+
+Against an FP32 reference over the original data the measured error is about
+$2.6 \times 10^{-4}$, which is the figure Equation \ref{eq:model} predicts once
+the $u_{16}$ term is recognised as the dominant one. The suite records it as the
+\texttt{vs\_fp32} property of the tensor test rather than as a number in a
+document, so it is regenerated on every run and cannot drift away from the model
+silently. The BF16 path measures about $2.1 \times 10^{-3}$, larger by roughly the
+ratio the shorter mantissa predicts (8 explicit bits against FP16's 10).
+
+\subsection{Which cuBLAS the oracle is}
+
+The oracle only means something if the mode it ran under is stated, because with
+FP16 inputs and \texttt{CUBLAS\_COMPUTE\_32F} cuBLAS is permitted to reduce
+split-K partials in reduced precision, which moves both its speed and its accuracy
+as a reference.
+
+The tensor tests create a cuBLAS handle and do not call
+\texttt{cublasSetMathMode}, so the oracle runs under the library default,
+\texttt{CUBLAS\_DEFAULT\_MATH}, with reduced precision reduction permitted. That
+is the honest statement of what the $10^{-7}$ agreement above was measured
+against.
+
+The benchmark path is stricter and newer. \texttt{bench\_all} sets the math mode
+explicitly, reads it back with \texttt{cublasGetMathMode}, and records the
+resulting name in the \texttt{cublas\_math\_mode} column of every row it writes,
+so a future row says for itself which oracle produced its baseline. The default is
+still \texttt{CUBLAS\_DEFAULT\_MATH}; the
+\texttt{-{}-disallow-reduced-precision-reduction} flag adds
+\texttt{CUBLAS\_MATH\_DISALLOW\_REDUCED\_PRECISION\_REDUCTION} so the effect can be
+measured rather than assumed. No row in the committed summary carries that column
+yet, because the committed summary is v1 era data written before the column
+existed; Section \ref{sec:repro} says so.

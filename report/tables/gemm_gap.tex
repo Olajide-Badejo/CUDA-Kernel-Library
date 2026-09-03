@@ -1,0 +1,10 @@
+\begin{tabular}{lrrlrr}
+\toprule
+shape & GFLOP/s & percent of cuBLAS & CTAs into 96 slots & quantization loss & residual \\
+\midrule
+1024 cubed & 32,303 & 63.5 & 64, 0.67 waves & 33.3 & 3.2 \\
+2048 cubed & 51,493 & 80.5 & 256, 2.67 waves & 11.1 & 8.4 \\
+4096 cubed & 54,985 & 89.9 & 1024, 10.67 waves & 3.0 & 7.0 \\
+8192 cubed & 58,060 & 88.9 & 4096, 42.67 waves & 0.8 & 10.3 \\
+\bottomrule
+\end{tabular}

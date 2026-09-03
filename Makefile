@@ -179,16 +179,16 @@ provenance:
 	python3 scripts/check_provenance.py
 
 # Regenerate figures and tables from the canonical results, then build both PDFs.
-# Does not depend on the CUDA build: it works from the committed summary.csv and
-# figures, so it runs on a machine without a GPU or toolkit (and in CI). Dash
-# check runs last so a stray dash in the prose fails the report build.
+# Does not depend on the CUDA build: it works from the committed results files, so
+# it runs on a machine without a GPU or toolkit (and in CI). Both documents live
+# in report/ now; report_debug/ and reports/ are gone, and the built PDFs land in
+# report/build/, which is gitignored. They become release assets at tag time
+# rather than being committed. Dash check runs last so a stray dash in the prose
+# fails the report build.
 report:
 	python3 scripts/gen_report_assets.py
 	cd report && latexmk -pdf -interaction=nonstopmode -output-directory=build main.tex
-	cd report_debug && latexmk -pdf -interaction=nonstopmode -output-directory=build debug_report.tex
-	mkdir -p reports
-	cp report/build/main.pdf reports/main_report.pdf
-	cp report_debug/build/debug_report.pdf reports/debug_report.pdf
+	cd report && latexmk -pdf -interaction=nonstopmode -output-directory=build debug.tex
 	python3 scripts/check_no_dashes.py .
 
 # `all` is the reproduction target: build, test, sweep, report, style gate, from a
@@ -196,4 +196,4 @@ report:
 all: build test sweep report check-style
 
 clean:
-	rm -rf $(BUILD_DIR) report/build report_debug/build
+	rm -rf $(BUILD_DIR) report/build

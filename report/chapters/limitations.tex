@@ -1,0 +1,62 @@
+\section{Limitations and threats to validity}
+\label{sec:limitations}
+
+\paragraph{One GPU, one vendor, one toolkit, one part class.} Every number here
+comes from a single RTX 5070 running CUDA Toolkit 13.3 under WSL2. It is a
+consumer part, not a datacenter one: 12 GB of GDDR7 rather than HBM, a different
+memory system, a different power and clock envelope, and no NVLink. Nothing in this
+report has been run on a second card, a second toolkit version, or a second vendor.
+Where a claim depends on the hardware, and most of them do, it is a claim about
+this configuration.
+
+\paragraph{The negative result is a single GPU finding.} Section \ref{sec:negative}
+shows shared memory tiling losing to naive, and names the mechanism: the last level
+cache absorbs the redundant traffic that tiling exists to remove. That mechanism is
+a statement about the ratio of cache capacity to working set, which means the sign
+of the result should flip on a part with a smaller cache or a larger working set,
+and I have not shown that. The study that would establish it is a crossover
+experiment across three generations, predicting the crossing point from L2 capacity
+and confirming it on Ampere, Ada and Blackwell. It needs hardware this machine does
+not have, and it is scoped to a future release rather than claimed here. Until
+somebody runs it, the correct reading of Section \ref{sec:negative} is "on this
+part", not "in general".
+
+\paragraph{Provenance of the v1 era numbers.} Every performance figure in this
+build of the report comes from a sweep taken before the clocks were locked, on a
+repository history that was later rewritten. Two consequences. The GPU ran at
+anywhere from 1042 to 2880 MHz across that sweep, so rows are not strictly
+comparable with each other and the small shapes, which run coolest, are flattered
+least consistently. And the commit hash recorded in every row no longer resolves in
+git, so the audit trail attached to those numbers is broken even though the numbers
+themselves are real. Both are recorded as corrections A4 and A1 in
+\texttt{docs/CORRECTIONS.md}, the dead hashes are listed in
+\texttt{experiments/results/legacy\_hashes.txt}, and a style gate fails on any new
+hash that does not resolve.
+
+\paragraph{Contaminated denominators.} Correction A2 records setup work inside two
+vendor timed regions. Every percent of cuSPARSE in the v1 data is withdrawn rather
+than corrected, because the setup cannot be subtracted after the fact, and the TRSM
+percentages are provisional for the same reason. The kernel to kernel comparisons
+within a family survive, because both sides were timed identically.
+
+\paragraph{What the CI bounds do and do not cover.} The performance regression job
+compares a quick sweep against a committed baseline, which catches a large step
+change on this machine. It does not establish that a small difference is real: a
+quick sweep is fewer repetitions than the full protocol, and it runs on whatever
+thermal state the machine happens to be in. Confidence intervals from five
+independent process repeats are part of the 1.1.0 protocol and are recorded per row
+in the new schema, but no row in this build of the report carries them, so the
+figures in it are drawn without error bars and the caption says so. Treat a
+difference of a few percent between two rows here as unresolved.
+
+\paragraph{Claims I am carrying from elsewhere.} The observation that cuBLAS
+dispatches Ampere generation kernels for FP16 GEMM on consumer Blackwell is
+somebody else's measurement~\cite{cloudrift}, not mine. I use it as context for why
+a gap exists at all. I have not reproduced it, and no result in this report depends
+on it being true.
+
+\paragraph{Benchmark scope.} The sweep covers four square shapes for GEMM and a
+handful of sizes elsewhere. Square shapes are the friendliest case for a fixed tile
+and the least interesting one for a dispatch heuristic. Non square, batched, and
+strided cases are supported by the API and tested for correctness, but they are not
+swept, so nothing here should be read as a performance claim about them.
