@@ -247,15 +247,7 @@ the matching shared load wavefront counter, so a re-run of rounds 7 and 9 dumps 
 conflict numbers into the committed `.txt` page alongside the sections. This entry
 is the record for rounds 5 and 8.
 
-**Open.**
-
-- Re-run rounds 7 and 9 with the conflict metric and commit the text pages. Mine to
-  do.
-- Round 8 is not reconstructed. It gets reopened properly as part of the V2
-  pipeline work, where the three stage experiment is redone under a locked clock
-  with its artifacts committed.
-- Round 5 cannot be reconstructed from what is in the tree. It stays a gap in the
-  numbering, recorded here rather than renumbered away.
+**Open.** Closed on 2026-09-04 by round 12; see the entry below.
 
 ---
 
@@ -286,14 +278,62 @@ with the CI work, not here.
 
 ---
 
+## A6 closure, 2026-09-04: round 12 replaces the evidence rounds 5 and 8 never had
+
+**What was open.** Three things: rounds 7 and 9 re-run with the conflict counter
+so a committed text page carries it, round 8 reconstructed, and round 5
+reconstructed.
+
+**What I did instead, and why.** I did not re-run rounds 7 and 9, and I am not
+going to. Both of them profile a kernel that no longer exists: round 10 replaced
+the round 9 A swizzle outright, on the grounds recorded in its log entry that the
+round 9 map was a two way conflict on every A read. A re-run of round 7 or round 9
+would mean checking out old kernels to reproduce a number whose only purpose was
+to justify a change that has since been superseded. That is archaeology, not
+evidence.
+
+What the release needed was a committed conflict counter on the kernel that ships.
+Round 12 is that page. `experiments/results/ncu/round12/mma_opt_4096.txt` and
+`mma_opt_8192.txt` carry
+`l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` beside the shared load
+wavefront counter, at the locked 2497 MHz clock, on `gemm_mma_opt_kernel` at
+commit `7cbad7c`. The numbers are 106,296 conflicts against 50,437,944 shared load
+wavefronts at 4096, and 465,929 against 403,119,113 at 8192. That is 0.21 percent
+and 0.12 percent, against the 0.40 conflicts per wavefront round 9 reported.
+
+**What this means for the numbers in the README and the report.** The 219 million
+to 33.7 million figure stays attributed the way A5 already attributes it: it is a
+v1 measurement, read out of a binary report that is gitignored, and no committed
+file carries it. It is now also superseded. Anywhere that pair of numbers is
+quoted as the state of this library, the round 12 pair replaces it, and the v1
+pair is kept only as the history of how the swizzle came about.
+
+**Open.**
+
+- Round 5 cannot be reconstructed from what is in the tree. It stays a gap in the
+  numbering, recorded here rather than renumbered away.
+- Round 8, the reverted three stage pipeline, is not reconstructed either. Round
+  10 shipped a three stage pipeline for a different reason and says in its own
+  entry that the round 8 diagnosis was arithmetically wrong. Reopening round 8
+  would be redoing an experiment whose conclusion has already been overturned by a
+  later round, so it is closed as superseded rather than left as a debt.
+- Nothing else. The committed half of A6 is closed.
+
+---
+
 ## What closes this register
 
-Two runs on my machine, both mine to do:
+One run on my machine, mine to do:
 
 1. The full sweep, under a locked clock, on current history, with the fixed
    cuSPARSE and TRSM timing. That closes A1 for the sweep rows, A2, A4, and turns
-   every provisional percent in A5 into a measured one.
-2. Nsight Compute rounds 7 and 9 re-run with the bank conflict metric. That closes
-   A1 for the round metadata and the committed half of A6.
+   every provisional percent in A5 into a measured one. This landed on 2026-09-03
+   and 2026-09-04 as `experiments/results/summary.csv` and `sweep.jsonl` at
+   `median_sm_clock_mhz` 2497 with `clock_locked=true`; what remains is folding the
+   round 15 to 17 `dram__bytes.sum` figures into the `dram_bytes_sum` column, which
+   still reads `pending ncu round`.
 
-Round 5 stays a gap and round 8 is reopened as new work, not as a reconstruction.
+The ncu half is done: rounds 12 to 17 are committed under
+`experiments/results/ncu/`, each with a `round_meta.txt` whose commit hash
+resolves, and each with a dated entry in `docs/DIAGNOSTIC_LOG.md`. Round 5 stays a
+gap and round 8 is closed as superseded, both explained in the A6 closure above.

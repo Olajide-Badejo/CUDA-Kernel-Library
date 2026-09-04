@@ -273,6 +273,52 @@ Mechanically checkable, and the full runs are owner actions at locked clocks.
 - SELL rows carry `nnz_padded / nnz`, and no SELL configuration is reported as a
   win at a padding ratio above 1.5 without the ratio quoted beside it.
 
+### What round 15 settled
+
+Diagnostic round 15 profiled `merge` and `vector` on `parabolic_fem` and
+`webbase-1M` at the locked 2497 MHz clock; pages under
+`experiments/results/ncu/round15/`.
+
+| clause | evidence | state |
+|---|---|---|
+| `spmv_merge` at least 1.5 times `spmv_csr_warp` on both power law matrices | webbase-1M 0.595328 / 0.116256 = 5.12x, intervals disjoint | green on webbase-1M |
+| the same clause on soc-LiveJournal1 | 2.984416 / 2.320832 = 1.286x, intervals disjoint | **red** |
+| every percent of roof row carries the measured `dram__bytes.sum` | measured for the four kernels round 15 covers | open: `summary.csv` still reads `pending ncu round` in that column |
+
+The soc-LiveJournal1 miss is the risk recorded before the locked run, confirmed at
+1.286x rather than the 1.33x measured unlocked. Round 15 rules out the obvious
+explanation: the merge tail ratio, `sm__cycles_active.max` over
+`sm__cycles_active.avg`, is 1.019 to 1.047 on every kernel it measured, and merge
+already keeps 29.71 of 32 lanes busy on the power law matrix where the vector
+kernel keeps 19.98. What merge pays is the gather, at 11.05 sectors per global load
+request against 2.70 for the vector kernel. Block level tile staging of x is the
+change to try. The gate is not being amended.
+
+### The model band and the y plane
+
+Round 15 found a systematic difference between the traffic model above and
+`dram__bytes.sum`, and it is worth stating before anyone reads a measurement
+outside the band as a defect. Both vector rows land under the low end of the band,
+which is the end that already assumes perfect x residency:
+
+| variant | matrix | model band, bytes | measured | position |
+|---|---|---|---|---|
+| merge | parabolic_fem | 35,706,904 to 48,302,104 | 54.29 MB | 12.4 percent above the high end |
+| vector | parabolic_fem | 35,706,904 to 48,302,104 | 33.65 MB | 5.8 percent below the low end |
+| merge | webbase-1M | 36,844,352 to 45,266,476 | 45.39 MB | 0.3 percent above the high end |
+| vector | webbase-1M | 36,844,352 to 45,266,476 | 32.87 MB | 10.8 percent below the low end |
+
+The shortfall on the two vector rows is 2.06 MB and 3.97 MB, against a `4m` y write
+of 2,103,300 and 4,000,020 bytes. The y plane is still dirty in L2 when the kernel
+retires, so those writes have not reached DRAM inside the window the counter
+covers. The model counts them because they are written eventually. At these sizes
+the band should be read as bracketing the measurement to within one y plane.
+
+Merge lands above the high end on both matrices for a different and more ordinary
+reason: the model has no term for the carry arrays or for the second pass, and
+`spmv_merge_fixup_kernel` alone moves 8.09 MB on parabolic_fem and 11.16 MB on
+webbase-1M.
+
 ## Running the family
 
 ```sh

@@ -552,3 +552,350 @@ compute-sanitizer tools clean on both GEMM suites. Racecheck was shown to go red
 first, by deleting the barrier the stream-K persistent loop puts between one
 tile's reads and the next tile's stores, before it was shown to go green with the
 barrier back.
+
+## Round 12: GEMM current state at the locked clock, and the conflict counter A6 owes
+
+Date: 2026-09-04. Artifacts: `experiments/results/ncu/round12/` (`mma_opt_4096.txt`,
+`mma_opt_8192.txt`, `round_meta.txt`).
+
+Why the round exists: defect A6 in `docs/CORRECTIONS.md` records that the 219
+million to 33.7 million bank conflict result, the causal centre of the whole GEMM
+story, appears in no committed text page, and that rounds 5 and 8 have no
+artifacts at all. Round 9's numbers also predate the round 10 mainloop rework,
+which replaced the A swizzle outright. So this round profiles the kernel that is
+in the tree now, at the clock the committed sweep ran at.
+
+Method note, and it changes every page from here on. The ncu default
+`--clock-control base` takes the clocks away from the external lock: it ran the SM
+at 2.60 GHz while `nvidia-smi` held 2497 MHz. `benchmarks/run_ncu_round.sh` now
+passes `--clock-control none`, so the profiled kernel runs at the clock every
+committed sweep row was measured at, and ncu prints its unmodified clocks warning
+on each page. The pages report 2.50 GHz at 4096 and 2.39 GHz at 8192; the second
+is a droop under a 20 ms kernel, not a different lock. ncu serializes kernels, so
+no duration on any page in rounds 12 to 17 is quoted as performance.
+
+Bank conflicts on `gemm_mma_opt_kernel`:
+
+| where | shared load bank conflicts | shared load wavefronts | conflicts per wavefront |
+|---|---|---|---|
+| round 7 at 4096 (v1, log only, no artifact) | 219,000,000 | 269,000,000 | 0.81 |
+| round 9 at 4096 (v1, log only, no artifact) | 33,700,000 | 84,000,000 | 0.40 |
+| round 12 at 4096 (committed page) | 106,296 | 50,437,944 | 0.0021 |
+| round 12 at 8192 (committed page) | 465,929 | 403,119,113 | 0.0012 |
+
+The round 10 map, two logical A rows packed into one 128 byte line with the eight
+chunks of that line permuted by the line index, takes the conflict count at 4096
+from round 9's 33.7 million to 106,296, a factor of 317, and it takes the shared
+load wavefront count from 84 million to 50.4 million at the same time. The near
+zero this round was expected to find is what the page shows: 0.21 percent of
+shared load wavefronts conflict at 4096 and 0.12 percent at 8192.
+
+Limiter at 4096: the tensor pipe. Compute (SM) Throughput 90.38 percent against
+Memory Throughput 26.19 percent, DRAM Throughput 8.57 percent, L1/TEX Cache
+Throughput 23.02 percent, and Nsight names Tensor the highest utilized pipeline at
+90.4 percent. Measured `dram__bytes.sum` is 142.26 MB against 134.2 MB of
+compulsory A, B and C traffic, so L2 absorbs essentially every tile re-read (L2
+hit rate 95.71 percent). What is left is latency on the math pipe: 29.81 warp
+cycles per issued instruction, 55.4 percent of that the math pipe throttle stall,
+at 32.66 percent achieved occupancy that 122 registers per thread and 49.15 KB of
+dynamic shared memory per block both pin at two blocks per SM.
+
+Limiter at 8192: DRAM, and the cause is L2 residency rather than anything in the
+mainloop. Compute (SM) Throughput 92.46 percent, but Memory Throughput is 70.91
+percent and the L2 hit rate falls from 95.71 percent at 4096 to 48.46 percent.
+Measured traffic is 9.21 GB against 536.9 MB compulsory, 17.2 times the minimum.
+The stall picture is unchanged (30.34 warp cycles per issued instruction, 55.5
+percent math pipe throttle, 33.15 percent achieved occupancy), so nothing about
+the mainloop degraded; the tile stream stopped fitting in L2. That is item (c) of
+Section 9.4 of the build spec, the L2 rasterization swizzle with a persistence
+window, and it has not been implemented. It is the next GEMM round.
+
+## Round 13: what cuBLAS actually runs on this part
+
+Date: 2026-09-04. Artifacts: `experiments/results/ncu/round13/`
+(`cublas_fp16_1024.txt`, `cublas_fp16_4096.txt`, `cublas_fp16_8192.txt`,
+`round_meta.txt`). This is the profile-cuBLAS round Section 9.4 asks for, run
+through `ncu_driver` so the shapes, the buffers and the launch count match the
+hand kernel pages exactly.
+
+The spec predicted Ampere era `cutlass_80_tensorop_h16816gemm` kernels. That is
+not what is there. Every shape lands on an `nvjet` kernel compiled for this
+architecture:
+
+| m = n = k | selected kernel | tile | stages | warp tile | registers | threads | dynamic shared | Compute SOL |
+|---|---|---|---|---|---|---|---|---|
+| 1024 | `nvjet_sm120_hss_mma_128x176x64_2_32x88x64_tmaAB_alignCD4_bz_NNNN` | 128x176x64 | 2 | 32x88x64 | 255 | 256 | 78.85 KB | 86.53 |
+| 4096 | `nvjet_sm120_hss_mma_128x80x64_3_32x40x64_tmaAB_alignCD4_bz_NNNN` | 128x80x64 | 3 | 32x40x64 | 255 | 256 | 80.90 KB | 94.69 |
+| 8192 | `nvjet_sm120_hss_mma_256x128x64_2_64x64x64_tmaAB_alignCD4_bz_NNNN` | 256x128x64 | 2 | 64x64x64 | 255 | 256 | 99.33 KB | 97.91 |
+
+Four things in those names and numbers are the gap, and none of them was visible
+before this page existed.
+
+1. `tmaAB`. cuBLAS stages both operands through TMA. `mma_opt` uses `cp.async`.
+   Section 9.4 puts TMA mainloops out of scope for this release on the grounds
+   that they are high effort for a mid tier hypothesis; the vendor kernel that
+   beats it uses TMA on both operands at every shape measured.
+2. Non power of two N tiles: 176 at 1024 and 80 at 4096. The tile family in this
+   tree instantiates six power of two shapes. A 128 by 80 tile quantizes against
+   4096 differently from anything the family can express.
+3. 255 registers per thread against the 122 of `mma_opt`, at 16.67 percent
+   theoretical occupancy against 33.33 percent. cuBLAS spends the whole register
+   file on one block per SM and does not try to hide latency with warps at all.
+4. Up to 99.33 KB of dynamic shared memory per block, which is the full
+   `sharedMemPerBlockOptin` budget on this part. `mma_opt` takes 49.15 KB.
+
+Limiter on the vendor side, for the record: the same one. Compute (SM) Throughput
+86.53, 94.69 and 97.91 percent at 1024, 4096 and 8192, against Memory Throughput
+24.07, 36.03 and 23.66 percent. cuBLAS at 8192 measures `dram__bytes.sum` of
+2.87 GB where `mma_opt` measures 9.21 GB for the same arithmetic, and its L2 hit
+rate is 78.49 percent against the 48.46 percent of `mma_opt`. The 8192 gap is a
+scheduling and residency gap, and round 12 said the same thing from the other
+side.
+
+Bank conflicts on the vendor kernels, since the counter is on every page now:
+33,792 at 1024, 527,360 at 4096 and 2,097,152 at 8192. `mma_opt` measures 106,296
+at 4096 and 465,929 at 8192, so the hand kernel has the cleaner shared path of the
+two by that counter. It is not where the remaining 5 percent lives.
+
+`docs/cutlass.md` carries this evidence in its gap section; the prediction it was
+written against is corrected there rather than deleted.
+
+## Round 14: Gate D compute bound check, clause by clause
+
+Date: 2026-09-04. Artifacts: no new capture. This round reads the round 12 pages
+and the committed sweep rows in `experiments/results/summary.csv`, all of which
+carry `clock_locked=true` and `median_sm_clock_mhz=2497`.
+
+The Gate D compute bound definition, from Section 9.6 of the build spec: on the
+committed ncu page for the top kernel at 4096 and 8192, Compute (SM) Throughput at
+least 80 percent and at least 2 times Memory Throughput, and achieved GFLOP/s at
+least 75 percent of `48 * f_locked * 512`. With the lock at 2.497 GHz that roof is
+48 x 2.497 x 512 = 61,366 GFLOP/s and the bar is 46,025 GFLOP/s.
+
+| clause | at 4096 | verdict | at 8192 | verdict |
+|---|---|---|---|---|
+| Compute (SM) Throughput at least 80 percent | 90.38 | pass | 92.46 | pass |
+| Compute at least 2x Memory Throughput | 90.38 against 26.19, ratio 3.45 | pass | 92.46 against 70.91, ratio 1.30 | fail |
+| Achieved GFLOP/s at least 75 percent of 61,366 | 54,602, which is 88.98 percent | pass | 56,375, which is 91.87 percent | pass |
+
+Five of six clauses pass. The one that fails is the 2x memory clause at 8192, and
+round 12 names the cause with numbers rather than leaving it as a shrug: the L2
+hit rate at 8192 is 48.46 percent against 95.71 percent at 4096, so measured DRAM
+traffic is 9.21 GB against 536.9 MB compulsory and Memory Throughput rises to
+70.91 percent. Compute is still the higher of the two and still above 80 percent;
+what the kernel does not have at 8192 is the 2 times headroom the gate asks for.
+
+I am recording the miss rather than restating the gate. The fix is the change
+Section 9.4 lists as item (c) and this release did not ship: an L2 rasterization
+swizzle over groups of tiles plus a `cudaAccessPolicyWindow` persistence window,
+aimed at exactly the hit rate that fell. Until that round runs, Gate D is one
+clause short at 8192, and the README and the report say so.
+
+One further note on the same clause. The 2x rule is a proxy for compute bound and
+it is a weak one at large shapes: a kernel can be tensor pipe limited, as this one
+is at 90 percent Compute SOL with Tensor named the top pipeline, and still show
+high Memory Throughput because its footprint left L2. I am not amending the gate
+to say that. The clause is failed as written, and the argument for a better clause
+belongs to whoever proposes one in writing.
+
+## Round 15: SpMV, where merge wins and what it pays for it
+
+Date: 2026-09-04. Artifacts: `experiments/results/ncu/round15/`
+(`spmv_merge_parabolic_fem.txt`, `spmv_vector_parabolic_fem.txt`,
+`spmv_merge_webbase-1M.txt`, `spmv_vector_webbase-1M.txt`, `round_meta.txt`).
+`parabolic_fem` is the regular matrix of the pair (m = n = 525,825, nnz =
+3,674,625, `power_law=false`); `webbase-1M` is power law (m = n = 1,000,005,
+nnz = 3,105,536).
+
+The four numbers Gate S wants, read off the committed pages. Warp execution
+efficiency is `smsp__thread_inst_executed_per_inst_executed.ratio` over 32; the
+tail ratio is `sm__cycles_active.max` over `sm__cycles_active.avg`.
+
+| kernel | matrix | warp exec efficiency | tail ratio | sectors per global load request | dram__bytes.sum |
+|---|---|---|---|---|---|
+| `spmv_merge_kernel` | parabolic_fem | 30.34 of 32, 94.8 percent | 245,183 / 236,944 = 1.035 | 11.07 | 46.20 MB |
+| `spmv_merge_fixup_kernel` | parabolic_fem | 30.36 of 32, 94.9 percent | 28,486 / 27,282 = 1.044 | 4.00 | 8.09 MB |
+| `spmv_csr_vector_kernel<8>` | parabolic_fem | 25.75 of 32, 80.5 percent | 205,513 / 204,296 = 1.006 | 4.40 | 33.65 MB |
+| `spmv_merge_kernel` | webbase-1M | 29.71 of 32, 92.8 percent | 196,039 / 192,352 = 1.019 | 11.05 | 34.23 MB |
+| `spmv_merge_fixup_kernel` | webbase-1M | 28.81 of 32, 90.0 percent | 68,178 / 65,107 = 1.047 | 4.00 | 11.16 MB |
+| `spmv_csr_vector_kernel<4>` | webbase-1M | 19.98 of 32, 62.4 percent | 212,490 / 206,873 = 1.027 | 2.70 | 32.87 MB |
+
+Limiter, both matrices and both kernels: DRAM. Memory Throughput is 65.96 and
+64.85 percent on parabolic_fem and 67.38 and 56.79 percent on webbase-1M, against
+Compute (SM) Throughput of 19.90, 28.42, 25.52 and 27.57 percent. Achieved
+occupancy is 84 to 94 percent everywhere, so this is not an occupancy story.
+
+The finding worth the round: on the power law matrix the vector kernel throws away
+37.6 percent of its lanes (19.98 of 32) while merge throws away 7.2 percent, and
+merge pays for that with a gather costing 11.05 sectors per global load request
+against the 2.70 of the vector kernel. Merge trades coalescing for lane occupancy,
+and on webbase-1M that trade wins by a wide margin in the committed sweep: merge
+median 0.116256 ms against 0.595328 ms for `spmv_csr_warp`, a factor of 5.12. The
+tail ratio, which is the metric merge exists to move, is 1.019 to 1.047 on every
+kernel here, so load balance is not the differentiator at these two matrices. Lane
+utilization is.
+
+Model bytes. The plan's band is printed in every sweep row. Measured against it:
+
+| variant | matrix | model band, bytes | measured total | position |
+|---|---|---|---|---|
+| merge | parabolic_fem | 35,706,904 to 48,302,104 | 54.29 MB | 12.4 percent above the high end |
+| vector | parabolic_fem | 35,706,904 to 48,302,104 | 33.65 MB | 5.8 percent below the low end |
+| merge | webbase-1M | 36,844,352 to 45,266,476 | 45.39 MB | 0.3 percent above the high end |
+| vector | webbase-1M | 36,844,352 to 45,266,476 | 32.87 MB | 10.8 percent below the low end |
+
+Both vector rows land under the low end of the band, which is the end that assumes
+perfect x residency, so on a first reading the kernel moved less than the
+compulsory minimum. It did not. The gap is the y write: 4m is 2,103,300 bytes on
+parabolic_fem and 4,000,020 bytes on webbase-1M, and the measured shortfalls are
+2.06 MB and 3.97 MB. The y plane is still dirty in L2 when the kernel retires, so
+those writes have not reached DRAM inside the window the counter covers. The model
+counts them because they will be written eventually. That is a real difference
+between the model and `dram__bytes.sum` and it belongs in `docs/sparse.md` rather
+than being smoothed over: at these sizes the band brackets the measurement to
+within one y plane.
+
+Merge sits above the high end on both matrices because the model has no term for
+the carry arrays or for the second pass: the fixup kernel alone moves 8.09 MB and
+11.16 MB. That is a real cost of the merge path and the model does not describe it.
+
+Gate S clauses this round can settle:
+
+| clause | evidence | verdict |
+|---|---|---|
+| every percent of roof row carries a measured `dram__bytes.sum` | the six rows above; `summary.csv` still reads `pending ncu round` in `dram_bytes_sum`, so the sweep has to be re-summarized to carry them | open: the numbers exist, the column does not hold them yet |
+| `spmv_merge` at least 1.5 times `spmv_csr_warp` on both power law matrices, intervals disjoint | webbase-1M 0.595328 / 0.116256 = 5.12x, intervals [0.594928, 0.595456] and [0.116256, 0.118240] | pass on this matrix |
+| the same clause on soc-LiveJournal1 | 2.984416 / 2.320832 = 1.286x, intervals [2.984256, 2.984512] and [2.320800, 2.320896] | fail |
+
+The soc-LiveJournal1 miss is the risk the board recorded before the locked run, and
+the locked run confirms it at 1.286x rather than the 1.33x measured unlocked. The
+cause is not load balance: the merge tail ratio is already near one on the matrices
+profiled here and its lane utilization is already near 30 of 32. It is the gather,
+at 11 sectors per request, over a matrix whose column indices have no locality left
+to exploit. Block level tile staging of x is the change to try, and it is a kernel
+change rather than a gate amendment.
+
+## Round 16: FFT model bytes, and why the ladder loses to cuFFT
+
+Date: 2026-09-04. Artifacts: `experiments/results/ncu/round16/`
+(`fft_radix8_20.txt`, `fft_cufft_20.txt`, `fft_radix8_24.txt`, `fft_cufft_24.txt`,
+`fft_shared_12.txt`, `round_meta.txt`). The best hand rung at both sizes is
+`radix8` by the committed medians (0.107552 ms at 2^20 and 3.721280 ms at 2^24,
+flushed), so that is the rung profiled. Every launch of one settled call is on the
+page, so the total traffic of a rung is the sum of its stages rather than one stage
+generalized.
+
+The Gate X 15 percent clause, measured against the model each row declares:
+
+| variant | length | launches profiled | declared model bytes | measured dram__bytes.sum | deviation | clause |
+|---|---|---|---|---|---|---|
+| radix8 | 2^20 | 7, one radix 4 stage and six radix 8 | 117,440,512 | 64.08 MB | 45.4 percent low | fail |
+| radix8 | 2^24 | 8 radix 8 stages | 2,147,483,648 | 1977.03 MB | 3.5 percent low | pass |
+| cuFFT | 2^20 | 2 | not declared | 16.87 MB | compulsory is 16.78 MB | reference |
+| cuFFT | 2^24 | 3 | not declared | 744.37 MB | compulsory is 268.44 MB | reference |
+
+The 2^20 failure has one cause and it is L2. The ping pong buffers of the rung are
+8 MB each at 2^20, so the whole working set sits inside the 48 MB L2 and six of the
+seven stage boundaries never reach DRAM: 64.08 MB measured against a model that
+assumes all seven do. At 2^24 the buffers are 128 MB each, the assumption of the
+model holds, and the deviation drops to 3.5 percent. This is the clause doing its
+job. Any effective GB/s quoted for this rung at 2^20 is inflated by the same
+factor: the committed row reads 1091.942 GB/s, above the measured 579 GB/s DRAM
+roof, and the reason it is above the roof is that 45 percent of the bytes in its
+numerator were served by L2.
+
+Limiter, radix8 at 2^24: DRAM, and the loss to cuFFT is a traffic loss and nothing
+else. Each of the eight stages runs at 83.47 percent DRAM Throughput and 552.35
+GB/s against 10.06 percent Compute (SM) Throughput, so the rung is at 95 percent of
+the measured 579 GB/s roof on every pass it makes. It makes 8 passes where cuFFT
+makes 3: 1977.03 MB against 744.37 MB, a factor of 2.66, and the committed medians
+are 3.721280 ms against 1.426944 ms, a factor of 2.61. The two ratios agree to
+within 2 percent, and that is the whole diagnosis. Radix 8 is the wrong lever here.
+The number of global passes is the lever, which is what the four step form and a
+larger resident transform address.
+
+Shared bank conflicts on the resident rung, which Section 12.2 named as the
+expected limiter for this family: `shared_kernel` at 2^12 with batch 96 measures 0
+conflicts against 319,488 shared load wavefronts. The predicted stride 2^s conflict
+in the butterfly exchange is not there. The real constraint on that rung is
+occupancy: 65.54 KB of dynamic shared memory per block gives one block per SM and
+16.65 percent achieved occupancy, at 34.04 percent Memory Throughput and 26.41
+percent Compute SOL, so it is latency bound with nothing to hide the latency
+behind. For contrast, `regular_fft_factor` from cuFFT at 2^24 measures 27,073
+conflicts against 1,075,649 shared load wavefronts, 2.5 percent, at 64 registers
+and 48.64 percent achieved occupancy.
+
+Gate X status after this round:
+
+| clause | verdict |
+|---|---|
+| measured `dram__bytes.sum` within 15 percent of the declared model | fail at 2^20, 45.4 percent low on an L2 resident working set; pass at 2^24, 3.5 percent low |
+| best hand rung at 55 percent of the measured 579 GB/s roof | passes on the committed rows, but the effective GB/s of the 2^20 row is not usable evidence until the model accounts for L2 residency |
+| best hand rung at 70 percent of cuFFT at 2^20 to 2^24 | fail: 60.5 percent at 2^20 and 38.3 percent at 2^24, cause measured above |
+| shared bank conflicts in the butterfly exchange | measured: 0 on the resident rung, so the expected limiter is absent |
+| 2D transpose share and 70 percent of roof | not in this round, still pending |
+| crossover chart from committed rows | not in this round, still pending |
+| callback probe and toolkit version recorded | already green in `docs/fft.md` |
+
+## Round 17: scan and reduction traffic, and the 5 percent CUB clause
+
+Date: 2026-09-04. Artifacts: `experiments/results/ncu/round17/`
+(`reduce_vec4_26.txt`, `reduce_single_pass_26.txt`, `scan_lookback_26.txt`,
+`scan_cub_26.txt`, `reduce_cub_26.txt`, `scan_blelloch_26.txt`, `round_meta.txt`),
+all at N of 2^26.
+
+Traffic against the declared model:
+
+| variant | launches | declared model bytes | measured dram__bytes.sum | deviation |
+|---|---|---|---|---|
+| reduce vec4 | 2 | 268,437,760 | 270.67 MB | 0.8 percent high |
+| reduce single_pass | 1 | 268,437,760 | 273.95 MB | 2.1 percent high |
+| reduce CUB | 2 | 268,435,456 | 276.99 MB | 3.2 percent high |
+| scan lookback | 1 | 538,443,776 | 518.20 MB | 3.8 percent low |
+| scan CUB | 2 | 536,870,912 | 516.21 MB | 3.8 percent low |
+| scan blelloch | 7 | 1,073,741,824 | 1067.46 MB | 0.6 percent low |
+
+Every row is inside 4 percent of its model, so unlike the FFT family this one has
+no traffic accounting problem at the size the gate is stated at. The two scan rows
+sit under their model by the same 3.8 percent, for the hand kernel and for CUB
+alike, which is the output plane still partly dirty in L2 at kernel exit, the same
+effect round 15 found on the SpMV y plane.
+
+Gate R bandwidth clauses, from the committed sweep rows at locked clocks with L2
+flushed, computed with the byte counts the gate names (`N*4` for reduction,
+`2*N*4` for scan):
+
+| clause | 2^26 | 2^27 | 2^28 | verdict |
+|---|---|---|---|---|
+| top reduction rung at least 521 GB/s | 596.46, vec4 | 608.56, single_pass | 614.80, single_pass | pass |
+| top scan rung at least 492 GB/s | 543.00, lookback | 546.09, lookback | 550.07, lookback | pass |
+| top reduction rung within 5 percent of CUB | 101.37 percent | 100.47 percent | 100.19 percent | pass |
+| top scan rung within 5 percent of CUB | 94.15 percent | 94.52 percent | 95.49 percent | fail at 2^26 and 2^27, pass at 2^28 |
+
+The scan miss is 0.85 points at 2^26 and 0.48 at 2^27, and this round says what it
+is made of. It is not traffic: lookback moves 518.20 MB against 516.21 MB for CUB,
+0.4 percent more. It is tile size. `lookback_kernel` runs 256 threads at 8 items
+each, so 2,048 elements per tile over 32,768 blocks, at 34 registers and 98.42
+percent achieved occupancy. `DeviceScanKernel` from CUB runs 416 threads over 8,491
+blocks, which is 7,904 elements per tile, at 48 registers and 78.78 percent
+achieved occupancy. CUB carries 3.9 times more data per tile, so it pays the
+decoupled look back handshake 3.9 times less often, and the counters show it:
+5,368,287 shared load wavefronts against 5,788,563, and 290,681 bank conflicts
+against 480,147. DRAM Throughput lands at 86.98 percent for CUB and 82.04 percent
+for lookback. Raising items per thread on the look back rung is the change to try,
+and it is a tuning change rather than a redesign.
+
+The s1 padding page. The bank conflict question Section 12.3 asks of the Blelloch
+rung has no pre padding page committed anywhere in this repository, so there is no
+before and after to show; what is committed now is the padded state.
+`tile_scan_kernel<..., BlellochBlockScan, 0>` at 2^26 measures 138,405 conflicts
+against 17,177,765 shared load wavefronts, 0.81 percent. The padding works. What
+the page also shows is the cost of the rung itself: 17.2 million shared load
+wavefronts against 5.8 million for the look back rung at the same N, and 1067.46 MB
+of DRAM traffic against 518.20 MB, which is why blelloch sits at 37.53 percent of
+CUB in the committed rows. The work efficient formulation is not paying for itself
+on this part, and that is a measured statement now rather than a suspicion.
+
+Two Gate R clauses are outside this round and unchanged: the sanitizer and
+determinism clauses are green and recorded in `docs/scan.md`, and the tolerance
+clauses are green in the test suite.

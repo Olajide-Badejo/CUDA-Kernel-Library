@@ -22,8 +22,29 @@ add_executable(fusion_study fusion_study.cpp)
 target_link_libraries(fusion_study PRIVATE ckl_gemm ckl_headers ckl_bench_support)
 ckl_set_warnings(fusion_study)
 
+# ncu_driver covers all four measured families, because a diagnostic round that
+# names a limiter has to profile one kernel and not a benchmark binary running
+# nine variants and a vendor baseline in one process. It links no CUPTI: it times
+# nothing, so it has no timed region for an allocation gate to watch.
 add_executable(ncu_driver ncu_driver.cpp)
 target_link_libraries(ncu_driver PRIVATE ckl_gemm ckl_headers ckl_bench_support)
+# A partial tree still gets a GEMM driver. Which families it was built with is a
+# compile definition rather than a silent omission, so asking a driver built
+# without src/fft for an FFT round gets told so instead of getting nothing.
+# The dispatch entry points ckl::spmv, ckl::fft, ckl::scan and ckl::reduce live in
+# ckl_api, so a family needs both its own archive and that one.
+if(TARGET ckl_sparse AND TARGET ckl_api)
+    target_link_libraries(ncu_driver PRIVATE ckl_api ckl_sparse)
+    target_compile_definitions(ncu_driver PRIVATE CKL_NCU_SPARSE=1)
+endif()
+if(TARGET ckl_fft AND TARGET ckl_api)
+    target_link_libraries(ncu_driver PRIVATE ckl_api ckl_fft)
+    target_compile_definitions(ncu_driver PRIVATE CKL_NCU_FFT=1)
+endif()
+if(TARGET ckl_scan AND TARGET ckl_api)
+    target_link_libraries(ncu_driver PRIVATE ckl_api ckl_scan)
+    target_compile_definitions(ncu_driver PRIVATE CKL_NCU_SCAN=1)
+endif()
 ckl_set_warnings(ncu_driver)
 
 if(TARGET ckl_gemv)

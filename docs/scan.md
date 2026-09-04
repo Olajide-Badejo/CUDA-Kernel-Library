@@ -479,13 +479,42 @@ inside the timed lambda so the counter can be seen failing; it reports 640
 allocations and exit code 5, and the same run without the flag reports zero and
 exit code 0.
 
-**The bandwidth and parity targets are pending.** Gate R asks for the top
-reduction rung at 90 percent of the measured roof and the top scan rung at 85
-percent, both within 5 percent of CUB, at `2^26`, `2^27` and `2^28`, at locked
-clocks, over five independent process repeats with L2 flushed between reps. That
-is an owner sweep and it has not been run. Nothing in this document is a locked
-clock measurement, and no percent of roof for this family appears in the report
-until `experiments/results/sweep.jsonl` carries the rows.
+**The bandwidth targets are met and the CUB parity clause is not.** Gate R asks
+for the top reduction rung at 90 percent of the measured roof and the top scan rung
+at 85 percent, both within 5 percent of CUB, at `2^26`, `2^27` and `2^28`, at
+locked clocks, over five independent process repeats with L2 flushed between reps.
+The sweep ran at a locked 2497 MHz and the rows are in
+`experiments/results/summary.csv`. Computed with the byte counts the gate names,
+`N*4` for reduction and `2*N*4` for scan:
+
+| clause | 2^26 | 2^27 | 2^28 | verdict |
+|---|---|---|---|---|
+| top reduction rung at least 521 GB/s | 596.46, `vec4` | 608.56, `single_pass` | 614.80, `single_pass` | green |
+| top scan rung at least 492 GB/s | 543.00, `lookback` | 546.09, `lookback` | 550.07, `lookback` | green |
+| top reduction rung within 5 percent of CUB | 101.37 percent | 100.47 percent | 100.19 percent | green |
+| top scan rung within 5 percent of CUB | 94.15 percent | 94.52 percent | 95.49 percent | **red at 2^26 and 2^27** |
+
+The scan miss is 0.85 points at 2^26 and 0.48 at 2^27, and diagnostic round 17
+names its cause from the committed pages under
+`experiments/results/ncu/round17/`. It is not traffic: `lookback` moves 518.20 MB
+against 516.21 MB for CUB at 2^26, 0.4 percent more, and both sit within 4 percent
+of their declared models. It is tile size. `lookback_kernel` carries 2,048 elements
+per tile over 32,768 blocks at 34 registers; `DeviceScanKernel` carries 7,904 over
+8,491 blocks at 48 registers, so CUB pays the decoupled look back handshake 3.9
+times less often. The counters follow: 5,368,287 shared load wavefronts against
+5,788,563, 290,681 bank conflicts against 480,147, and DRAM Throughput of 86.98
+percent against 82.04 percent. Raising items per thread on the look back rung is
+the change to try, and it is tuning rather than a redesign. The target is not being
+lowered, and the report states the miss with this cause beside it.
+
+The same round measured the `s1` padding question. There is no pre padding page in
+this repository, so there is no before and after to show; the committed padded
+state is
+`tile_scan_kernel<..., BlellochBlockScan, 0>` at 2^26 with 138,405 conflicts
+against 17,177,765 shared load wavefronts, 0.81 percent. The page also shows why
+the rung sits at 37.53 percent of CUB: 17.2 million shared load wavefronts against
+the 5.8 million of the look back rung for the same N, and 1067.46 MB of DRAM
+traffic against 518.20 MB.
 
 ## Benchmarks
 

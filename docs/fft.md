@@ -380,12 +380,36 @@ advance so a round is not spent finding them.
 | Check | State |
 |---|---|
 | Round trip inside the derived bound at every size 2^10 to 2^24, both the shared and the four step paths | green, printed by `ckl_test_fft` |
-| Best hand rung at 55 percent of the DRAM roof and 70 percent of cuFFT at 2^20 to 2^24 | pending the owner sweep at locked clocks |
+| Best hand rung at 55 percent of the DRAM roof and 70 percent of cuFFT at 2^20 to 2^24 | roof leg green on the committed rows; **cuFFT leg red**, `radix8` reaches 60.5 percent of cuFFT at 2^20 and 38.3 percent at 2^24 (round 16) |
 | At 2^10 to 2^13, batched to fill 48 SMs, 85 percent of cuFFT | pending the owner sweep at locked clocks |
-| Measured `dram__bytes.sum` within 15 percent of the declared model | pending the ncu round; the declared model is printed in every row now |
+| Measured `dram__bytes.sum` within 15 percent of the declared model | **red at 2^20, green at 2^24** (round 16): 64.08 MB measured against a declared 117,440,512 is 45.4 percent low, and 1977.03 MB against 2,147,483,648 is 3.5 percent low |
 | The 2D driver reports the transpose share per size, tiled transpose at 70 percent of roof | share is reported by `bench_fft`; the roof percentage is pending the owner sweep |
 | The crossover chart generated from committed rows with the crossing read from the data | hook wired in `gen_report_assets.py`; pending the committed sweep rows |
 | The callback probe result and the toolkit version recorded here | green, above |
+
+**Two things round 16 settled, both worth reading before the table above is used.**
+
+The model bytes failure at 2^20 is not a measurement error and it is not a kernel
+defect. The ping pong buffers are 8 MB each at that length, so the whole working
+set sits inside the 48 MB L2 and six of the seven stage boundaries never reach
+DRAM. The declared model assumes every stage writes through to memory, which is
+true from 2^22 upward and false below it. Until the model carries an L2 residency
+term, the effective GB/s column for the small and mid lengths is not evidence: the
+committed `radix8` row at 2^20 reads 1091.942 GB/s, which is above the measured
+579 GB/s DRAM roof, and the excess is bytes that L2 served.
+
+The loss to cuFFT is a traffic loss, measured on both sides at 2^24: the `radix8`
+ladder moves 1977.03 MB where cuFFT moves 744.37 MB, a factor of 2.66, and the
+committed medians differ by a factor of 2.61. Each `radix8_stage` runs at 83.47
+percent DRAM Throughput, so the rung is already at 95 percent of the roof on every
+pass it makes. It makes 8 passes where cuFFT makes 3. Nothing inside a stage is
+worth tuning until the pass count comes down.
+
+The bank conflicts Section 12.2 predicted in the butterfly exchange are not there.
+`shared_kernel` at 2^12 with batch 96 measures 0 conflicts against 319,488 shared
+load wavefronts (`experiments/results/ncu/round16/fft_shared_12.txt`). That rung is
+limited by occupancy instead: 65.54 KB of dynamic shared memory per block is one
+block per SM and 16.65 percent achieved occupancy.
 
 ## Running it
 

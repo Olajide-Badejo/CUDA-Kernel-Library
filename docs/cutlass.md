@@ -154,9 +154,56 @@ produce the rows: `cutlass` is a first class FP16 variant in
 
 ## Gap analysis
 
-The structure below is the analysis this rung exists to support. Every number in
-it is pending: the sweep at locked clocks and the profile-cuBLAS round from
-Section 9.4 of the build spec are both owner actions, and nothing here will be
+### What cuBLAS actually dispatches on this part
+
+Measured 2026-09-04 by diagnostic round 13, pages under
+`experiments/results/ncu/round13/`, at the locked 2497 MHz clock. This section was
+written against the expectation stated in Section 1 of the build spec, that cuBLAS
+on consumer Blackwell falls back to Ampere era CUTLASS kernels and that
+`cutlass_80_tensorop_h16816gemm` would be the name on the page. That expectation is
+wrong and the round says so.
+
+| m = n = k | selected kernel | tile | stages | warp tile | registers | dynamic shared | Compute SOL |
+|---|---|---|---|---|---|---|---|
+| 1024 | `nvjet_sm120_hss_mma_128x176x64_2_32x88x64_tmaAB_alignCD4_bz_NNNN` | 128x176x64 | 2 | 32x88x64 | 255 | 78.85 KB | 86.53 |
+| 4096 | `nvjet_sm120_hss_mma_128x80x64_3_32x40x64_tmaAB_alignCD4_bz_NNNN` | 128x80x64 | 3 | 32x40x64 | 255 | 80.90 KB | 94.69 |
+| 8192 | `nvjet_sm120_hss_mma_256x128x64_2_64x64x64_tmaAB_alignCD4_bz_NNNN` | 256x128x64 | 2 | 64x64x64 | 255 | 99.33 KB | 97.91 |
+
+Every one is an `nvjet` kernel named for this architecture, not a CUTLASS one, and
+every one carries `tmaAB` in its name. So the FP16 path on this part is not an
+untuned Ampere fallback: it is a tuned sm_120 code path that uses TMA on both
+operands, non power of two N tiles, the whole register file at 255 registers per
+thread, and up to the full 99 KB shared memory opt-in budget, at 16.67 percent
+theoretical occupancy.
+
+That changes what the headline of this document can claim. The interesting claim
+this rung was written to enable, that upstream leaves FP16 untuned on consumer
+Blackwell so a hand kernel has a clear shot at the top of the ladder, does not
+survive the page. What is true instead is narrower and more useful: CUTLASS 4.7.1
+has no FP16 CollectiveBuilder path for SM120, so the CUTLASS reference line here is
+an Ampere instantiation, while cuBLAS is not going through CUTLASS at all. The
+ladder therefore has three genuinely different mainloops on it, and the gap between
+the hand kernel and cuBLAS is a TMA and residency gap rather than an
+implementation quality gap.
+
+Two of the numbered hypotheses below are settled by the same round. Registers and
+residency (item 5): cuBLAS runs 255 registers over 256 threads at 16.67 percent
+occupancy, which is one block per SM, so it does not hide latency with warps and
+`mma_opt` at 122 over 256 with two blocks per SM is not simply under-provisioned by
+comparison. Shared memory conflicts are not the gap either: round 13 measures
+527,360 conflicts on the vendor kernel at 4096 and 2,097,152 at 8192, against
+106,296 and 465,929 for `mma_opt` on the round 12 pages, so the hand kernel has the
+cleaner shared path of the two.
+
+The residency half of the gap is measured on both sides. At 8192, cuBLAS moves
+2.87 GB of DRAM traffic at a 78.49 percent L2 hit rate; `mma_opt` moves 9.21 GB at
+48.46 percent. That is the L2 rasterization item, Section 9.4 item (c), which this
+release did not ship.
+
+### The technique by technique table
+
+The structure below is the analysis this rung exists to support. The throughput
+rows are pending: the sweep at locked clocks fills them, and nothing here will be
 filled in from an estimate.
 
 | Shape (m = n = k) | `mma_opt` GFLOP/s | `cutlass` GFLOP/s | cuBLAS GFLOP/s | `mma_opt` as percent of cutlass |
