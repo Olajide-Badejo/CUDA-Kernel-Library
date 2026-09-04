@@ -37,6 +37,8 @@ jobs:
           cmake -S . -B build-gpu -G Ninja
           -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_CUDA_ARCHITECTURES=native
+          -DCMAKE_CXX_COMPILER=g++-14
+          -DCMAKE_CUDA_HOST_COMPILER=g++-14
           -DCKL_WERROR=ON
           && cmake --build build-gpu --parallel
 
