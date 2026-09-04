@@ -1,15 +1,15 @@
 \begin{tabular}{lllrr}
 \toprule
-rung & mechanism & traffic model & GFLOP/s at the largest swept length & percent of cuFFT \\
+rung & mechanism & traffic model & GFLOP/s at the largest swept size & percent of cuFFT \\
 \midrule
-radix 2, one kernel per stage & a launch per butterfly stage & log2(n) passes & pending & pending \\
-shared resident & one block per transform, all stages in shared & 1 pass & pending & pending \\
-radix 4 shared resident & half the stages of radix 2 & 1 pass & pending & pending \\
-radix 8 shared resident & a third of the stages of radix 2 & 1 pass & pending & pending \\
-four step & transpose, batched, transpose, batched, transpose & 5 passes & pending & pending \\
-convolution, FFT separate & standalone pointwise multiply kernel & 24 bytes per point & pending & pending \\
-convolution, FFT fused & multiply folded into a store epilogue & 8 bytes per point & pending & pending \\
-convolution, direct shared & tiled time domain, filter chunked through shared & 2 N M FLOP & pending & pending \\
-convolution, direct constant & the same tiling, taps in constant memory & 2 N M FLOP & pending & pending \\
+radix 2, one kernel per stage & a launch per butterfly stage & log2(n) passes & 180.3 & 12.8 \\
+shared resident & one block per transform, all stages in shared & 1 pass & 584.7 & 34.3 \\
+radix 4 shared resident & half the stages of radix 2 & 1 pass & 359.8 & 25.5 \\
+radix 8 shared resident & a third of the stages of radix 2 & 1 pass & 541.0 & 38.4 \\
+four step & transpose, batched, transpose, batched, transpose & 5 passes & 473.4 & 33.5 \\
+convolution, FFT separate & standalone pointwise multiply kernel & 24 bytes per point & 501.4 & 47.0 \\
+convolution, FFT fused & multiply folded into a store epilogue & 8 bytes per point & 532.0 & 49.8 \\
+convolution, direct shared & tiled time domain, filter chunked through shared & 2 N M FLOP & 2436.4 & 3.3 \\
+convolution, direct constant & the same tiling, taps in constant memory & 2 N M FLOP & 3758.5 & 20.3 \\
 \bottomrule
 \end{tabular}

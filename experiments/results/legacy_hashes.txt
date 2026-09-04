@@ -1,27 +1,37 @@
 # Known dead commit hashes from the v1 data collection.
 #
-# Why this file exists: the v1 benchmark sweep and the nine Nsight Compute
+# Why this file exists: the v1 benchmark sweep and the first nine Nsight Compute
 # diagnostic rounds recorded the commit they ran on, exactly as the README
 # promises. Then I rewrote the repository history, and every one of those
 # hashes stopped resolving. That is defect A1 in docs/CORRECTIONS.md. The data
 # is real and the hashes were real when they were written; they just point at
 # objects that no longer exist, so nobody can check them any more.
 #
-# scripts/check_provenance.py fails on any recorded hash that git cannot
-# resolve. These seven are listed here so the gate reports the standing debt
-# instead of blocking the build on it. Nothing else belongs in this file: a new
-# unresolvable hash is a real failure, not a legacy one.
+# What changed on 2026-09-04. The campaign re-ran on resolvable history at
+# locked clocks, so A1 and A4 are closed. summary.csv is now 984 rows at commit
+# 1155de4, and rounds 12 to 17 carry hashes that resolve. Nothing this release
+# claims depends on a hash in this file.
+#
+# Why the file is still here rather than deleted. The v1 artifacts these hashes
+# stamp are still in the tree, deliberately, as historical evidence:
+#
+#   - the 60 superseded v1 rows in experiments/results/sweep.jsonl, kept so the
+#     before and after of the clock lock can be read off one file
+#   - the round 01 to 09 ncu meta pages, which are the record of how the
+#     optimization ladder was actually arrived at
+#
+# Deleting the allowlist would mean deleting those artifacts or failing the
+# provenance gate on them, and neither is honest. So the retention is scoped:
+# these seven hashes guard archived v1 material only, and any other
+# unresolvable hash is a real failure. A new hash never belongs in this file.
 #
 # Every hash below is dead. None of them can be checked out, diffed, or
-# verified. Any number traceable only to one of these hashes is provisional.
-#
-# This file is deleted when I re-run the full sweep and the ncu rounds on
-# current history. At that point check_provenance.py stands on its own and the
-# published figures carry live provenance again.
+# verified. Nothing in the README, the report, or the family docs rests on one.
 #
 # Verified against the tree on 2026-08-31: `git cat-file -t` fails on all seven.
 
-# experiments/results/summary.csv (60 rows) and sweep.jsonl (60 rows)
+# experiments/results/sweep.jsonl, the 60 archived v1 rows. summary.csv no
+# longer carries this hash on any row.
 42d47e0d90068bd48e3a4d17895beec6287579a6
 
 # experiments/results/ncu/round01/round_meta.txt

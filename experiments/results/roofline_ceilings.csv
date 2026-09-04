@@ -1,12 +1,12 @@
 quantity,value
 device_name,NVIDIA GeForce RTX 5070
 sm_count,48
-clock_mhz,2842
+clock_mhz,2497
 clock_source,nvml_median_graphics_clock
-bandwidth_gbps,581.130
-fp32_gflops,34922.496
-tensor_gflops,69844.992
-cublas_fp32_gflops,23679.346
-cublas_tensor_gflops,67889.729
-ridge_fp32,60.094
-ridge_tensor,120.188
+bandwidth_gbps,584.195
+fp32_gflops,30683.136
+tensor_gflops,61366.272
+cublas_fp32_gflops,21684.642
+cublas_tensor_gflops,59039.381
+ridge_fp32,52.522
+ridge_tensor,105.044

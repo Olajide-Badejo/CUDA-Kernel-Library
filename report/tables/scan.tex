@@ -1,12 +1,12 @@
 \begin{tabular}{lllrr}
 \toprule
-rung & mechanism & bytes moved & GFLOP/s at the largest swept length & percent of CUB \\
+rung & mechanism & bytes moved & effective GB/s at the largest swept size & percent of CUB \\
 \midrule
-s0 Hillis-Steele & block scan, work inefficient & N log N work at block scope & pending & pending \\
-s1 Blelloch & upsweep and downsweep, bank conflict padding & N work, twice the barriers & pending & pending \\
-s2 three kernel & scan then propagate & about 4 N bytes & pending & pending \\
-s3 reduce then scan & two passes over the input & about 3 N bytes & pending & pending \\
-s4 decoupled look-back & single pass, device scope handshake & about 2 N bytes & pending & pending \\
-deterministic scan & fixed grid, index order, explicit halving tree & about 3 N bytes & pending & pending \\
+s0 Hillis-Steele & block scan, work inefficient & N log N work at block scope & 509.9 & 44.3 \\
+s1 Blelloch & upsweep and downsweep, bank conflict padding & N work, twice the barriers & 436.7 & 37.9 \\
+s2 three kernel & scan then propagate & about 4 N bytes & 576.9 & 50.1 \\
+s3 reduce then scan & two passes over the input & about 3 N bytes & 595.2 & 68.9 \\
+s4 decoupled look-back & single pass, device scope handshake & about 2 N bytes & 551.7 & 95.5 \\
+deterministic scan & fixed grid, index order, explicit halving tree & about 3 N bytes & 595.2 & 68.9 \\
 \bottomrule
 \end{tabular}

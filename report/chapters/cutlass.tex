@@ -25,33 +25,52 @@ beta equal to zero rule, the empty output and empty contraction cases, and large
 K. The sanitizers are clean on it: memcheck, racecheck, initcheck and synccheck
 all run without an error on the tensor suite with the rung in it.
 
-\paragraph{What is not established.} Performance. The sweep already knows how to
-produce the rows, and the ladder figure has a slot for the variant, but the rows
-need locked clocks and that is owner work. Table \ref{tab:cutlassgap} is therefore
-all pending.
+\paragraph{What the sweep measured.} The rows exist now, at locked clocks, and
+they say the reference line wins everywhere it was run. \texttt{mma\_opt} lands at
+91.0 percent of CUTLASS at 1024 cubed, 92.5 at 2048, 93.1 at 4096 and 93.7 at 8192:
+a gap that is real, consistent, and narrowing with shape. CUTLASS itself passes
+cuBLAS at the two largest shapes, 101.9 percent at 4096 and 101.2 at 8192, which is
+worth stating because it means the remaining 6 to 7 points are not a vendor
+advantage that a hand written kernel cannot reach. They are engineering I have not
+done.
 
 \begin{table}[htbp]
 \centering
 \input{tables/cutlass_gap.tex}
-\caption{The gap against the CUTLASS reference line. Every cell is pending: the
-sweep at locked clocks and the profile-cuBLAS round are both owner actions, and
-nothing here will be filled in from an estimate.}
+\caption{The gap against the CUTLASS reference line, from the committed locked
+clock sweep. CUTLASS was not run at 128 to 768 cubed, and those cells read pending
+rather than being extrapolated from the shapes that were run.}
 \label{tab:cutlassgap}
 \end{table}
 
-\paragraph{Where the gap will be looked for.} Once those rows exist the difference
-gets attributed technique by technique. Five candidates, in the order I would test
-them, each a hypothesis and not a finding. CUTLASS runs 128 threads with 64 by 64
+\paragraph{Where the gap is, now that cuBLAS has been profiled.} Round 13 settled
+part of this by profiling the vendor directly, and it corrected the prediction this
+chapter was written against. The expectation was Ampere era
+\texttt{cutlass\_80\_tensorop\_h16816gemm} kernels. What cuBLAS actually dispatches
+on this part is an \texttt{nvjet} kernel compiled for this architecture, and four
+things in it are the gap. It stages \emph{both} operands through TMA where
+\texttt{mma\_opt} uses \texttt{cp.async}. It picks non power of two N tiles, 176 at
+1024 and 80 at 4096, which the six power of two shapes in this tree cannot express.
+It spends 255 registers per thread against 122, running at 16.67 percent
+theoretical occupancy against 33.33, so it does not try to hide latency with warps
+at all. And it takes up to 99.33 KB of dynamic shared memory per block, the full
+\texttt{sharedMemPerBlockOptin} budget, against 49.15 KB.
+
+One candidate is now eliminated rather than open: bank conflicts are not where the
+gap lives. The vendor kernels measure 33,792 conflicts at 1024, 527,360 at 4096 and
+2,097,152 at 8192, against 106,296 and 465,929 for \texttt{mma\_opt} at 4096 and
+8192. The hand kernel has the cleaner shared path of the two by that counter and is
+still slower, so the shared memory layout is not the thing to spend the next round
+on.
+
+The remaining candidates stay hypotheses. CUTLASS runs 128 threads with 64 by 64
 warp tiles while \texttt{mma\_opt} runs 256 threads with 64 by 32, so the wider
 warp tile amortizes each \texttt{ldmatrix} over more \texttt{mma.sync} at the cost
 of accumulator registers; the HMMA to LDSM ratio in the SASS captures is already
 on file to test that. CUTLASS stages its accumulator through shared memory for
 coalesced global stores while \texttt{mma\_opt} stores 64 bit pairs straight from
 the fragment layout. Both run three stages, but the barrier placement and the
-depth of the register prefetch differ. The reference line predicates every edge
-while \texttt{mma\_opt} takes an aligned fast path, which should favour
-\texttt{mma\_opt} on aligned shapes, and if it does not then predication is not
-what costs. And the reference line takes 236 registers over 128 threads against
-\texttt{mma\_opt}'s 122 over 256, with neither spilling, so which of the two the
-machine actually lets sit resident is the question Section \ref{sec:sass} answers
-for one of them and not yet for the other.
+depth of the register prefetch differ. And the reference line takes 236 registers
+over 128 threads against \texttt{mma\_opt}'s 122 over 256, with neither spilling,
+so which of the two the machine actually lets sit resident is the question Section
+\ref{sec:sass} answers for one of them and not yet for the other.

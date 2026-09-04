@@ -21,33 +21,48 @@ not have, and it is scoped to a future release rather than claimed here. Until
 somebody runs it, the correct reading of Section \ref{sec:negative} is "on this
 part", not "in general".
 
-\paragraph{Provenance of the v1 era numbers.} Every performance figure in this
-build of the report comes from a sweep taken before the clocks were locked, on a
-repository history that was later rewritten. Two consequences. The GPU ran at
-anywhere from 1042 to 2880 MHz across that sweep, so rows are not strictly
-comparable with each other and the small shapes, which run coolest, are flattered
-least consistently. And the commit hash recorded in every row no longer resolves in
-git, so the audit trail attached to those numbers is broken even though the numbers
-themselves are real. Both are recorded as corrections A4 and A1 in
-\texttt{docs/CORRECTIONS.md}, the dead hashes are listed in
-\texttt{experiments/results/legacy\_hashes.txt}, and a style gate fails on any new
-hash that does not resolve.
+\paragraph{Provenance.} Corrections A1 and A4 are closed. Every row of the
+committed summary carries a commit hash that resolves and a locked clock, and a
+style gate fails the build on any recorded hash that does not resolve. Seven dead
+v1 hashes are still allowed through by
+\texttt{experiments/results/legacy\_hashes.txt}, and that is deliberate and scoped:
+they stamp archived material that is kept in the tree as history, the superseded
+rows in \texttt{sweep.jsonl} and the round 01 to 09 profiler pages. No figure in
+this report is traceable to one of them.
 
-\paragraph{Contaminated denominators.} Correction A2 records setup work inside two
-vendor timed regions. Every percent of cuSPARSE in the v1 data is withdrawn rather
-than corrected, because the setup cannot be subtracted after the fact, and the TRSM
-percentages are provisional for the same reason. The kernel to kernel comparisons
-within a family survive, because both sides were timed identically.
+\paragraph{Contaminated denominators, and what survived them.} Correction A2
+recorded setup work inside two vendor timed regions. The wrappers were fixed and
+the sweep re-run, so the percentages here are measured against a cuSPARSE plan
+built once and reused and against a TRSM baseline whose restore copy is outside the
+window. The v1 percentages are not corrected, they are withdrawn: the setup cannot
+be subtracted after the fact, and the generator still prints the withdrawal for any
+row that names no matrix, so a v1 row can never be read as though it had been
+measured this way.
+
+\paragraph{The traffic column is not in the summary yet.} Round 15 to 17 measured
+\texttt{dram\_\_bytes.sum} for the SpMV, FFT, scan and reduction rungs, and those
+figures are quoted in this report and in the diagnostic log. The
+\texttt{dram\_bytes\_sum} column of \texttt{summary.csv} still reads
+\texttt{pending ncu round}, so a reader who wants the traffic behind a specific row
+has to go to the profiler page rather than to the summary. Re-summarizing the sweep
+is what closes that, and it has not been done.
+
+\paragraph{The roofline chart is measured at a different clock from the ladder.}
+The ceilings come from a device probe at 2842 MHz; every ladder row is at a 2497
+MHz lock. Percent of roof is quoted against the locked clock roof throughout, but
+the chart itself is drawn against the probe's ceilings, so a point read off the
+figure by eye is not the same quantity as a percent of roof quoted in the text.
 
 \paragraph{What the CI bounds do and do not cover.} The performance regression job
 compares a quick sweep against a committed baseline, which catches a large step
 change on this machine. It does not establish that a small difference is real: a
 quick sweep is fewer repetitions than the full protocol, and it runs on whatever
-thermal state the machine happens to be in. Confidence intervals from five
-independent process repeats are part of the 1.1.0 protocol and are recorded per row
-in the new schema, but no row in this build of the report carries them, so the
-figures in it are drawn without error bars and the caption says so. Treat a
-difference of a few percent between two rows here as unresolved.
+thermal state the machine happens to be in. The full protocol's five independent
+process repeats and their bootstrap intervals are recorded per row and drawn as
+error bars on the ladder figure, so a difference between two rows can now be judged
+rather than guessed at. The regression job uses both halves of that: a row counts
+as a regression only when it is more than the tolerance slower \emph{and} the two
+intervals do not overlap.
 
 \paragraph{Claims I am carrying from elsewhere.} The observation that cuBLAS
 dispatches Ampere generation kernels for FP16 GEMM on consumer Blackwell is

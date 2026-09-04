@@ -295,6 +295,34 @@ sentence when it is the latter; and `row_note` is empty on a normal sweep and
 carries whatever `--row-note` was given otherwise, which is how a row filled in
 after the fact says so on its own face.
 
+## The performance baseline
+
+`experiments/results/perf_baseline.csv` is the comparison base for the nightly
+perf-regression job. It is a copy of a summary produced under the protocol above,
+in the same schema, and it is committed so the job has something to compare
+against on a clean checkout. Without it `scripts/perf_regression.py` exits
+non-zero rather than passing on no evidence.
+
+The committed baseline is the 1.1.0 campaign summary: 984 rows at commit
+`1155de4`, locked at 2497 MHz, five process repeats per configuration with a
+bootstrap interval on every row. It was made by copying the file, not by a
+separate run, so the baseline and the numbers in the README and the report are the
+same measurements and cannot drift apart:
+
+```sh
+cp experiments/results/summary.csv experiments/results/perf_baseline.csv
+```
+
+A row counts as a regression only when both halves are true: tonight's median is
+more than the tolerance slower (5 percent by default) **and** the two bootstrap
+intervals do not overlap. Either test alone produces a job that cries wolf, which
+is why the baseline has to carry intervals; a summary from a run without process
+repeats cannot serve as one. A throttled row in tonight's sweep fails the run on
+its own, because a throttled row is not evidence in either direction.
+
+Refresh the baseline deliberately, by copying a new campaign summary over it in
+its own commit, and never to make a red job go green.
+
 ## Running it
 
 ```sh

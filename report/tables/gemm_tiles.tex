@@ -1,12 +1,12 @@
 \begin{tabular}{llrrrr}
 \toprule
-tile & warps & threads & shared bytes, 3 stages & GFLOP/s & percent of cuBLAS \\
+tile & warps & threads & shared bytes, 3 stages & GFLOP/s at 8192 cubed & percent of cuBLAS \\
 \midrule
-128x128x32 & 2 by 4 & 256 & 49,152 & pending & pending \\
-128x256x32 & 2 by 8 & 512 & 73,728 & pending & pending \\
-256x128x32 & 4 by 4 & 512 & 73,728 & pending & pending \\
-128x64x64 & 2 by 2 & 128 & 73,728 & pending & pending \\
-64x128x64 & 1 by 4 & 128 & 73,728 & pending & pending \\
-128x128x64 & 2 by 4 & 256 & 98,304 & pending & pending \\
+128x128x32 & 2 by 4 & 256 & 49,152 & 55,070 & 91.4 \\
+128x256x32 & 2 by 8 & 512 & 73,728 & 51,866 & 86.1 \\
+256x128x32 & 4 by 4 & 512 & 73,728 & 51,134 & 84.9 \\
+128x64x64 & 2 by 2 & 128 & 73,728 & 48,490 & 80.5 \\
+64x128x64 & 1 by 4 & 128 & 73,728 & 37,914 & 62.9 \\
+128x128x64 & 2 by 4 & 256 & 98,304 & 52,680 & 87.5 \\
 \bottomrule
 \end{tabular}

@@ -1,11 +1,14 @@
 # Releasing, and the measurement campaign that gates it
 
 This is the maintainer runbook for turning the committed 1.1.0 tree into a
-published release. The code work is done; what remains is the measurement
-campaign that every "pending" in the docs and the report waits on, and the
-release mechanics. Nothing here is optional: ground rule 3 says no number
-without a run, so the README and report keep their v1-era numbers and caveats
-until this campaign replaces them.
+published release. Nothing here is optional: ground rule 3 says no number
+without a run.
+
+Section 1 ran on 2026-09-03 and 2026-09-04 and is kept as the procedure, not as
+a to-do list. It produced the 984-row `summary.csv`, the 98-row
+`tile_sweep.csv`, and ncu rounds 12 to 17, all at a locked 2497 MHz; the README,
+the report and the family docs are written from those files. What is left is
+section 2.
 
 ## 0. One-time machine setup
 
@@ -59,10 +62,15 @@ five-process repeats and the paired L2 and launch-mode rows.
    item that landed, the cuBLAS profile round, and the named rounds for SpMV,
    FFT, and scan (`dram__bytes.sum` against declared model bytes is Gate X's
    15 percent check). Commit the text pages and `round_meta.txt`.
-5. **Provenance closure.** Delete `experiments/results/legacy_hashes.txt`,
-   re-run `make check-style`; it must stay green on the new rows alone. Update
-   `docs/CORRECTIONS.md`: A1 and A4 close, A6 closes or records what could not
-   be reconstructed.
+5. **Provenance closure.** Re-run `make check-style`; every hash in
+   `summary.csv` and in the new rounds must resolve on its own. Keep
+   `experiments/results/legacy_hashes.txt` rather than deleting it: the v1
+   artifacts its seven dead hashes stamp are still in the tree on purpose (the
+   archived rows in `sweep.jsonl`, the round 01 to 09 meta pages), so deleting
+   the allowlist would mean deleting the evidence or failing the gate on it.
+   Scope its header to say the retention is for archived material and that no
+   current claim rests on it. Update `docs/CORRECTIONS.md`: A1 and A4 close, A6
+   closes or records what could not be reconstructed.
 6. **Perf baseline.** Copy the fresh summary to
    `experiments/results/perf_baseline.csv` and commit; the nightly
    perf-regression job switches on.
@@ -89,8 +97,21 @@ five-process repeats and the paired L2 and launch-mode rows.
 
 ## 3. What 1.1.0 explicitly does not claim
 
-Until step 1.7 lands: every performance percent in the README and report is
-v1-era with the provenance caveat, the new families' tables read pending, the
-fused convolution gain and the split-K and stream-K speedups are hypotheses,
-and `docs/CORRECTIONS.md` is the authoritative list. That is by design; the
-gates are real and a gate that cannot fail is not a gate.
+Step 1.7 landed on 2026-09-04, so the README and the report now carry measured
+locked-clock numbers rather than v1-era ones. What is still not claimed:
+
+- **Four gate clauses failed and are not being restated.** Gate D is one clause
+  short at 8192 (L2 residency), Gate S one short on `soc-LiveJournal1` (the
+  gather), Gate X two short (the traffic model has no L2 term, and the rungs
+  trail cuFFT on pass count), and Gate R misses CUB parity for scan at 2^26 and
+  2^27. Each has a named mechanism and a queued change in
+  `docs/DIAGNOSTIC_LOG.md`. A missed target is recorded, never quietly lowered.
+- **The register study throughput column is still pending.** The study reports
+  registers, spills, occupancy and limiter from ptxas; it has no measured
+  GFLOP/s until `benchmarks/register_study.py --measure` runs at locked clocks.
+- **`dram_bytes_sum` in `summary.csv` still reads `pending ncu round`.** The
+  figures exist on the round 15 to 17 pages; re-summarizing the sweep is what
+  moves them into the column.
+- The split-K and stream-K speedups remain hypotheses, and
+  `docs/CORRECTIONS.md` stays the authoritative list. The gates are real and a
+  gate that cannot fail is not a gate.

@@ -381,7 +381,7 @@ advance so a round is not spent finding them.
 |---|---|
 | Round trip inside the derived bound at every size 2^10 to 2^24, both the shared and the four step paths | green, printed by `ckl_test_fft` |
 | Best hand rung at 55 percent of the DRAM roof and 70 percent of cuFFT at 2^20 to 2^24 | roof leg green on the committed rows; **cuFFT leg red**, `radix8` reaches 60.5 percent of cuFFT at 2^20 and 38.3 percent at 2^24 (round 16) |
-| At 2^10 to 2^13, batched to fill 48 SMs, 85 percent of cuFFT | pending the owner sweep at locked clocks |
+| At 2^10 to 2^13, batched to fill 48 SMs, 85 percent of cuFFT | **red** on the locked sweep rows: 66.03 percent at 2^10, 65.53 at 2^11, 38.23 at 2^12, batch 96. Same mechanism as the large size leg: the rungs move more bytes per transform than cuFFT, and below 2^22 the working set is L2 resident so the deficit shows as time, not DRAM traffic |
 | Measured `dram__bytes.sum` within 15 percent of the declared model | **red at 2^20, green at 2^24** (round 16): 64.08 MB measured against a declared 117,440,512 is 45.4 percent low, and 1977.03 MB against 2,147,483,648 is 3.5 percent low |
 | The 2D driver reports the transpose share per size, tiled transpose at 70 percent of roof | share is reported by `bench_fft`; the roof percentage is pending the owner sweep |
 | The crossover chart generated from committed rows with the crossing read from the data | hook wired in `gen_report_assets.py`; pending the committed sweep rows |

@@ -7,9 +7,44 @@ at the definition of done milestones.
 ## [1.1.0] - 2026-09-03
 
 The integrity release, and the release that turns the ladder into a library.
-Phase A below was written first and blocks everything else; every measured claim
-this release adds is marked pending until the locked clock sweep replaces the v1
-numbers.
+Phase A below was written first and blocks everything else.
+
+### Measured
+
+The campaign ran on 2026-09-03 and 2026-09-04, so this release ships numbers
+rather than pendings. `experiments/results/summary.csv` holds 984 rows at commit
+`1155de4`, 982 measured and 2 recorded refusals, with the graphics clock locked at
+2497 MHz, five independent process repeats per configuration, a bootstrap 95
+percent interval on every row, and a drift gate that no row exceeded (worst case
+1.0 percent against a 2 percent bar). `tile_sweep.csv` adds 98 rows and switches
+the `kAuto` heuristic from a guard to a measured decision table. Nsight Compute
+rounds 12 to 17 are committed under `experiments/results/ncu/` with resolvable
+commit hashes, and every gate clause has a verdict with a named cause in
+`docs/DIAGNOSTIC_LOG.md`.
+
+The headline: the top GEMM kernel reaches 94.8 percent of cuBLAS FP16 at both
+4096 cubed and 8192 cubed (54,602 and 56,375 GFLOP/s), which is 88.98 and 91.87
+percent of the hardware tensor roof at the locked clock, with a geometric mean of
+84.7 percent of cuBLAS from 1024 cubed to 8192 cubed. Merge path SpMV runs 5.12x
+the warp per row kernel on `webbase-1M`. Decoupled look-back scan reaches 95.5
+percent of CUB at 2^28 and the reduction ladder is at CUB parity.
+
+The scoreboard, misses included: **Gate D** passes 5 of 6 clauses, missing the 2x
+memory clause at 8192 on L2 residency; **Gate S** fails one clause on
+`soc-LiveJournal1` at 1.286x against a 1.5x bar, caused by the gather rather than
+by load balance; **Gate X** fails three clauses, because the traffic model has no
+L2 term and because the hand rungs move more bytes per transform than cuFFT at
+every size, large and batched small alike; **Gate
+R** passes both bandwidth clauses and misses CUB parity for scan at 2^26 and 2^27
+on tile size. Each miss carries a mechanism and a queued change; none was amended
+to make it pass.
+
+Still pending, and marked so rather than estimated: the `dram_bytes_sum` column of
+the summary, and the register study's throughput column.
+
+Evidence lives in `experiments/results/` (the summaries, the sweep JSONL, the ncu
+text pages), the reasoning in `docs/DIAGNOSTIC_LOG.md`, the audit trail in
+`docs/CORRECTIONS.md`, and the generated tables and figures in `report/`.
 
 ### Added
 

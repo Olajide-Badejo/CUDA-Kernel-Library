@@ -2,11 +2,101 @@
 \toprule
 kernel & matrix & nonzeros & GFLOP/s & percent of cuSPARSE \\
 \midrule
-CSR SpMV naive & synthetic, 16384 rows & pending & 24.7 & withdrawn (A2) \\
-CSR SpMV warp & synthetic, 16384 rows & pending & 61.7 & withdrawn (A2) \\
-CSR SpMV naive & synthetic, 65536 rows & pending & 48.2 & withdrawn (A2) \\
-CSR SpMV warp & synthetic, 65536 rows & pending & 88.8 & withdrawn (A2) \\
-CSR SpMV naive & synthetic, 131072 rows & pending & 57.5 & withdrawn (A2) \\
-CSR SpMV warp & synthetic, 131072 rows & pending & 93.6 & withdrawn (A2) \\
+CSR SpMV baseline\_cusparse\_alg2 & cant & 4,007,383 & 109.6 & 114.1 \\
+CSR SpMV baseline\_cusparse\_default & cant & 4,007,383 & 96.0 & 100.0 \\
+CSR SpMV bsr & cant & 4,007,383 & 115.9 & 120.7 \\
+CSR SpMV merge & cant & 4,007,383 & 80.3 & 83.6 \\
+CSR SpMV naive & cant & 4,007,383 & 74.2 & 77.2 \\
+CSR SpMV sell & cant & 4,007,383 & 116.0 & 120.8 \\
+CSR SpMV vector & cant & 4,007,383 & 87.9 & 91.5 \\
+CSR SpMV warp & cant & 4,007,383 & 87.6 & 91.2 \\
+CSR SpMV baseline\_cusparse\_alg2 & mc2depi & 2,100,225 & 74.1 & 121.9 \\
+CSR SpMV baseline\_cusparse\_default & mc2depi & 2,100,225 & 60.8 & 100.0 \\
+CSR SpMV bsr & mc2depi & 2,100,225 & 23.1 & 38.0 \\
+CSR SpMV merge & mc2depi & 2,100,225 & 59.0 & 97.1 \\
+CSR SpMV naive & mc2depi & 2,100,225 & 94.2 & 154.9 \\
+CSR SpMV sell & mc2depi & 2,100,225 & 79.7 & 131.2 \\
+CSR SpMV vector & mc2depi & 2,100,225 & 62.6 & 103.0 \\
+CSR SpMV warp & mc2depi & 2,100,225 & 13.2 & 21.7 \\
+CSR SpMV baseline\_cusparse\_alg2 & parabolic\_fem & 3,674,625 & 92.8 & 115.0 \\
+CSR SpMV baseline\_cusparse\_default & parabolic\_fem & 3,674,625 & 80.7 & 100.0 \\
+CSR SpMV bsr & parabolic\_fem & 3,674,625 & 35.6 & 44.1 \\
+CSR SpMV merge & parabolic\_fem & 3,674,625 & 61.3 & 76.0 \\
+CSR SpMV naive & parabolic\_fem & 3,674,625 & 95.2 & 118.0 \\
+CSR SpMV sell & parabolic\_fem & 3,674,625 & 95.5 & 118.3 \\
+CSR SpMV vector & parabolic\_fem & 3,674,625 & 70.9 & 87.8 \\
+CSR SpMV warp & parabolic\_fem & 3,674,625 & 24.3 & 30.1 \\
+CSR SpMV baseline\_cusparse\_alg2 & pdb1HYS & 4,344,765 & 113.2 & 114.0 \\
+CSR SpMV baseline\_cusparse\_default & pdb1HYS & 4,344,765 & 99.3 & 100.0 \\
+CSR SpMV bsr & pdb1HYS & 4,344,765 & 147.4 & 148.4 \\
+CSR SpMV merge & pdb1HYS & 4,344,765 & 77.4 & 77.9 \\
+CSR SpMV naive & pdb1HYS & 4,344,765 & 67.6 & 68.1 \\
+CSR SpMV sell & pdb1HYS & 4,344,765 & 112.3 & 113.1 \\
+CSR SpMV vector & pdb1HYS & 4,344,765 & 111.8 & 112.6 \\
+CSR SpMV warp & pdb1HYS & 4,344,765 & 109.8 & 110.5 \\
+CSR SpMV baseline\_cusparse\_alg2 & scircuit & 958,936 & 56.2 & 135.7 \\
+CSR SpMV baseline\_cusparse\_default & scircuit & 958,936 & 41.4 & 100.0 \\
+CSR SpMV bsr & scircuit & 958,936 & 27.7 & 67.0 \\
+CSR SpMV merge & scircuit & 958,936 & 45.2 & 109.1 \\
+CSR SpMV naive & scircuit & 958,936 & 43.1 & 104.1 \\
+CSR SpMV sell & scircuit & 958,936 & 32.6 & 78.7 \\
+CSR SpMV vector & scircuit & 958,936 & 41.2 & 99.7 \\
+CSR SpMV warp & scircuit & 958,936 & 18.1 & 43.7 \\
+CSR SpMV baseline\_cusparse\_alg2 & soc-LiveJournal1 & 68,993,773 & 87.2 & 97.3 \\
+CSR SpMV baseline\_cusparse\_default & soc-LiveJournal1 & 68,993,773 & 89.6 & 100.0 \\
+CSR SpMV bsr & soc-LiveJournal1 & pending & refused & refused \\
+CSR SpMV merge & soc-LiveJournal1 & 68,993,773 & 59.5 & 66.4 \\
+CSR SpMV naive & soc-LiveJournal1 & 68,993,773 & 69.6 & 77.7 \\
+CSR SpMV sell & soc-LiveJournal1 & 68,993,773 & 52.8 & 58.9 \\
+CSR SpMV vector & soc-LiveJournal1 & 68,993,773 & 70.9 & 79.1 \\
+CSR SpMV warp & soc-LiveJournal1 & 68,993,773 & 46.2 & 51.6 \\
+CSR SpMV baseline\_cusparse\_alg2 & synthetic:131072:seed1 & 3,861,228 & 60.1 & 95.3 \\
+CSR SpMV baseline\_cusparse\_default & synthetic:131072:seed1 & 3,861,228 & 63.1 & 100.0 \\
+CSR SpMV bsr & synthetic:131072:seed1 & 3,861,228 & 46.1 & 73.1 \\
+CSR SpMV merge & synthetic:131072:seed1 & 3,861,228 & 50.5 & 80.0 \\
+CSR SpMV naive & synthetic:131072:seed1 & 3,861,228 & 44.5 & 70.5 \\
+CSR SpMV sell & synthetic:131072:seed1 & 3,861,228 & 40.2 & 63.8 \\
+CSR SpMV vector & synthetic:131072:seed1 & 3,861,228 & 67.6 & 107.2 \\
+CSR SpMV warp & synthetic:131072:seed1 & 3,861,228 & 67.6 & 107.2 \\
+CSR SpMV baseline\_cusparse\_alg2 & synthetic:131072:seed2 & 3,814,798 & 59.4 & 95.2 \\
+CSR SpMV baseline\_cusparse\_default & synthetic:131072:seed2 & 3,814,798 & 62.4 & 100.0 \\
+CSR SpMV bsr & synthetic:131072:seed2 & 3,814,798 & 45.6 & 73.0 \\
+CSR SpMV merge & synthetic:131072:seed2 & 3,814,798 & 50.6 & 81.1 \\
+CSR SpMV naive & synthetic:131072:seed2 & 3,814,798 & 44.5 & 71.3 \\
+CSR SpMV sell & synthetic:131072:seed2 & 3,814,798 & 39.7 & 63.7 \\
+CSR SpMV vector & synthetic:131072:seed2 & 3,814,798 & 68.0 & 109.0 \\
+CSR SpMV warp & synthetic:131072:seed2 & 3,814,798 & 68.0 & 109.1 \\
+CSR SpMV baseline\_cusparse\_alg2 & synthetic:131072:seed3 & 3,810,264 & 59.4 & 95.3 \\
+CSR SpMV baseline\_cusparse\_default & synthetic:131072:seed3 & 3,810,264 & 62.3 & 100.0 \\
+CSR SpMV bsr & synthetic:131072:seed3 & 3,810,264 & 45.5 & 73.1 \\
+CSR SpMV merge & synthetic:131072:seed3 & 3,810,264 & 50.5 & 81.0 \\
+CSR SpMV naive & synthetic:131072:seed3 & 3,810,264 & 44.4 & 71.3 \\
+CSR SpMV sell & synthetic:131072:seed3 & 3,810,264 & 39.7 & 63.7 \\
+CSR SpMV vector & synthetic:131072:seed3 & 3,810,264 & 66.7 & 107.1 \\
+CSR SpMV warp & synthetic:131072:seed3 & 3,810,264 & 66.7 & 107.1 \\
+CSR SpMV baseline\_cusparse\_alg2 & synthetic:131072:seed4 & 3,804,246 & 59.2 & 95.3 \\
+CSR SpMV baseline\_cusparse\_default & synthetic:131072:seed4 & 3,804,246 & 62.2 & 100.0 \\
+CSR SpMV bsr & synthetic:131072:seed4 & 3,804,246 & 46.6 & 74.9 \\
+CSR SpMV merge & synthetic:131072:seed4 & 3,804,246 & 50.4 & 81.0 \\
+CSR SpMV naive & synthetic:131072:seed4 & 3,804,246 & 44.9 & 72.2 \\
+CSR SpMV sell & synthetic:131072:seed4 & 3,804,246 & 39.6 & 63.7 \\
+CSR SpMV vector & synthetic:131072:seed4 & 3,804,246 & 67.9 & 109.1 \\
+CSR SpMV warp & synthetic:131072:seed4 & 3,804,246 & 69.1 & 111.1 \\
+CSR SpMV baseline\_cusparse\_alg2 & synthetic:131072:seed5 & 3,819,999 & 59.5 & 95.3 \\
+CSR SpMV baseline\_cusparse\_default & synthetic:131072:seed5 & 3,819,999 & 62.5 & 100.0 \\
+CSR SpMV bsr & synthetic:131072:seed5 & 3,819,999 & 46.2 & 74.0 \\
+CSR SpMV merge & synthetic:131072:seed5 & 3,819,999 & 50.6 & 81.0 \\
+CSR SpMV naive & synthetic:131072:seed5 & 3,819,999 & 44.6 & 71.4 \\
+CSR SpMV sell & synthetic:131072:seed5 & 3,819,999 & 39.8 & 63.7 \\
+CSR SpMV vector & synthetic:131072:seed5 & 3,819,999 & 68.1 & 109.1 \\
+CSR SpMV warp & synthetic:131072:seed5 & 3,819,999 & 68.1 & 109.1 \\
+CSR SpMV baseline\_cusparse\_alg2 & webbase-1M & 3,105,536 & 76.4 & 117.7 \\
+CSR SpMV baseline\_cusparse\_default & webbase-1M & 3,105,536 & 64.9 & 100.0 \\
+CSR SpMV bsr & webbase-1M & 3,105,536 & 18.1 & 27.9 \\
+CSR SpMV merge & webbase-1M & 3,105,536 & 53.4 & 82.3 \\
+CSR SpMV naive & webbase-1M & 3,105,536 & 19.5 & 30.0 \\
+CSR SpMV sell & webbase-1M & 3,105,536 & 12.5 & 19.2 \\
+CSR SpMV vector & webbase-1M & 3,105,536 & 50.8 & 78.2 \\
+CSR SpMV warp & webbase-1M & 3,105,536 & 10.4 & 16.1 \\
 \bottomrule
 \end{tabular}

@@ -70,10 +70,23 @@ exits 1 listing the offenders when one does not resolve. It runs from
 `experiments/results/legacy_hashes.txt`, which explains why they are there and says
 plainly that anything traceable only to one of them is provisional.
 
-**Open.** The real fix is to re-run the full sweep and the ncu rounds on current
-history and delete the allowlist. That is a 4 to 7 hour run on my machine and it is
-mine to do. Until then the allowlist is a standing debt and the gate reports it on
-every run.
+**Closed 2026-09-04.** The re-run happened. `summary.csv` is 984 rows, every one
+stamped `1155de478289f4a7d40687f87000848267619032`, and that hash resolves. Rounds
+12 to 17 carry `7cbad7c9e853fba7c3a4fa65d7ac03cfa00cb4e1` in their `round_meta.txt`,
+and that resolves too. No number in the README, the report, or any family doc is
+traceable to a dead hash any more.
+
+**What I did not do, and why.** I did not delete
+`experiments/results/legacy_hashes.txt`, which is what the runbook told me to do at
+this point. Deleting it would mean either deleting the v1 artifacts it covers or
+failing the provenance gate on them, and I want to keep those artifacts: the 60
+superseded rows in `sweep.jsonl` are the before half of the clock-lock comparison,
+and the round 01 to 09 pages are the record of how the ladder was actually arrived
+at. So the retention is scoped instead. The seven dead hashes now guard archived v1
+material only; the file's header says so, `scripts/check_provenance.py` says so
+when it reports them, and `docs/RELEASING.md` step 5 has been corrected to describe
+scoped retention rather than deletion. A hash that is not already in that file is
+still a hard failure.
 
 ---
 
@@ -107,10 +120,23 @@ The kernel under test and the baseline both go through the same path.
 `docs/sparse.md` marks the 131.8 percent of cuSPARSE figure retracted, along with
 the 83.6 percent beside it.
 
-**Open.** Re-measurement. Every percent of cuSPARSE in this repository, and the
-TRSM percent of cuBLAS, is provisional until the sweep is re-run on the fixed
-code. The kernel to kernel comparisons (warp per row is about 1.6 times naive) hold,
-because both hand written variants were timed identically.
+**Closed 2026-09-04.** The re-measurement is in `summary.csv`: the SpMV suite runs
+against the fixed cuSPARSE wrapper and TRSM against the fixed benchmark, all at
+locked clocks. The percentages that came back are sober, which is the point. The
+retracted 283.44, 174.33, 131.8 and 127.47 percent of cuSPARSE figures are gone;
+the suite now runs from 16.1 percent (`warp` on `webbase-1M`) to 154.9 percent
+(`naive` on `mc2depi`), and where a hand kernel does beat cuSPARSE it beats it by a
+believable margin on a matrix whose structure explains why. `gemv,warp,2048` came
+back at 111.2 percent rather than 208.61. TRSM blocked at 2048 by 256 is 24.7
+percent of cuBLAS, down from the 31.78 percent measured with the restore copy
+inside the window, because removing setup from the timed region made the *baseline*
+faster.
+
+Rows that name a matrix are 1.1.0 schema rows and their percent stands.
+`scripts/gen_report_assets.py` still prints `withdrawn (A2)` for any row with no
+matrix column, so a v1 row can never be read as if it were measured this way.
+
+**Open.** Nothing.
 
 ---
 
@@ -181,8 +207,29 @@ sweep refuses to run unless `--allow-unlocked` is passed, and an unlocked run
 stamps `clock_locked=false` on every row so no locked clock claim can be built from
 it. The lock is released at the end.
 
-**Open.** The re-run. Every ladder number currently in this repository was measured
-unlocked and will be replaced. The README says so at the results table.
+**Closed 2026-09-04.** The re-run landed. All 984 rows of `summary.csv` carry
+`clock_locked=true` and `locked_clock_mhz=2500`, and the observed clock is tight:
+895 rows at 2497 MHz, 84 at 2490, two at 2482 and one at 2475. The largest drift
+from the lock is 1.0 percent, against a gate that fails at 2 percent, so nothing
+was rejected. Compare that with the v1 range of 1042 to 2880 MHz. The 98 tile sweep
+rows are under the same lock and all read 2497.
+
+The ladder is now one comparable sequence, and the numbers moved where the unlocked
+run had penalized a rung. The clearest example is the register blocked rung at 4096
+cubed, 47.2 percent of cuBLAS unlocked against 79.4 percent locked: most of what
+the v1 chart showed as a gap between register blocking and `cp.async` was the
+clock, not the kernel.
+
+**One thing I am not hiding.** Four rows carry `throttled=true`: the FP32 GEMM
+group at 4096 cubed, both cuBLAS baselines plus `cp_async` and `register`. NVML
+raised a throttle reason on them at 55 to 57 C and up to 203.6 W. Their median SM
+clock is nonetheless 2497 MHz, the same as everything else, so the lock held and
+the rows are kept and quoted. The flag is reported because a throttle reason that
+did not move the clock is still a fact about the run, and readers should be able to
+see which rows carry it rather than take my word that it did not matter.
+
+**Open.** Nothing. The README, the report and the family docs are written from the
+locked rows.
 
 ---
 
@@ -223,8 +270,18 @@ data:
    Analysis); it is not the memory pipes figure, which is `Mem Pipes Busy` at
    14.37 percent.
 
-**Open.** All of these figures carry the A1 provenance caveat and the A4 unlocked
-clock caveat. The README says so where the numbers are.
+**Closed 2026-09-04.** The figures in the table above are the v1 record and are
+kept as the record; they no longer appear anywhere as claims. The locked-clock
+sweep replaced them, and the corrected numbers are 66.43 at 1024, 86.14 at 2048,
+94.85 at 4096 and 94.83 at 8192, a geometric mean of 84.70 over that range and
+71.27 over all eight swept shapes. The README leads with the curve and reports both
+means. The tiled regression is still on the ladder and is still the most
+interesting line in the table: at 4096 cubed it measures 1,455 GFLOP/s against the
+naive kernel's 1,810, so the shared-memory optimization everyone reaches for first
+is 19.6 percent slower than doing nothing on this part.
+
+**Open.** Nothing. The A1 provenance caveat and the A4 unlocked clock caveat are
+both discharged above, and the README no longer carries either.
 
 ---
 
@@ -323,17 +380,30 @@ pair is kept only as the history of how the swizzle came about.
 
 ## What closes this register
 
-One run on my machine, mine to do:
-
-1. The full sweep, under a locked clock, on current history, with the fixed
-   cuSPARSE and TRSM timing. That closes A1 for the sweep rows, A2, A4, and turns
-   every provisional percent in A5 into a measured one. This landed on 2026-09-03
-   and 2026-09-04 as `experiments/results/summary.csv` and `sweep.jsonl` at
-   `median_sm_clock_mhz` 2497 with `clock_locked=true`; what remains is folding the
-   round 15 to 17 `dram__bytes.sum` figures into the `dram_bytes_sum` column, which
-   still reads `pending ncu round`.
-
-The ncu half is done: rounds 12 to 17 are committed under
+The run happened. On 2026-09-03 and 2026-09-04 the full sweep went through under a
+locked clock, on current history, with the fixed cuSPARSE and TRSM timing:
+`experiments/results/summary.csv` (984 rows), `tile_sweep.csv` (98 rows) and
+`sweep.jsonl`, all at `median_sm_clock_mhz` 2497 with `clock_locked=true`. That
+closed A1, A2 and A4, and turned every provisional percent in A5 into a measured
+one. The ncu half is done too: rounds 12 to 17 are committed under
 `experiments/results/ncu/`, each with a `round_meta.txt` whose commit hash
 resolves, and each with a dated entry in `docs/DIAGNOSTIC_LOG.md`. Round 5 stays a
 gap and round 8 is closed as superseded, both explained in the A6 closure above.
+
+Every defect in this register is now closed. Three things are open, and none of
+them is a correction; they are measurements nobody has taken yet, and they read
+`pending` wherever they appear rather than being estimated:
+
+1. **`dram_bytes_sum` in `summary.csv` still reads `pending ncu round`.** The
+   figures exist on the round 15 to 17 pages and are quoted in the diagnostic log;
+   re-summarizing the sweep is what moves them into the column.
+2. **The register study has no throughput column.** Registers, spills, occupancy
+   and limiter are compile-time facts from ptxas and are filled in;
+   `benchmarks/register_study.py --measure` at locked clocks is what fills the
+   rest.
+3. **Four gate clauses failed**, each with a named mechanism and a queued change:
+   Gate D's 2x memory clause at 8192, Gate S on `soc-LiveJournal1`, two Gate X
+   clauses, and Gate R's CUB parity for scan at 2^26 and 2^27. They are recorded
+   in `docs/DIAGNOSTIC_LOG.md` rounds 14 to 17 and summarized in the README
+   scoreboard. A missed gate is a result, not a defect in the register, and it is
+   not being amended to make it pass.

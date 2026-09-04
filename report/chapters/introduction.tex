@@ -13,9 +13,11 @@ Two things follow from taking that policy seriously. The first is that a
 measurement which contradicts the textbook is still a measurement: the shared
 memory tiled kernel loses to the naive one on this part, and rather than being
 skipped it becomes Section \ref{sec:negative}. The second is that a number I have
-not measured yet does not get written down. Every table in this report that
-covers a 1.1.0 family reads \emph{pending} in its performance columns, and the
-generator that writes those tables refuses to invent a value to fill them.
+not measured yet does not get written down. The tables in this report are filled
+from a locked clock campaign of 984 rows; the two columns that campaign did not
+cover still read \emph{pending}, and the generator that writes those tables
+refuses to invent a value to fill them. Four gate clauses failed, and they are
+reported beside the ones that passed with the mechanism named in each case.
 
 The machine is an RTX 5070 (Blackwell GB205, compute capability 12.0, sm\_120, 48
 SMs, 12 GB GDDR7), running CUDA Toolkit 13.3 inside WSL2. The ceilings used

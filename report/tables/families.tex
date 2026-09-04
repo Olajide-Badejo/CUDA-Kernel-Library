@@ -2,23 +2,30 @@
 \toprule
 kernel & shape & GFLOP/s & percent of vendor & baseline \\
 \midrule
-GEMV naive & 1024 sq & 37.9 & 15.8 & cuBLAS SGEMV \\
-GEMV vectorized & 1024 sq & 227.2 & 134.7 & cuBLAS SGEMV \\
-GEMV warp & 1024 sq & 225.6 & 93.8 & cuBLAS SGEMV \\
-GEMV naive & 2048 sq & 82.7 & 15.0 & cuBLAS SGEMV \\
-GEMV vectorized & 2048 sq & 586.5 & 101.7 & cuBLAS SGEMV \\
-GEMV warp & 2048 sq & 635.5 & 208.6 & cuBLAS SGEMV \\
-GEMV naive & 4096 sq & 134.0 & 46.0 & cuBLAS SGEMV \\
-GEMV vectorized & 4096 sq & 291.4 & 100.9 & cuBLAS SGEMV \\
-GEMV warp & 4096 sq & 291.7 & 101.4 & cuBLAS SGEMV \\
-GEMV naive & 8192 sq & 159.5 & 52.2 & cuBLAS SGEMV \\
-GEMV vectorized & 8192 sq & 308.1 & 101.6 & cuBLAS SGEMV \\
-GEMV warp & 8192 sq & 304.0 & 99.9 & cuBLAS SGEMV \\
-TRSM blocked & 512 by 256 & 109.9 & 47.4 & cuBLAS STRSM \\
-TRSM naive & 512 by 256 & 8.4 & 3.2 & cuBLAS STRSM \\
-TRSM blocked & 1024 by 256 & 215.5 & 37.7 & cuBLAS STRSM \\
-TRSM naive & 1024 by 256 & 7.9 & 1.4 & cuBLAS STRSM \\
-TRSM blocked & 2048 by 256 & 381.3 & 31.8 & cuBLAS STRSM \\
-TRSM naive & 2048 by 256 & 7.8 & 0.7 & cuBLAS STRSM \\
+GEMV baseline\_cublas & 1024 sq & 151.4 & 100.0 & cuBLAS SGEMV \\
+GEMV naive & 1024 sq & 31.3 & 20.7 & cuBLAS SGEMV \\
+GEMV vectorized & 1024 sq & 177.6 & 117.3 & cuBLAS SGEMV \\
+GEMV warp & 1024 sq & 178.1 & 117.7 & cuBLAS SGEMV \\
+GEMV baseline\_cublas & 2048 sq & 219.7 & 100.0 & cuBLAS SGEMV \\
+GEMV naive & 2048 sq & 63.2 & 28.8 & cuBLAS SGEMV \\
+GEMV vectorized & 2048 sq & 230.6 & 104.9 & cuBLAS SGEMV \\
+GEMV warp & 2048 sq & 244.3 & 111.2 & cuBLAS SGEMV \\
+GEMV baseline\_cublas & 4096 sq & 279.0 & 100.0 & cuBLAS SGEMV \\
+GEMV naive & 4096 sq & 100.1 & 35.9 & cuBLAS SGEMV \\
+GEMV vectorized & 4096 sq & 274.1 & 98.3 & cuBLAS SGEMV \\
+GEMV warp & 4096 sq & 269.3 & 96.6 & cuBLAS SGEMV \\
+GEMV baseline\_cublas & 8192 sq & 296.9 & 100.0 & cuBLAS SGEMV \\
+GEMV naive & 8192 sq & 141.9 & 47.8 & cuBLAS SGEMV \\
+GEMV vectorized & 8192 sq & 294.2 & 99.1 & cuBLAS SGEMV \\
+GEMV warp & 8192 sq & 290.3 & 97.8 & cuBLAS SGEMV \\
+TRSM baseline\_cublas & 512 by 256 & 361.6 & 100.0 & cuBLAS STRSM \\
+TRSM blocked & 512 by 256 & 96.8 & 26.8 & cuBLAS STRSM \\
+TRSM naive & 512 by 256 & 8.7 & 2.4 & cuBLAS STRSM \\
+TRSM baseline\_cublas & 1024 by 256 & 692.0 & 100.0 & cuBLAS STRSM \\
+TRSM blocked & 1024 by 256 & 181.4 & 26.2 & cuBLAS STRSM \\
+TRSM naive & 1024 by 256 & 8.4 & 1.2 & cuBLAS STRSM \\
+TRSM baseline\_cublas & 2048 by 256 & 1308.9 & 100.0 & cuBLAS STRSM \\
+TRSM blocked & 2048 by 256 & 322.8 & 24.7 & cuBLAS STRSM \\
+TRSM naive & 2048 by 256 & 8.5 & 0.7 & cuBLAS STRSM \\
 \bottomrule
 \end{tabular}

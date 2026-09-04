@@ -78,17 +78,75 @@ the committed summary carries, keyed on the matrix name where the schema has one
 The v1 rows do not name a matrix and their percent of cuSPARSE is withdrawn under
 correction A2, so the generator prints the withdrawal rather than the number: the
 denominator those percentages were divided by included setup work, and no honest
-figure can be recovered from them after the fact. What does survive from v1 is the
-kernel to kernel comparison, because both hand written variants were timed
-identically: the warp per row kernel is about 1.6 times the thread per row kernel
-on a skewed degree matrix. The suite level result, and every percent of cuSPARSE,
-is pending the 1.1.0 sweep.
+figure can be recovered from them after the fact. The 1.1.0 suite replaces them.
+Every row in Table \ref{tab:spmv} that names a matrix was measured against a
+cuSPARSE plan built once and reused, at locked clocks, so its percent stands.
+
+\paragraph{The suite result is that there is no winner.} Which kernel is fastest is
+a property of the matrix, and running one matrix would have hidden that.
+SELL-C-sigma takes \texttt{cant} at 120.8 percent of cuSPARSE, BSR takes
+\texttt{pdb1HYS} at 148.4 percent, the naive one thread per row kernel takes
+\texttt{mc2depi} at 154.9 percent, and merge path takes \texttt{scircuit} and
+\texttt{webbase-1M}. On \texttt{soc-LiveJournal1}, the largest matrix in the suite
+at 68,993,773 nonzeros, nothing beats cuSPARSE: the best hand kernel is the vector
+one at 79.1 percent. A dispatcher for this family has to choose on matrix
+structure, and that is the argument for the plan object rather than for a default
+algorithm.
+
+\paragraph{The refusal is a result too.} BSR on \texttt{soc-LiveJournal1} returns
+\texttt{kNotSupported} and the row records the arithmetic: the best block dimension
+is 2 at a fill of 0.288618, which would store 239,048,588 values for 68,993,773
+nonzeros, past the plan's 134,217,728 entry ceiling. The sweep writes that as
+\texttt{status=skipped\_not\_supported} with the plan's own sentence, and the
+generator prints \texttt{refused} rather than \texttt{pending}, because the two are
+not the same statement. Pending means nobody has measured it; refused means the
+plan looked at this matrix and said no, which is the silent fallback rule working
+as intended.
 
 \begin{table}[htbp]
 \centering
 \input{tables/spmv_suite.tex}
-\caption{CSR SpMV rows in the committed summary. Percent of cuSPARSE is withdrawn
-for the v1 rows under correction A2 (setup work inside the vendor's timed region);
-the matrix suite result is pending.}
+\caption{CSR SpMV rows in the committed summary, measured at locked clocks against
+a cached cuSPARSE plan. Percent of cuSPARSE is withdrawn for any v1 row that names
+no matrix, under correction A2 (setup work inside the vendor's timed region); a row
+the plan declined reads \texttt{refused}.}
 \label{tab:spmv}
 \end{table}
+
+\subsection{Where merge path wins, and what it pays}
+\label{sec:spmvgate}
+
+The gate asks merge path to run at least 1.5 times the warp per row kernel on both
+power law matrices, with disjoint intervals. It passes on \texttt{webbase-1M} by a
+wide margin and fails on \texttt{soc-LiveJournal1}.
+
+On \texttt{webbase-1M} the medians are 0.116256 ms against 0.595328 ms, a factor of
+5.12, with intervals $[0.116256, 0.118240]$ and $[0.594928, 0.595456]$. Round 15
+attributes that to lane utilization rather than to load balance. The vector kernel
+throws away 37.6 percent of its lanes on this matrix, executing 19.98 of 32, while
+merge throws away 7.2 percent at 29.71 of 32. Merge pays for that with its gather:
+11.05 sectors per global load request against 2.70. On a matrix this skewed, buying
+lane occupancy with coalescing is overwhelmingly the right trade.
+
+On \texttt{soc-LiveJournal1} it is not. The measured ratio is 2.984416 against
+2.320832 ms, a factor of 1.286, short of the 1.5 bar, and the locked run confirms a
+risk the board had recorded from an unlocked 1.33. The cause is not load balance:
+the tail ratio, which is the metric merge exists to move, is already between 1.019
+and 1.047 on every kernel profiled, and merge's lane utilization is already near 30
+of 32. It is the gather, at 11 sectors per request, over a matrix whose column
+indices have no locality left to exploit. Block level tile staging of $x$ is the
+change to try. It is a kernel change, not a gate amendment, and the clause stays
+failed as written until that kernel exists.
+
+\paragraph{One honest wrinkle in the traffic model.} Both vector rows land under
+the low end of the declared model band, which is the end that assumes perfect $x$
+residency, so on a first reading the kernel moved less than the compulsory minimum.
+It did not. The gap is the $y$ write: $4m$ is 2,103,300 bytes on
+\texttt{parabolic\_fem} and 4,000,020 on \texttt{webbase-1M}, and the measured
+shortfalls are 2.06 MB and 3.97 MB. The $y$ plane is still dirty in L2 when the
+kernel retires, so those writes have not reached DRAM inside the window the counter
+covers, while the model counts them because they will be written eventually. At
+these sizes the band brackets the measurement to within one $y$ plane. Merge sits
+above the high end on both matrices for a different reason, and a real one: the
+model has no term for the carry arrays or the second pass, and the fixup kernel
+alone moves 8.09 MB and 11.16 MB.

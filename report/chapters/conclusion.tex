@@ -1,27 +1,32 @@
 \section{Conclusion}
 
-A hand written FP16 GEMM on the RTX 5070 reaches 89.9 percent of cuBLAS at 4096
-cubed and is demonstrably compute bound, arrived at through nine logged diagnostic
-rounds with one change each. The supporting families are correct and benchmarked,
+A hand written FP16 GEMM on the RTX 5070 reaches 94.8 percent of cuBLAS at 4096
+cubed, 88.98 percent of the hardware tensor roof, and is compute bound there on a
+committed profiler page, arrived at through seventeen logged diagnostic rounds with
+one change each. The supporting families are correct and benchmarked,
 the roofline is built on hardware ceilings rather than on a vendor library, and
 every number in this document is regenerated from a results file in the tree by a
 script that fails rather than reusing a stale picture.
 
 The finding I would keep if I could only keep one is the negative one. Shared
-memory tiling, the first thing every course teaches, is 17 percent slower than the
+memory tiling, the first thing every course teaches, is 19.6 percent slower than the
 naive kernel on this part, because the cache hierarchy already absorbs the traffic
 that tiling exists to remove. That is a single GPU result and Section
 \ref{sec:limitations} says so, but it is the clearest illustration of the method:
 an optimization is only worth what the bottleneck it removes was costing, and the
 profiler is what tells you which bottleneck that is.
 
-What is not finished is stated as plainly as what is. The 1.1.0 mechanisms, the
-tile family, the predicated tails, split-K, stream-K, the CUTLASS reference line,
-the SpMV matrix suite, FFT and convolution, and reduction and scan, are implemented
-and tested and have no throughput numbers, so their tables read pending. The
-existing numbers are v1 era and provisional. Closing both of those is one owner
-action, the sweep at locked clocks, and the report is wired so that running it
-fills the tables in without anybody editing a document.
+What is not finished is stated as plainly as what is. The locked clock campaign
+filled the tables, and it did not make every target: the compute bound gate is one
+clause short at 8192 cubed on L2 residency, merge path SpMV misses its 1.5x bar on
+\texttt{soc-LiveJournal1} because of the gather rather than load balance, the FFT
+rungs trail cuFFT on the number of global passes they make, and the look-back scan
+misses CUB parity by under a point at two of five sizes on tile size. Each of those
+has a measured mechanism and a named change queued, and none of them was resolved
+by moving the gate. Two columns still read pending, the summary's
+\texttt{dram\_bytes\_sum} and the register study's throughput, and the report is
+wired so that measuring them fills the tables in without anybody editing a
+document.
 
 What the corrections register adds to the method is the step I had skipped:
 auditing my own claims against my own data before publishing them.

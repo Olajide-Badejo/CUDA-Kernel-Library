@@ -99,23 +99,54 @@ input is missing.
 
 This matters more than the rest of the section, so it is stated bluntly.
 
-\textbf{Every performance number in this build of the report is v1 era.} The
-committed \texttt{experiments/results/summary.csv} is the v1 sweep: single process,
-unlocked clocks, and rows whose commit hash no longer resolves. That covers the
-GEMM ladder table, the ladder figure, the gap decomposition, the supporting families
-table, the roofline points, and every percent of a vendor library quoted anywhere in
-this document. Read them as provisional. The withdrawn cuSPARSE percentages are not
-merely provisional; they are gone, for the reason in Section \ref{sec:limitations}.
+\textbf{Every performance number in this build of the report is measured under one
+protocol.} The committed \texttt{experiments/results/summary.csv} holds 984 rows at
+commit \texttt{1155de4}, 982 measured and 2 recorded refusals, produced on
+2026-09-03 and 2026-09-04. The conditions, from the columns of the file itself:
+
+\begin{itemize}
+  \item \textbf{Clock.} The graphics clock was locked with
+    \texttt{nvidia-smi -lgc 2500} before anything was configured, and the lock was
+    verified by reading \texttt{clocks.gr} back. Every row carries
+    \texttt{clock\_locked=true} and \texttt{locked\_clock\_mhz=2500}. The observed
+    \texttt{median\_sm\_clock\_mhz} is 2497 on 895 rows, 2490 on 84, 2482 on two
+    and 2475 on one. The largest drift from the lock is 1.0 percent against a gate
+    that fails the whole sweep at 2 percent, so no row was rejected. Four rows, the
+    FP32 GEMM group at 4096 cubed, carry \texttt{throttled=true} from an NVML
+    throttle reason at 55 to 57 C and up to 203.6 W; their clock did not move and
+    they are kept and quoted, with the flag visible in the file.
+  \item \textbf{Repeats.} Five independent process repeats per configuration, each
+    a fresh process, with a bootstrap 95 percent interval over the per process
+    medians recorded as \texttt{ci95\_lo\_ms} and \texttt{ci95\_hi\_ms}. The ladder
+    figure draws those intervals as error bars.
+  \item \textbf{Toolchain.} \texttt{cuda\_runtime} and \texttt{cuda\_driver} both
+    13030 (CUDA 13.3) on every row, host compiler g++-14.3, inside WSL2. Peak
+    temperature over the campaign was 61 C and peak power 203.6 W.
+  \item \textbf{Baselines.} \texttt{cublas\_math\_mode} is
+    \texttt{CUBLAS\_DEFAULT\_MATH} on every row, and the autotuned baseline is
+    measured as its own variant beside it rather than being conflated with it.
+  \item \textbf{Schema.} \texttt{schema\_version} 2 on every row, so no v1 row that
+    re-measured its own baseline is mixed into this summary.
+\end{itemize}
+
+The tile family adds \texttt{tile\_sweep.csv}, 98 rows under the same protocol, all
+at 2497 MHz. Three scan rows were re-measured after a fix to
+\texttt{ckl::scan\_tolerance} and carry a \texttt{row\_note} saying so on their own
+face; the fix changed the verifier that decides whether a kernel may be timed and
+nothing in the kernels, the plan, the launch path or the timing loop, and
+\texttt{docs/benchmarking.md} states the rule that permits stamping them with the
+sweep commit.
 
 \textbf{Every compile time fact here is current.} The register allocation study, the
 SASS instruction mix, the tile family's register and shared memory footprints, and
 the shape constraints are produced by the 1.1.0 toolchain from the current tree. They
 need no GPU, so they do not depend on the clock protocol at all.
 
-\textbf{Every 1.1.0 family performance number reads pending.} The tile family, the
-predicated tails, split-K, stream-K, the CUTLASS reference line, the SpMV matrix
-suite, FFT and convolution, and reduction and scan have no throughput rows in the
-committed summary, so their tables carry the word \emph{pending} in place of a
-number. The generator writes it there deliberately, and no estimate is substituted.
-The owner sweep at locked clocks is what fills them in, and it is the one action
-that closes both this section and the corrections register.
+\textbf{What still reads pending, and why.} Two things, and neither is estimated.
+The \texttt{dram\_bytes\_sum} column of the summary reads \texttt{pending ncu
+round}: the figures exist on the round 15 to 17 profiler pages and are quoted in
+Section \ref{sec:limitations} and the diagnostic log, but re-summarizing the sweep
+is what moves them into the column. And the register study's throughput column
+reads pending until \texttt{benchmarks/register\_study.py -{}-measure} runs at locked
+clocks; everything else in that table is a ptxas fact and is filled in. The
+generator writes the word deliberately in both places and substitutes nothing.

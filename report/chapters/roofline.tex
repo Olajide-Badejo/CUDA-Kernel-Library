@@ -31,10 +31,22 @@ ceiling. \rooflinecaption}
 
 The chart is built to take four families rather than one. The profiler emits an
 operating point per variant and the plotter draws whichever points the CSV carries,
-so the SpMV, FFT and scan points join the chart when their sweep rows land without
-a code change. The caption above names which families are on the chart today and
-which are pending, and it is generated rather than written, so it cannot claim a
-family that is not there.
+so the SpMV, FFT and scan points join the chart when their rows land without a code
+change. Those rows are not there yet: the benchmark sweep measured all three
+families, but the roofline profiler is a separate tool and it has not been re-run
+to emit operating points for them, so the chart still carries GEMM and GEMV only.
+The caption above names which families are on it and which are absent, and it is
+generated from the CSV rather than written, so it cannot claim a family that is not
+drawn.
+
+One number on this chart deserves a caveat that the figure cannot carry. The
+ceilings come from a probe that ran at 2842 MHz, while every ladder measurement in
+this report was taken under a 2497 MHz lock. The two are kept separate on purpose:
+percent of roof is quoted against the locked clock roof of 61,366 GFLOP/s
+throughout Section \ref{sec:gap} and the gate scoreboard, never against the 69,845
+the probe measured. Dividing a locked measurement by an unlocked roof would
+understate the kernel by 14 percent, and dividing an unlocked measurement by a
+locked roof would flatter it by the same, so neither is done anywhere.
 
 The roofline also settles one epilogue fusion decision, which is the smallest and
 cleanest use of the model in the project. A standalone bias plus ReLU pass has an

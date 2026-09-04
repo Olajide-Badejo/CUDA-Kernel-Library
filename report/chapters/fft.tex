@@ -1,9 +1,12 @@
 \section{FFT and convolution}
 \label{sec:fft}
 
-The FFT family is new in 1.1.0. Its mechanisms are implemented and tested; its
-performance rows are pending the sweep, and Table \ref{tab:fft} says so in every
-cell that would carry a number.
+The FFT family is new in 1.1.0. Its mechanisms are implemented and tested, and the
+locked clock sweep measured them. The result is a clean loss to cuFFT with a fully
+diagnosed cause, which is more useful than a narrow win would have been: the best
+hand rung reaches 60.5 percent of cuFFT at $2^{20}$ and 38.3 percent at $2^{24}$,
+against a gate that asked for 70. Section \ref{sec:fftgate} below is the
+diagnosis.
 
 \subsection{Stockham, and why there is no bit reversal pass}
 
@@ -69,13 +72,73 @@ chapter around a stale picture.
 
 The plan's own selection rule divides the two traffic models by the two roofs of
 this part, the direct model by the FP32 roof and the FFT model by the measured DRAM
-roof. That is arithmetic and not a measurement. The crossing it predicts is exactly
-what the sweep exists to check, and the rule is provisional until the sweep runs.
+roof. That is arithmetic and not a measurement. The crossing it predicts is what
+the sweep exists to check, and the sweep now checks it: the crossings are read out
+of the committed rows by log interpolation and drawn in Figure \ref{fig:conv}, at
+$M = 777$ for $N = 2^{20}$ and $M = 1522$ for $N = 2^{22}$. Neither the chart nor
+the crossing is placed by hand; both come out of the generator.
 
 \begin{table}[htbp]
 \centering
 \input{tables/fft.tex}
-\caption{The FFT and convolution rungs. Traffic models are derived and stated in
-\texttt{docs/fft.md}; measured throughput and percent of cuFFT are pending.}
+\caption{The FFT and convolution rungs, measured at locked clocks. Traffic models
+are derived and stated in \texttt{docs/fft.md}. Each row is its canonical row at
+the largest size that rung was swept at, which for the convolution rungs means the
+largest filter length, so those four rows are not at a common $M$ and are not
+comparable with each other; Figure \ref{fig:conv} carries the $M$ dependence. For
+the convolution rows the percent is a ratio of wall times rather than of
+throughputs, for the reason below.}
 \label{tab:fft}
 \end{table}
+
+\paragraph{Why the convolution percent is a time ratio.} This one nearly shipped
+as a wrong number, so it is worth writing down. Every other percent in this report
+is a ratio of throughputs, which is safe when both sides count FLOP the same way.
+The convolution rungs do not: a direct time domain rung does $2NM$ FLOP and an FFT
+rung does about $5N\log N$ for the same answer, so dividing one rung's GFLOP/s by
+cuFFT's compares two models rather than two speeds. On the committed rows that
+does not merely blur the comparison, it inverts it. At $M = 8$ the direct constant
+rung runs in 0.0814 ms against cuFFT's 1.8603 ms, twenty three times faster, and
+the throughput ratio reads 77.5 percent, as though it had lost. At $M = 4096$ it
+runs in 9.1418 ms against 1.8588 ms, five times slower, and the throughput ratio
+reads 352.9 percent, as though it had won by a wide margin. Both kernels compute
+the same convolution, so the honest comparison is time, and the generator computes
+these four cells from the medians against the cuFFT row at the same $N$ and $M$.
+
+\subsection{The gate, and why the ladder loses}
+\label{sec:fftgate}
+
+Two of the family's gate clauses failed, and round 16 measured the cause of each
+rather than leaving them as shrugs.
+
+\paragraph{The traffic model has no L2 term.} The clause asks that measured
+\texttt{dram\_\_bytes.sum} land within 15 percent of the model each row declares.
+At $2^{24}$ it does: 1977.03 MB measured against a declared 2,147,483,648, which is
+3.5 percent low. At $2^{20}$ it fails badly, 64.08 MB against 117,440,512 declared,
+45.4 percent low, and the reason is that the ping pong buffers are 8 MB each at
+that length, so the whole working set sits inside the 48 MB L2 and six of the seven
+stage boundaries never reach DRAM. The model assumes all seven do. This is the
+clause doing its job rather than a defect in the measurement, and it has a
+consequence worth stating plainly: the effective GB/s of that row reads 1091.942,
+above the 579 GB/s DRAM roof of this part, and it is above the roof because 45
+percent of the bytes in its numerator were served by L2. That figure is therefore
+not usable as evidence of anything, and no percent of roof is quoted from it.
+
+\paragraph{The rungs trail cuFFT on passes, not on efficiency.} At $2^{24}$ the
+radix 8 rung is not running badly. Each of its eight stages runs at 83.47 percent
+DRAM Throughput and 552.35 GB/s against 10.06 percent Compute (SM) Throughput, so
+it is at about 95 percent of the measured DRAM roof on every pass it makes. It
+simply makes eight passes where cuFFT makes three: 1977.03 MB against 744.37 MB, a
+factor of 2.66, and the committed medians are 3.721280 ms against 1.426944 ms, a
+factor of 2.61. Those two ratios agreeing to within 2 percent is the whole
+diagnosis. Radix 8 is the wrong lever, because it reduces stages inside a pass and
+the cost is the number of passes. The four step form and a larger resident
+transform are the levers that move that number, and they are the queued work.
+
+One prediction made earlier in this chapter was wrong and is corrected rather than
+deleted. The expected limiter on the resident rung was a stride $2^s$ bank conflict
+in the butterfly exchange. The rung measures \emph{zero} conflicts against 319,488
+shared load wavefronts. The real constraint is occupancy: 65.54 KB of dynamic
+shared memory per block gives one block per SM and 16.65 percent achieved
+occupancy, at 34.04 percent Memory Throughput and 26.41 percent Compute SOL, so it
+is latency bound with nothing to hide the latency behind.

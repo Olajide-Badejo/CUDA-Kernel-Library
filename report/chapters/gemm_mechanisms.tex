@@ -2,13 +2,15 @@
 \label{sec:mechanisms}
 
 Section \ref{sec:gap} ends on a hypothesis: the residual gap to cuBLAS is mostly
-kernel selection. The four mechanisms in this section are what test it. All four
-are implemented, tested and profiled at compile time; none of them has a
-throughput number yet, because the tile sweep that produces those numbers runs
-under the locked clock protocol and that is an owner action. Every performance
-column below therefore reads \emph{pending}, and the generator that writes these
-tables leaves it that way rather than filling it from a model. The mechanisms are
-documented in full in \texttt{docs/gemm.md}.
+kernel selection. The four mechanisms in this section are what test it, and the
+locked clock sweep has now run them: 98 rows in
+\texttt{experiments/results/tile\_sweep.csv} for the family, plus split-K and
+stream-K rows in the main summary at the small shapes they target. The hypothesis
+survives in part. Tile selection is worth a great deal, 28 points of cuBLAS at
+8192 cubed between the best and worst member of the family on an identical
+mainloop. The two alternative decompositions are worth much less than expected and
+are not uniformly worth anything at all. The mechanisms are documented in full in
+\texttt{docs/gemm.md}.
 
 \subsection{The tile family}
 
@@ -18,8 +20,9 @@ instantiations. Every warp tile is 64 by 32, which is why the accumulator stays 
 64 registers across the whole family: the shapes differ in shared memory footprint
 and in how badly they quantize against 48 SMs, not in register pressure. Nothing
 spills. The register and shared memory columns in Table \ref{tab:tiles} come from
-\texttt{nvcc -{}-resource-usage} at sm\_120, so they are compile time facts and are
-filled in; the throughput column is the one waiting on the sweep. The shape
+\texttt{nvcc -{}-resource-usage} at sm\_120, so they are compile time facts; the
+throughput column is the tile sweep, quoted at one shape so the column compares
+tiles rather than shapes. The shape
 constraints are \texttt{static\_assert}s rather than comments: three stages inside
 the 99 KB per block opt-in, warps inside the 48 an SM carries, the staging work
 dividing evenly across the block, and a warp tile that the \texttt{m16n8k16} shape
@@ -27,13 +30,24 @@ divides.
 
 Shipping a family rather than a constant is the Nath, Tomov and Dongarra
 argument~\cite{nath2010}: which tile wins is a property of the shape and the part,
-and the way to find out is to instantiate them all and measure.
+and the way to find out is to instantiate them all and measure. The sweep bears
+that out. 128 by 128 by 32 takes the two largest shapes, 94.3 percent of cuBLAS at
+4096 cubed and 91.4 at 8192, but it is not the answer everywhere: at 512 cubed it
+falls to 53.5 percent while 64 by 128 by 64 and 128 by 64 by 64 both reach 85.2,
+and at 128 cubed 128 by 64 by 64 leads at 73.3 against its 57.9. The wide tiles
+fail the same way at small shapes for the same reason: 256 by 128 by 32 measures
+30.7 percent at 512 cubed, where its 512 threads and 73,728 bytes of shared memory
+buy nothing and quantize badly against an output that is four tiles across. The
+spread at one shape is the argument for shipping the family: 62.9 to 91.4 percent
+of cuBLAS at 8192 cubed, from six kernels that differ only in their block extents.
 
 \begin{table}[htbp]
 \centering
 \input{tables/gemm_tiles.tex}
 \caption{The tile family. Registers and shared memory are compile time facts from
-the resource usage report; relative throughput awaits the locked clock tile sweep.}
+the resource usage report. Throughput is the committed tile sweep, all six rows at
+the same shape, since a column that quoted each tile at whatever shape it happened
+to be measured at would compare nothing.}
 \label{tab:tiles}
 \end{table}
 
@@ -58,8 +72,13 @@ addresses. The pipeline structure does not change: the barrier that already
 separates the stage writing a buffer from the iteration reading it covers a
 synchronous store just as well as an asynchronous one. The scalar half precision
 path still exists but \texttt{Algo::kAuto} never routes to it, and \texttt{chosen}
-reports whatever did run, so there is no silent fallback. Cost of the predicated
-tails relative to the aligned path: pending.
+reports whatever did run, so there is no silent fallback. The sweep exercises this:
+36 of the 98 tile sweep rows are at the six shapes that 128 does not divide, among
+them 127 cubed, 129 by 257 by 193, 1000 cubed and 4096 by 4090 by 4096, and all 36
+report \texttt{chosen=tile\_family}, so the real mainloop ran in every case and
+nothing rerouted. What is not measured is the cost of the tails against the aligned
+path, because there is no longer an unpredicated kernel to measure them against;
+the comparison that would answer it died with the reroute it replaced.
 
 \subsection{Split-K}
 
@@ -83,7 +102,16 @@ driver allocates and frees its own around the launch, which is correct but is an
 allocation a benchmark must not time. The slice count a caller asks for is a
 request, because each slice is rounded up to a whole number of the tile's K step,
 and \texttt{ckl::gemm\_split\_k\_slices} reports how many were actually used.
-Speedup at the shapes where waves are scarce: pending.
+
+\paragraph{Measured, and it does not deliver.} Against the data parallel mainloop
+at the same shape, split-K ranges from 0.75x to 1.18x over 128 to 768 cubed. It
+wins at 256 cubed (1.18x) and 512 cubed (1.10x), and it loses at 128 cubed (0.84x)
+and 768 cubed (0.75x). The shape of that result makes sense once it is on the page:
+at 128 cubed the whole output is one tile and the fixup pass is pure overhead added
+to a call that was already trivial, and by 768 cubed there are 36 tiles competing
+for 96 slots, so the wave starvation split-K exists to fix has largely gone away
+while its extra pass over the workspace has not. The useful window is narrow and it
+is in the middle. The mechanism is correct and tested; this is what it is worth.
 
 \subsection{Stream-K}
 
@@ -117,23 +145,38 @@ block and not just the one raising the flag. And the persistent loop carries a
 from one tile to the next and the next tile's \texttt{cp.async} stores would
 otherwise race the previous tile's \texttt{ldmatrix} reads. That last one is not a
 guess: it is the barrier \texttt{compute-sanitizer -{}-tool racecheck} reports when
-it is removed. Speedup on small and odd shapes: pending.
+it is removed.
+
+\paragraph{Measured, and it delivers less than split-K.} Stream-K ranges from 0.61x
+to 1.18x over the same 128 to 768 cubed. It matches split-K's 1.18x at 256 cubed,
+is neutral at 128 cubed, and falls to 0.61x at both 512 and 768 cubed, where
+split-K was still ahead of the mainloop at one of the two. So the mechanism that
+was supposed to fix split-K's extra pass over C is the slower of the two wherever
+they differ. I am not going to explain that from the design, because I have not
+profiled it: no ncu round covers stream-K, and the flag protocol, the persistent
+loop's extra barrier and the workspace traffic are all candidates. What the numbers
+support is the narrow claim that stream-K, as implemented here, does not beat the
+data parallel mainloop at the shapes it was supposed to help most. Profiling it is
+the round that would say why, and it has not been run.
 
 \subsection{Dispatch}
 
 \texttt{Algo::kAuto} on an FP16 input with an FP32 output now scores every tile in
 the family against the shape, using wave quantization and the shared memory
 budget, and selects a tile, a decomposition, and a slice count. The heuristic
-reads the tile sweep CSV when one is present. The committed sweep carries
-\texttt{clock\_locked=false}, which means the heuristic must not be tuned from it,
-and it is not. Table \ref{tab:decomp} is the decomposition summary; like the tile
-table, its performance columns wait on the sweep.
+reads the tile sweep CSV when one is present. That CSV is now present and every one
+of its 98 rows carries \texttt{clock\_locked=true} at 2497 MHz, so the heuristic
+reads measured data rather than the untuned guard it shipped with. Re-running
+\texttt{ctest -L gpu} after committing it is part of the procedure, because the
+dispatch tests assert on the plan the heuristic returns.
 
 \begin{table}[htbp]
 \centering
 \input{tables/gemm_decomp.tex}
-\caption{The decomposition mechanisms and what each one is expected to fix.
-Measured speedups are pending the locked clock sweep; the expectations are stated
-as hypotheses and are not evidence.}
+\caption{The decomposition mechanisms, what each one is meant to fix, and what the
+locked clock sweep measured. The speedup cells are ratios against the data parallel
+mainloop at the same shape, computed by the generator from the committed rows; a
+range is given rather than a single number because both alternatives win at some
+shapes and lose at others, and that spread is the result.}
 \label{tab:decomp}
 \end{table}

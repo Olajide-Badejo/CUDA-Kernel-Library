@@ -29,9 +29,11 @@ which is why an FP32 rung can show a higher percent than a faster tensor rung.
 \label{sec:negative}
 
 The first optimization in every CUDA course is to stage the operand tiles through
-shared memory. On this part it is a regression. The naive kernel reaches 1908
+shared memory. On this part it is a regression. The naive kernel reaches 1810
 GFLOP/s at 4096 cubed; the shared memory tiled kernel that was supposed to improve
-on it reaches 1584, which is 17 percent slower. This is the most interesting
+on it reaches 1455, which is 19.6 percent slower. The locked clock sweep made the
+result stronger rather than weaker: the unlocked v1 measurement put the gap at 17
+percent, and holding the clock fixed widened it. This is the most interesting
 result in the project, and it is reported here as a section rather than as an
 aside because it inverts what the textbook says to do first.
 
@@ -90,8 +92,19 @@ tried and reverted (it costs occupancy). The bank conflict counter then shows th
 real problem: 219 million shared load conflicts. A shared memory swizzle, applied
 identically to the stores and the loads so correctness is unconditional, cuts them
 to 33.7 million, collapses the memory Speed of Light from 76 to 30 percent, and
-lifts compute to 83 percent. The kernel now reaches 89.9 percent of cuBLAS at 4096
-cubed and 88.9 percent at 8192 cubed, and passes the compute bound gate.
+lifts compute to 83 percent. Those two conflict figures are v1 measurements read
+out of a binary report that is not committed, and correction A6 records that; the
+committed page for the kernel that ships is round 12, which measures 106,296
+conflicts against 50,437,944 shared load wavefronts at 4096 cubed and 465,929
+against 403,119,113 at 8192, so 0.21 and 0.12 percent.
+
+Under the locked clock the kernel reaches 94.8 percent of cuBLAS at both 4096 and
+8192 cubed. It passes the compute bound gate at 4096, where Compute (SM) Throughput
+is 90.38 percent against Memory Throughput 26.19, a ratio of 3.45 against the 2
+the gate asks for. At 8192 it does not: compute rises to 92.46 percent but memory
+rises further to 70.91, the ratio falls to 1.30, and that clause fails. Section
+\ref{sec:gap} decomposes what is left, and the failure is treated there as a
+result with a cause rather than as a gate to be reworded.
 
 \subsection{The remaining gap, decomposed}
 \label{sec:gap}

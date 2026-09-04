@@ -13,8 +13,12 @@ Sources walked:
 
 Hashes listed in experiments/results/legacy_hashes.txt are allowed through.
 That file records the v1 data whose history was rewritten before this gate
-existed (defect A1); it goes away when the owner re-runs the sweep and the ncu
-rounds on current history.
+existed (defect A1). The re-run happened: summary.csv and the ncu rounds from 12
+on carry hashes that resolve, so the allowlist no longer covers anything this
+release claims. It is kept, scoped, because the artifacts those dead hashes
+stamp are still in the tree as history: the archived v1 rows in sweep.jsonl and
+the round 01 to 09 meta pages. Its own header carries the reasoning. A hash that
+is not already in it is a real failure and is never added to make a build pass.
 
 Exit code 0 means every hash outside the allowlist resolves, 1 means at least
 one does not. Wired into `make check-style`.
@@ -152,8 +156,9 @@ def main() -> int:
           f"{len(legacy_seen)} known dead v1 hash(es) allowed by "
           f"{ALLOWLIST.relative_to(REPO)}.")
     if legacy_seen:
-        print("  the allowlist is a standing debt; it is deleted when the sweep and the "
-              "ncu rounds are re-run on current history.")
+        print("  those hashes guard archived v1 artifacts only (the superseded rows in "
+              "sweep.jsonl and the round 01 to 09 meta pages). No current claim rests "
+              "on them; see the header of the allowlist.")
     return 0
 
 

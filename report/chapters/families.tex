@@ -12,22 +12,28 @@ limited and never gets near either. On the roofline it sits on the bandwidth
 diagonal, which is the point of including it: the same chart that shows GEMM far
 into the compute bound region shows GEMV pinned to the memory bound one.
 
-Three GEMV rows in the table read above 100 percent of cuBLAS, and one of them,
-the warp kernel at 2048, reads 208.6. That is not a result, it is the same defect
-correction A2 names: the v1 harness carried setup work inside a vendor timed
-region, and A2 lists this row explicitly as one of the consequences visible in the
-committed data. It stays in the table because deleting an inconvenient row is
-worse than printing it next to its explanation, and the number will be replaced,
-not repaired, when the sweep is re-run.
+The v1 table had the warp kernel at 2048 reading 208.6 percent of cuBLAS, which was
+not a result but the defect correction A2 names: setup work inside a vendor timed
+region. With the wrapper fixed and the sweep re-run at locked clocks, that row
+reads 111.2 percent. Four GEMV rows still sit above 100, and at this point they
+are believable rather than suspicious: the vectorized and warp kernels beat cuBLAS
+SGEMV at 1024 and 2048 square, by 17.7 percent at most, and both fall back under it
+at 4096 and 8192, where the problem is large enough that the vendor's own
+decomposition wins. A memory bound kernel beating a vendor library on a small
+problem is an ordinary outcome, and the way to tell it from a measurement defect
+was to fix the defect and look again.
 
 TRSM reduces most of its work to a GEMM style trailing update. The blocked kernel
 agrees with cuBLAS to about $10^{-7}$, which is a correctness result and not a
-performance one: on speed it reaches 381 GFLOP/s against cuBLAS STRSM's 1200, so
-31.8 percent, and closing that gap is open work. The naive column at a time kernel
-is kept in the table as the honest baseline rather than deleted for being slow.
-Both percentages are provisional: correction A2 records that the v1 TRSM benchmark
-restored its right hand side inside the timed region, on both the kernel and the
-baseline, and the fix has not been re-measured yet.
+performance one: on speed it reaches 322.8 GFLOP/s at 2048 by 256 against cuBLAS
+STRSM's 1308.9, so 24.7 percent, and closing that gap is open work. That percentage
+is \emph{lower} than the 31.8 the v1 table reported, and the reason is worth
+stating: correction A2 removed a host to device restore copy from inside the timed
+region on both sides, and taking setup out of the window made the vendor baseline
+faster by more than it made my kernel faster. Fixing a measurement defect is
+supposed to be able to move a number in the unflattering direction, and this one
+did. The naive column at a time kernel is kept in the table as the honest baseline
+rather than deleted for being slow.
 
 The cuSOLVER LU and Cholesky paths are checked by residual, about $5.6 \times
 10^{-7}$ and $4.3 \times 10^{-7}$, rather than merely by the absence of an error

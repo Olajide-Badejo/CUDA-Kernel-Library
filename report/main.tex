@@ -36,20 +36,25 @@ from a naive baseline to a compute bound tensor core kernel. Every performance
 figure is my kernel measured against the vendor library (cuBLAS, cuSPARSE,
 cuFFT, or CUB) on one GPU, an NVIDIA RTX 5070, in the same process. There are no
 cross device comparisons. The result that shaped the work is a negative one:
-shared memory tiling, the first optimization every course teaches, is 17 percent
+shared memory tiling, the first optimization every course teaches, is 19.6 percent
 slower than the naive kernel it replaces on this cache rich part, and Section
 \ref{sec:negative} reports that as a finding in its own right. The top FP16
-kernel passes the compute bound gate and reaches 89.9 percent of cuBLAS at 4096
-cubed and 88.9 percent at 8192 cubed, with a geometric mean of 79.9 percent over
-the four swept shapes. Alongside the GEMM ladder the library carries GEMV, TRSM,
-CSR SpMV, FFT and convolution, reduction and scan, and a cuSOLVER wrapper, all
-verified against the vendor library, with a roofline whose compute ceilings come
-from the hardware rather than from a vendor library. The performance figures in
-this build of the report were collected before the benchmark clocks were locked
-and before two timed region defects were fixed; the corrections register in
-\texttt{docs/CORRECTIONS.md} lists what that affects, Section \ref{sec:repro}
-says which numbers are v1 era, and every number awaiting the 1.1.0 sweep reads
-\emph{pending} rather than being estimated.
+kernel reaches 94.8 percent of cuBLAS at both 4096 and 8192 cubed, a geometric
+mean of 84.7 percent from 1024 to 8192 cubed, which is 88.98 and 91.87 percent of
+the hardware tensor roof at the locked clock. Alongside the GEMM ladder the library
+carries GEMV, TRSM, CSR SpMV, FFT and convolution, reduction and scan, and a
+cuSOLVER wrapper, all verified against the vendor library, with a roofline whose
+compute ceilings come from the hardware rather than from a vendor library.
+
+Every figure here comes from one campaign of 984 rows at a locked 2497 MHz
+graphics clock, five independent process repeats per configuration with a
+bootstrap interval on each, described in Section \ref{sec:repro}. Four gate
+clauses failed and are reported with the mechanism named rather than restated:
+the compute bound gate is one clause short at 8192 cubed on L2 residency, merge
+path SpMV misses its bar on one power law matrix because of the gather, the FFT
+ladder trails cuFFT on the number of global passes it makes, and the look-back
+scan misses CUB parity by under a point at two of five sizes on tile size. Two
+columns remain unmeasured and read \emph{pending} rather than being estimated.
 \end{abstract}
 
 \newpage

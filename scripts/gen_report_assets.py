@@ -74,18 +74,24 @@ TILE_FAMILY = [
 TILE_STAGES = 3
 TILE_BYTES_PER_ELEMENT = 2
 
-# The decomposition mechanisms: what each one is for, and what would have to be
-# measured to say it works. No speedup is stated because none is measured.
+# The decomposition mechanisms: what each one is for, and what the sweep measured.
+# The fourth element is the summary variant the speedup column is computed from,
+# against the data parallel mainloop at the same shape; None means the row is not a
+# variant of its own and the last column is filled by hand from structure rather
+# than from a timing.
 DECOMPOSITIONS = [
     ("data parallel", "one CTA per output tile", "the baseline decomposition",
-     "measured (the ladder rows above)"),
+     None, "1.00x by definition"),
     ("predicated tails", "shapes the tile does not divide",
-     "one mainloop for every shape, no silent reroute", PENDING),
+     "one mainloop for every shape, no silent reroute", None, None),
     ("split-K", "few waves, long contraction",
-     "idle SMs when the output is smaller than one wave", PENDING),
+     "idle SMs when the output is smaller than one wave", "splitk", None),
     ("stream-K", "few waves, any contraction",
-     "the same, without a full extra pass over C", PENDING),
+     "the same, without a full extra pass over C", "streamk", None),
 ]
+
+# The decomposition variants are measured against this one, at the same shape.
+DECOMP_BASELINE = ("gemm", "mma_opt", "fp16")
 
 # The FFT, convolution, reduction and scan rungs. Each entry names the family and
 # the variant exactly as benchmarks/sweep.py writes them, so the measured columns
@@ -344,6 +350,12 @@ def write_gemm_gap(rows) -> None:
     family, variant, dtype = TOP_VARIANT
     body = []
     for r in find_all(rows, family, variant, dtype):
+        # Canonical only. The protocol writes a graph launch row and an unflushed
+        # row beside the row of record at the smaller shapes, and all three carry
+        # the same shape; listing them here put "128 cubed" in the table four
+        # times with four different percentages and no column to tell them apart.
+        if not is_canonical_row(r):
+            continue
         m, n = int(r["m"]), int(r["n"])
         pct = fnum(r, "pct_baseline")
         if pct is None:
@@ -363,18 +375,61 @@ def write_gemm_gap(rows) -> None:
                   body))
 
 
+def tile_table_shape(tile_rows) -> int | None:
+    """The largest square shape at which every tile in the family has a row.
+
+    A decision table compares tiles, so every throughput cell in it has to come
+    from the same shape. Taking the first row that happens to name each tile
+    reads one tile at 8192 by 64 by 4096 and the next at 128 cubed, which puts
+    303 and 15,135 in the same column and compares nothing. The sweep visits
+    both square and rectangular shapes, so the square subset is selected here and
+    the largest shape common to the whole family is the one quoted; the caller
+    puts that shape in the header so the reader knows what was held fixed.
+    """
+    names = {f"{bm}x{bn}x{bk}" for bm, bn, bk, _wm, _wn in TILE_FAMILY}
+    by_shape: dict[int, set[str]] = {}
+    for r in tile_rows:
+        tile = r.get("tile") or ""
+        if tile not in names:
+            continue
+        try:
+            m, n, k = int(r["m"]), int(r["n"]), int(r["k"])
+        except (KeyError, ValueError):
+            continue
+        if not (m == n == k):
+            continue
+        by_shape.setdefault(m, set()).add(tile)
+    complete = [m for m, seen in by_shape.items() if seen == names]
+    return max(complete) if complete else None
+
+
 def write_gemm_tiles(tile_rows) -> None:
-    """The tile family: structure and derived shared memory, throughput pending."""
+    """The tile family: structure, derived shared memory, and measured throughput.
+
+    Shape and warp arrangement are structural facts about what is instantiated;
+    the shared memory column is arithmetic on the shape. The last two columns are
+    the tile sweep, all at one shape, and they read pending when that sweep has
+    not run.
+    """
+    shape = tile_table_shape(tile_rows)
+    at = f"{shape} cubed" if shape else "the swept shape"
     body = []
     for bm, bn, bk, wm, wn in TILE_FAMILY:
         threads = wm * wn * 32
         shared = (bm * bk + bn * bk) * TILE_BYTES_PER_ELEMENT * TILE_STAGES
         name = f"{bm}x{bn}x{bk}"
         r = None
-        for candidate in tile_rows:
-            if candidate.get("tile") == name:
-                r = candidate
-                break
+        if shape is not None:
+            for candidate in tile_rows:
+                if candidate.get("tile") != name:
+                    continue
+                try:
+                    m, n, k = int(candidate["m"]), int(candidate["n"]), int(candidate["k"])
+                except (KeyError, ValueError):
+                    continue
+                if m == n == k == shape:
+                    r = candidate
+                    break
         gflops = f"{float(r['gflops']):,.0f}" if r and fnum(r, "gflops") else PENDING
         pct = (f"{float(r['pct_baseline']):.1f}"
                if r and fnum(r, "pct_baseline") is not None else PENDING)
@@ -382,16 +437,81 @@ def write_gemm_tiles(tile_rows) -> None:
     write(TABLES / "gemm_tiles.tex",
           tabular("llrrrr",
                   ["tile", "warps", "threads", "shared bytes, 3 stages",
-                   "GFLOP/s", "percent of cuBLAS"],
+                   f"GFLOP/s at {at}", "percent of cuBLAS"],
                   body))
 
 
-def write_gemm_decomp() -> None:
-    body = [[latex_escape(a), latex_escape(b), latex_escape(c), latex_escape(d)]
-            for a, b, c, d in DECOMPOSITIONS]
+def decomp_speedup(rows, variant: str) -> str:
+    """Each shape's ratio against the data parallel mainloop, as a measured range.
+
+    A single number would be a lie here: both alternative decompositions win at
+    some shapes and lose at others, and that spread is the result. The cell
+    therefore carries the range and the shapes it was measured over, and reads
+    pending only when the sweep has no rows for the variant at all.
+    """
+    family, base_variant, dtype = DECOMP_BASELINE
+    base = {}
+    for r in find_all(rows, family, base_variant, dtype):
+        if is_canonical_row(r) and fnum(r, "gflops"):
+            base[int(r["m"])] = float(r["gflops"])
+    ratios = []
+    for r in find_all(rows, family, variant, dtype):
+        if not is_canonical_row(r):
+            continue
+        gflops = fnum(r, "gflops")
+        m = int(r["m"])
+        if gflops and base.get(m):
+            ratios.append((m, gflops / base[m]))
+    if not ratios:
+        return PENDING
+    ratios.sort()
+    lo = min(x for _m, x in ratios)
+    hi = max(x for _m, x in ratios)
+    shapes = f"{ratios[0][0]} to {ratios[-1][0]}"
+    return f"{lo:.2f}x to {hi:.2f}x over {shapes} cubed"
+
+
+def odd_shape_count(tile_rows) -> tuple[int, int]:
+    """Rows, and distinct shapes, with an extent no tile in the family divides.
+
+    128 is the largest extent any tile in TILE_FAMILY has, so a shape with a
+    dimension that 128 does not divide is one where some tile in the family must
+    predicate its edge. That is the condition the tails exist for.
+    """
+    shapes = set()
+    count = 0
+    for r in tile_rows:
+        if not (r.get("tile") or ""):
+            continue
+        try:
+            m, n, k = int(r["m"]), int(r["n"]), int(r["k"])
+        except (KeyError, ValueError):
+            continue
+        if m % 128 == 0 and n % 128 == 0 and k % 128 == 0:
+            continue
+        shapes.add((m, n, k))
+        count += 1
+    return count, len(shapes)
+
+
+def write_gemm_decomp(rows, tile_rows) -> None:
+    rows_odd, shapes_odd = odd_shape_count(tile_rows)
+    body = []
+    for label, targets, fixes, variant, fixed in DECOMPOSITIONS:
+        if fixed is not None:
+            measured = fixed
+        elif variant is not None:
+            measured = decomp_speedup(rows, variant)
+        elif label == "predicated tails":
+            measured = (f"{rows_odd} rows at {shapes_odd} shapes ran the real mainloop"
+                        if rows_odd else PENDING)
+        else:
+            measured = PENDING
+        body.append([latex_escape(label), latex_escape(targets), latex_escape(fixes),
+                     latex_escape(measured)])
     write(TABLES / "gemm_decomp.tex",
           tabular("lllr", ["decomposition", "shapes it targets", "what it fixes",
-                           "measured speedup"], body))
+                           "measured"], body))
 
 
 def write_cutlass_gap(rows) -> None:
@@ -520,28 +640,83 @@ def write_spmv_suite(rows) -> None:
                             "percent of cuSPARSE"], body))
 
 
-def write_rung_table(name: str, rungs, rows, vendor: str, third_header: str) -> None:
+# Families whose rungs compute the same answer by algorithms with different FLOP
+# counts. For these the sweep's pct_baseline, which is a ratio of throughputs,
+# compares two different models and is not a statement about speed; the percent is
+# recomputed here from the medians instead. See time_percent below.
+TIME_RATIO_FAMILIES = {"conv"}
+
+
+def time_percent(rows, r: dict[str, str]) -> float | None:
+    """Percent of the vendor baseline computed from wall time, not throughput.
+
+    Convolution is the case that forces this. A direct time domain rung does
+    2 N M FLOP and an FFT rung does about 5 N log N, so dividing one rung's
+    GFLOP/s by the other's compares two different models rather than two speeds,
+    and on the committed rows it inverts the answer: at M = 8 the direct constant
+    rung runs 0.0814 ms against cuFFT's 1.8603 ms, 23 times faster, while its
+    pct_baseline reads 77.46; at M = 4096 it runs 9.1418 ms against 1.8588 ms,
+    five times slower, while pct_baseline reads 352.91. Both kernels produce the
+    same convolution, so the honest comparison is the time one, and higher is
+    still better because this is a percent of the baseline's speed.
+    """
+    median = fnum(r, "median_ms")
+    if not median:
+        return None
+    family = r.get("family")
+    for candidate in rows:
+        if candidate.get("family") != family:
+            continue
+        if not str(candidate.get("variant", "")).startswith("baseline_"):
+            continue
+        if not is_canonical_row(candidate):
+            continue
+        if candidate.get("m") != r.get("m") or candidate.get("n") != r.get("n"):
+            continue
+        base = fnum(candidate, "median_ms")
+        if base:
+            return 100.0 * base / median
+    return None
+
+
+def write_rung_table(name: str, rungs, rows, vendor: str, third_header: str,
+                     metric: str = "gflops", metric_header: str = "GFLOP/s") -> None:
     """A mechanism table whose measured columns fill in when the rows land.
 
     Each rung names its family and variant exactly as the sweep writes them, so
-    the join is on the row identity and not on a guess at the label. A family that
-    is swept at several lengths contributes its canonical row at the largest
-    length, which is the one the roof arguments are stated at; the header says so.
+    the join is on the row identity and not on a guess at the label. A family
+    swept over more than one size contributes its canonical row at the largest
+    one, ordered on the whole shape rather than on `m` alone: the convolution grid
+    varies the filter length in `n` at a fixed signal length, so ordering on `m`
+    leaves a tie that file order would otherwise break, which is not a decision a
+    generated table should be making by accident.
+
+    The throughput column is named by the caller because the families do not share
+    a unit. Scan and reduction do a fixed two or three FLOP per element and the
+    sweep writes their `gflops` as zero on purpose: the quantity that means
+    anything for them is bytes moved per second, and the gate is stated in GB/s.
+    Printing that zero under a GFLOP/s header would be a wrong number rather than
+    a missing one.
     """
     body = []
     for family, variant, label, mechanism, derived in rungs:
         hits = [r for r in find_all(rows, family, variant) if is_canonical_row(r)]
-        r = max(hits, key=lambda x: int(x["m"])) if hits else None
-        gflops = fnum(r, "gflops") if r else None
-        pct = fnum(r, "pct_baseline") if r else None
+        r = max(hits, key=lambda x: (int(x["m"]), int(x["n"]))) if hits else None
+        value = fnum(r, metric) if r else None
+        if r is None:
+            pct = None
+        elif family in TIME_RATIO_FAMILIES:
+            pct = time_percent(rows, r)
+        else:
+            pct = fnum(r, "pct_baseline")
         body.append([
             latex_escape(label), latex_escape(mechanism), latex_escape(derived),
-            f"{gflops:.1f}" if gflops is not None else PENDING,
+            f"{value:.1f}" if value is not None else PENDING,
             f"{pct:.1f}" if pct is not None else PENDING,
         ])
     write(TABLES / name,
           tabular("lllrr", ["rung", "mechanism", third_header,
-                            "GFLOP/s at the largest swept length",
+                            f"{metric_header} at the largest swept size",
                             f"percent of {vendor}"], body))
 
 
@@ -632,8 +807,13 @@ def plot_ladder(series, sizes, any_interval: bool) -> None:
         width, zorder = (2.6, 6) if s["top"] else (1.6, 4)
         style = "-" if s["dtype"] in ("fp16", "bf16") else "--"
         if any_interval and all(p[2] is not None for p in s["points"]):
-            lo = [p[1] - p[2] for p in s["points"]]
-            hi = [p[3] - p[1] for p in s["points"]]
+            # A row whose five process repeats agreed exactly has a zero width
+            # interval, and the reciprocal that converts time to percent then
+            # lands a few parts in 1e15 either side of the point itself.
+            # matplotlib rejects a negative bar, so the clamp is arithmetic
+            # noise control, not a widening or a narrowing of any interval.
+            lo = [max(0.0, p[1] - p[2]) for p in s["points"]]
+            hi = [max(0.0, p[3] - p[1]) for p in s["points"]]
             ax.errorbar(xs, ys, yerr=[lo, hi], color=color, linestyle=style,
                         linewidth=width, marker=marker, markersize=5.5, capsize=3,
                         zorder=zorder, label=s["label"])
@@ -838,7 +1018,7 @@ def main() -> int:
         elif step == "tile family table":
             write_gemm_tiles(tiles)
         elif step == "decomposition table":
-            write_gemm_decomp()
+            write_gemm_decomp(rows, tiles)
         elif step == "cutlass gap table":
             write_cutlass_gap(rows)
         elif step == "families table":
@@ -848,7 +1028,8 @@ def main() -> int:
         elif step == "fft table":
             write_rung_table("fft.tex", FFT_RUNGS, rows, "cuFFT", "traffic model")
         elif step == "scan table":
-            write_rung_table("scan.tex", SCAN_RUNGS, rows, "CUB", "bytes moved")
+            write_rung_table("scan.tex", SCAN_RUNGS, rows, "CUB", "bytes moved",
+                             metric="effective_gbs", metric_header="effective GB/s")
         elif step == "register study table":
             write_register_study(study)
         elif step == "roofline figure":
