@@ -18,19 +18,39 @@
 // those runs are checked against a double precision reference scaled by the sum
 // of magnitudes instead.
 //
-// The tolerance model is tol(N) = c * sqrt(N) * FLT_EPSILON on the residual
+// The tolerance model is
+//
+//     tol(N, R) = (c_sqrt * sqrt(N) + c_mag * R) * FLT_EPSILON
+//
+// on the residual
 //
 //     max_i |got_i - ref_i| / max_j |x_j|
 //
-// which is the error measured in units of the input scale. For random signed
-// data the partial sums do a random walk of size sqrt(N) times that scale and
-// the rounding error is machine epsilon times that walk, times a slowly growing
-// factor for the depth of the reduction tree, so the ratio of the residual to
-// sqrt(N) * FLT_EPSILON is O(1) and c absorbs the depth term. c was calibrated
-// by ScanCalibration.DISABLED_ToleranceConstant below, which sweeps seeds,
-// lengths and rungs and reports the worst ratio it saw; the committed value in
-// ckl::scan_tolerance_c is that maximum with slack over it and no more, so the
-// tolerance is still a gate that can fail. docs/scan.md records the run.
+// which is the error measured in units of the input scale, with
+// R = sum_j |x_j| / max_j |x_j| measured from the data rather than assumed from
+// its length. Two things make the error and the model carries both.
+//
+// The first term is the random walk. For random signed data the partial sums do
+// a walk of size sqrt(N) times the input scale, and a tree combine's rounding is
+// machine epsilon times that walk with a slowly growing factor for the depth, so
+// the ratio to sqrt(N) * FLT_EPSILON is O(1) and c_sqrt absorbs the depth. A
+// reduction is only ever this term, and ckl::scan_tolerance(n) is that case.
+//
+// The second term is the accumulated magnitude. The two single pass scan rungs,
+// kLookback and kCub, carry a tile to tile prefix chain whose length grows with
+// N, and the rounding along a chain is bounded by the magnitude it accumulates
+// rather than by the square root of its length. Below about 2^23 the walk term
+// swamps it; above that it takes over. The first campaign is what found it: a
+// sqrt(N) only model passed every length the original calibration reached, which
+// stopped at 2^24, and was outgrown by a factor of two at 2^27 and 2^28. CUB
+// crossed the same line at the same lengths, which is what settled that this was
+// the model and not a defect in a rung of mine. docs/scan.md has the numbers.
+//
+// Both constants were calibrated by ScanCalibration.DISABLED_ToleranceConstant
+// below, which sweeps seeds, lengths, datasets and rungs and reports the worst
+// ratio it saw for each term; the committed values in ckl::scan_tolerance_c and
+// ckl::scan_magnitude_c are those maxima with slack over them and no more, so
+// the tolerance is still a gate that can fail.
 //
 // Integer types and the exact operators (max, min, last nonzero) are compared
 // exactly. There is no rounding in any of them, so a tolerance would only hide a
@@ -196,20 +216,6 @@ double reference_reduce(const std::vector<float>& in, ckl::ScanOp op) {
     return running;
 }
 
-// The running sum of magnitudes, which is what bounds the rounding error of a
-// prefix sum whatever the data does. It is the denominator the adversarial
-// datasets are checked against, because their answers cancel to near zero and a
-// relative error against the answer would be meaningless.
-std::vector<double> magnitude_prefix(const std::vector<float>& in) {
-    std::vector<double> out(in.size());
-    double running = 0.0;
-    for (std::size_t i = 0; i < in.size(); ++i) {
-        running += std::fabs(static_cast<double>(in[i]));
-        out[i] = running;
-    }
-    return out;
-}
-
 double largest_magnitude(const std::vector<float>& in) {
     double worst = 0.0;
     for (float x : in) {
@@ -218,23 +224,29 @@ double largest_magnitude(const std::vector<float>& in) {
     return worst > 0.0 ? worst : 1.0;
 }
 
+// R = sum_j |x_j| / max_j |x_j|, the second argument of the scan tolerance
+// model, measured from the data the kernel was actually given.
+double magnitude_ratio(const std::vector<float>& in) {
+    double total = 0.0;
+    for (float x : in) {
+        total += std::fabs(static_cast<double>(x));
+    }
+    return total / largest_magnitude(in);
+}
+
+// The one scan tolerance. Every scan gate in this file and the scan verifier in
+// benchmarks/bench_all.cpp go through ckl::scan_tolerance(n, R), so a benchmark
+// cannot pass a residual this suite would fail.
+double scan_tolerance_for(long long n, const std::vector<float>& in) {
+    return ckl::scan_tolerance(n, magnitude_ratio(in));
+}
+
 // The residual the tolerance model is stated in.
 double scaled_residual(const std::vector<float>& got, const std::vector<double>& ref,
                        double scale) {
     double worst = 0.0;
     for (std::size_t i = 0; i < ref.size(); ++i) {
         worst = std::max(worst, std::fabs(static_cast<double>(got[i]) - ref[i]) / scale);
-    }
-    return worst;
-}
-
-// The adversarial residual: divided by the sum of magnitudes up to that index.
-double magnitude_residual(const std::vector<float>& got, const std::vector<double>& ref,
-                          const std::vector<double>& magnitudes) {
-    double worst = 0.0;
-    for (std::size_t i = 0; i < ref.size(); ++i) {
-        const double denom = magnitudes[i] > 1e-300 ? magnitudes[i] : 1.0;
-        worst = std::max(worst, std::fabs(static_cast<double>(got[i]) - ref[i]) / denom);
     }
     return worst;
 }
@@ -440,11 +452,11 @@ TEST_P(ScanLadder, MatchesTheDoubleReferenceAtEveryLength) {
                 }
                 const std::vector<double> want = reference_scan(host, ckl::ScanOp::kSum, exclusive);
                 const double residual = scaled_residual(got, want, largest_magnitude(host));
-                EXPECT_LE(residual, ckl::scan_tolerance(n))
+                EXPECT_LE(residual, scan_tolerance_for(n, host))
                     << ckl::scan_algo_name(algo) << " n=" << n
                     << (exclusive ? " exclusive " : " inclusive ") << dataset_name(kind)
                     << " residual " << ckl::test::sci(residual) << " against "
-                    << ckl::test::sci(ckl::scan_tolerance(n));
+                    << ckl::test::sci(scan_tolerance_for(n, host));
             }
         }
     }
@@ -457,16 +469,21 @@ TEST_P(ScanLadder, AdversarialMagnitudesAgainstTheDoubleReference) {
         const std::vector<float> host =
             make_dataset(Dataset::kAdversarial, n, ckl::test::seed_stream(4));
         const ckl::DeviceBuffer<float> in = upload(host);
-        const std::vector<double> magnitudes = magnitude_prefix(host);
         for (bool exclusive : {false, true}) {
             const std::vector<float> got =
                 run_scan(plan, algo, ckl::ScanOp::kSum, exclusive, in, n, nullptr);
             const std::vector<double> want = reference_scan(host, ckl::ScanOp::kSum, exclusive);
-            const double residual = magnitude_residual(got, want, magnitudes);
-            EXPECT_LE(residual, ckl::scan_tolerance(n))
+            // The same measure and the same model as every other scan case. This
+            // dataset used to need its own, because a sqrt(N) bound says nothing
+            // about input that cancels; the magnitude term says it directly, and
+            // a dataset whose terms are huge and whose answer is tiny earns a
+            // large R and the bound that goes with it.
+            const double residual = scaled_residual(got, want, largest_magnitude(host));
+            EXPECT_LE(residual, scan_tolerance_for(n, host))
                 << ckl::scan_algo_name(algo) << " n=" << n
                 << (exclusive ? " exclusive" : " inclusive") << " adversarial residual "
-                << ckl::test::sci(residual);
+                << ckl::test::sci(residual) << " against "
+                << ckl::test::sci(scan_tolerance_for(n, host));
         }
     }
 }
@@ -519,7 +536,8 @@ TEST_P(ScanLadder, RunsInPlace) {
         CKL_CUDA_CHECK(cudaDeviceSynchronize());
         const std::vector<double> want = reference_scan(host, ckl::ScanOp::kSum, false);
         const double residual = scaled_residual(buffer.to_host(), want, largest_magnitude(host));
-        EXPECT_LE(residual, ckl::scan_tolerance(n)) << ckl::scan_algo_name(algo) << " in place";
+        EXPECT_LE(residual, scan_tolerance_for(n, host))
+            << ckl::scan_algo_name(algo) << " in place";
     }
 }
 
@@ -590,13 +608,22 @@ TEST_F(ScanDTypes, DoubleSumOnEveryRung) {
             const std::vector<double> got = out.to_host();
             long double running = 0.0L;
             long double worst = 0.0L;
+            long double accumulated = 0.0L;
+            long double scale = 0.0L;
             for (std::size_t i = 0; i < host.size(); ++i) {
                 running += static_cast<long double>(host[i]);
                 worst = std::max(worst, std::fabs(static_cast<long double>(got[i]) - running));
+                accumulated += std::fabs(static_cast<long double>(host[i]));
+                scale = std::max(scale, std::fabs(static_cast<long double>(host[i])));
             }
-            const long double bound = static_cast<long double>(ckl::scan_tolerance_c()) *
-                                      std::sqrt(static_cast<long double>(n)) *
-                                      static_cast<long double>(DBL_EPSILON);
+            // The scan model with DBL_EPSILON in place of FLT_EPSILON: both
+            // terms, the same two constants.
+            const long double ratio = scale > 0.0L ? accumulated / scale : 0.0L;
+            const long double bound = (static_cast<long double>(ckl::scan_tolerance_c()) *
+                                           std::sqrt(static_cast<long double>(n)) +
+                                       static_cast<long double>(ckl::scan_magnitude_c()) * ratio) *
+                                      static_cast<long double>(DBL_EPSILON) *
+                                      (scale > 0.0L ? scale : 1.0L);
             EXPECT_LE(worst, bound) << ckl::scan_algo_name(algo) << " fp64 n=" << n;
         }
     }
@@ -844,7 +871,7 @@ TEST_F(ScanDispatch, TheCEntryPointsAgreeWithTheCppOnes) {
     EXPECT_LE(std::fabs(static_cast<double>(single.to_host()[0]) - reference) / scale,
               ckl::scan_tolerance(n));
     const std::vector<double> want = reference_scan(host, ckl::ScanOp::kSum, false);
-    EXPECT_LE(scaled_residual(out.to_host(), want, scale), ckl::scan_tolerance(n));
+    EXPECT_LE(scaled_residual(out.to_host(), want, scale), scan_tolerance_for(n, host));
 
     // The refusal crosses as a status, and the detail is readable afterwards.
     const ckl_status_t refused = ckl_reduce(handle, n, CKL_SCAN_F32, CKL_SCAN_OP_LAST_NONZERO,
@@ -1071,6 +1098,46 @@ TEST_F(ScanSlow, ScanAt2To28) {
     }
 }
 
+// The lengths the campaign sweeps, in fp32, against the double reference and the
+// committed tolerance model. This case exists because it did not: the ladder
+// above stops at 1048573 and the integer case above is exact, so nothing in this
+// suite had ever run a float prefix sum at the two lengths the sweep runs, and
+// the first locked clock campaign found the tolerance model outgrown there with
+// no test to catch it. A model the benchmark uses and the suite does not check
+// is not one model.
+TEST_F(ScanSlow, FloatScanAtTheSweptLengths) {
+    for (long long n : {1LL << 27, 1LL << 28}) {
+        const std::vector<float> host =
+            make_dataset(Dataset::kRandom, n, ckl::test::seed_stream(11));
+        const ckl::DeviceBuffer<float> in = upload(host);
+        const double scale = largest_magnitude(host);
+        const double tolerance = scan_tolerance_for(n, host);
+        ckl::ScanPlan plan(n);
+        ckl::DeviceBuffer<float> out(host.size());
+        for (bool exclusive : {false, true}) {
+            const std::vector<double> want = reference_scan(host, ckl::ScanOp::kSum, exclusive);
+            for (ckl::ScanAlgo algo : kScanRungs) {
+                out.zero();
+                ckl::ScanAlgo chosen = ckl::ScanAlgo::kAuto;
+                ASSERT_EQ(ckl::scan(plan, algo, ckl::ScanOp::kSum, exclusive, in.data(), out.data(),
+                                    &chosen, nullptr),
+                          ckl::Status::kSuccess)
+                    << ckl::scan_algo_name(algo);
+                CKL_CUDA_CHECK(cudaDeviceSynchronize());
+                EXPECT_EQ(chosen, algo);
+                const double residual = scaled_residual(out.to_host(), want, scale);
+                EXPECT_LE(residual, tolerance)
+                    << ckl::scan_algo_name(algo) << " n=" << n
+                    << (exclusive ? " exclusive" : " inclusive") << " residual "
+                    << ckl::test::sci(residual) << " against " << ckl::test::sci(tolerance);
+                std::printf("[ ckl      ]   %-16s n=%-11lld %s residual %s tol %s\n",
+                            ckl::scan_algo_name(algo), n, exclusive ? "excl" : "incl",
+                            ckl::test::sci(residual).c_str(), ckl::test::sci(tolerance).c_str());
+            }
+        }
+    }
+}
+
 TEST_F(ScanSlow, DeterminismAt2To28) {
     const long long n = 1LL << 28;
     std::vector<float> pattern(1024);
@@ -1105,80 +1172,151 @@ TEST_F(ScanSlow, DeterminismAt2To28) {
 // ---------------------------------------------------------------------------
 //
 // Disabled by default because it is a calibration, not a check: it sweeps seeds,
-// lengths and rungs, computes the residual the tolerance model is stated in, and
-// reports the worst ratio of that residual to sqrt(N) * FLT_EPSILON. The
-// committed ckl::scan_tolerance_c is that maximum with slack over it. Run it
-// with
+// lengths, datasets and rungs, computes the residual the tolerance model is
+// stated in, and reports the worst ratio for each of the three terms the library
+// commits a constant to.
+//
+//   sqrt(n)   the reduction and tree scan term, ratio to sqrt(N) * FLT_EPSILON,
+//             calibrating ckl::scan_tolerance_c
+//   chain     the two atomic reduce rungs, ratio to L * FLT_EPSILON on the chain
+//             length L, calibrating kSerialToleranceC
+//   magnitude the scan term the single pass rungs need, reported as the value of
+//             c_mag that the residual implies once the sqrt(N) term is taken
+//             out, calibrating ckl::scan_magnitude_c
+//
+// Each committed constant is the worst ratio with slack over it and no more. Run
+// it with
 //
 //   ./ckl_test_scan --gtest_also_run_disabled_tests
 //       --gtest_filter=ScanCalibration.DISABLED_ToleranceConstant
 //
-// and record the output in docs/scan.md next to the value it produced.
+// and record the output in docs/scan.md next to the values it produced.
+//
+// The lengths run to 2^28, which is what the campaign sweeps. The first pass at
+// this calibration stopped at 2^24 and that is exactly why the magnitude term
+// was missed. Above 2^22 the all_equal dataset is left out on purpose and the
+// reason is in docs/scan.md: 0.75 * i stops being representable in fp32 there,
+// every rounding of an all positive accumulation goes the same way instead of
+// cancelling, and the residual is then absorption rather than the rounding
+// dispersion either term models. The sweep uses signed random data, so the
+// domain of the model and the domain of the campaign match.
 
 class ScanCalibration : public GpuTest {};
 
 TEST_F(ScanCalibration, DISABLED_ToleranceConstant) {
-    const std::vector<long long> lengths = {1023,    1024,    4095,    100000,
-                                            1000003, 1048573, 1 << 22, 1 << 24};
+    const std::vector<long long> lengths = {1023,    1024,    4095,    100000,  1000003, 1048573,
+                                            1 << 22, 1 << 24, 1 << 25, 1 << 26, 1 << 27, 1 << 28};
     double worst_parallel = 0.0;
     std::string worst_parallel_where;
     double worst_serial = 0.0;
     std::string worst_serial_where;
-    std::printf("%-18s %10s %6s %14s %14s %8s\n", "rung", "n", "seed", "residual", "ratio",
-                "model");
+    double worst_magnitude = 0.0;
+    std::string worst_magnitude_where;
+    double worst_headroom = 0.0;
+    std::string worst_headroom_where;
+    const double eps = static_cast<double>(FLT_EPSILON);
+    std::printf("%-18s %-12s %11s %6s %14s %14s %10s\n", "rung", "dataset", "n", "seed", "residual",
+                "ratio", "model");
     for (long long n : lengths) {
+        // Eight seeds is a lot of host reference at a quarter of a billion
+        // elements and buys little: the spread is already sampled by then.
+        const std::uint64_t seeds = n <= (1 << 24) ? 8 : 3;
+        // Signed data only above 2^22. See the note above the fixture.
+        const std::vector<Dataset> kinds =
+            n <= (1 << 22)
+                ? std::vector<Dataset>{Dataset::kRandom, Dataset::kAllEqual, Dataset::kLastOnly,
+                                       Dataset::kAlternating, Dataset::kAdversarial}
+                : std::vector<Dataset>{Dataset::kRandom, Dataset::kAdversarial};
         ckl::ScanPlan plan(n);
-        for (std::uint64_t seed = 1; seed <= 8; ++seed) {
-            const std::vector<float> host = make_dataset(Dataset::kRandom, n, seed);
-            const ckl::DeviceBuffer<float> in = upload(host);
-            const double scale = largest_magnitude(host);
-            const double count = static_cast<double>(n);
-            const double sqrt_unit = std::sqrt(count) * static_cast<double>(FLT_EPSILON);
+        for (Dataset kind : kinds) {
+            for (std::uint64_t seed = 1; seed <= seeds; ++seed) {
+                const std::vector<float> host = make_dataset(kind, n, seed);
+                const ckl::DeviceBuffer<float> in = upload(host);
+                const double scale = largest_magnitude(host);
+                const double ratio_of_magnitudes = magnitude_ratio(host);
+                const double count = static_cast<double>(n);
+                const double sqrt_unit = std::sqrt(count) * eps;
 
-            const double want_reduce = reference_reduce(host, ckl::ScanOp::kSum);
-            for (ckl::ReduceAlgo algo : kReduceRungs) {
-                const float got = run_reduce(plan, algo, ckl::ScanOp::kSum, in, nullptr);
-                const double residual = std::fabs(static_cast<double>(got) - want_reduce) / scale;
-                const long long chain = serial_chain(algo, n);
-                const bool serial = chain > 0;
-                const double ratio = residual / (serial ? static_cast<double>(chain) *
-                                                              static_cast<double>(FLT_EPSILON)
-                                                        : sqrt_unit);
-                if (serial) {
-                    if (ratio > worst_serial) {
-                        worst_serial = ratio;
-                        worst_serial_where = std::string("reduce ") + ckl::reduce_algo_name(algo);
+                const double want_reduce = reference_reduce(host, ckl::ScanOp::kSum);
+                for (ckl::ReduceAlgo algo : kReduceRungs) {
+                    const float got = run_reduce(plan, algo, ckl::ScanOp::kSum, in, nullptr);
+                    const double residual =
+                        std::fabs(static_cast<double>(got) - want_reduce) / scale;
+                    const long long chain = serial_chain(algo, n);
+                    const bool serial = chain > 0;
+                    const double ratio =
+                        residual / (serial ? static_cast<double>(chain) * eps : sqrt_unit);
+                    char where[160];
+                    std::snprintf(where, sizeof(where), "reduce %s %s n=%lld seed=%llu",
+                                  ckl::reduce_algo_name(algo), dataset_name(kind), n,
+                                  static_cast<unsigned long long>(seed));
+                    if (serial) {
+                        if (ratio > worst_serial) {
+                            worst_serial = ratio;
+                            worst_serial_where = where;
+                        }
+                    } else if (ratio > worst_parallel) {
+                        worst_parallel = ratio;
+                        worst_parallel_where = where;
                     }
-                } else if (ratio > worst_parallel) {
-                    worst_parallel = ratio;
-                    worst_parallel_where = std::string("reduce ") + ckl::reduce_algo_name(algo);
+                    std::printf("%-18s %-12s %11lld %6llu %14.6e %14.6e %10s\n",
+                                ckl::reduce_algo_name(algo), dataset_name(kind), n,
+                                static_cast<unsigned long long>(seed), residual, ratio,
+                                serial ? "chain" : "sqrt(n)");
                 }
-                std::printf("%-18s %10lld %6llu %14.6e %14.6e %8s\n", ckl::reduce_algo_name(algo),
-                            n, static_cast<unsigned long long>(seed), residual, ratio,
-                            serial ? "chain" : "sqrt(n)");
-            }
 
-            const std::vector<double> want_scan = reference_scan(host, ckl::ScanOp::kSum, false);
-            for (ckl::ScanAlgo algo : kScanRungs) {
-                const std::vector<float> got =
-                    run_scan(plan, algo, ckl::ScanOp::kSum, false, in, n, nullptr);
-                const double residual = scaled_residual(got, want_scan, scale);
-                const double ratio = residual / sqrt_unit;
-                if (ratio > worst_parallel) {
-                    worst_parallel = ratio;
-                    worst_parallel_where = std::string("scan ") + ckl::scan_algo_name(algo);
+                const double tolerance = ckl::scan_tolerance(n, ratio_of_magnitudes);
+                for (bool exclusive : {false, true}) {
+                    const std::vector<double> want_scan =
+                        reference_scan(host, ckl::ScanOp::kSum, exclusive);
+                    for (ckl::ScanAlgo algo : kScanRungs) {
+                        const std::vector<float> got =
+                            run_scan(plan, algo, ckl::ScanOp::kSum, exclusive, in, n, nullptr);
+                        const double residual = scaled_residual(got, want_scan, scale);
+                        // What c_mag the residual implies once the committed sqrt(N)
+                        // term is taken out. Zero or negative means the first term
+                        // alone already covers this row, which is the case for every
+                        // tree rung at every length.
+                        const double implied =
+                            ratio_of_magnitudes > 0.0
+                                ? (residual / eps - ckl::scan_tolerance_c() * std::sqrt(count)) /
+                                      ratio_of_magnitudes
+                                : 0.0;
+                        const double headroom = tolerance > 0.0 ? residual / tolerance : 0.0;
+                        char where[176];
+                        std::snprintf(where, sizeof(where), "scan %s %s n=%lld seed=%llu %s",
+                                      ckl::scan_algo_name(algo), dataset_name(kind), n,
+                                      static_cast<unsigned long long>(seed),
+                                      exclusive ? "exclusive" : "inclusive");
+                        if (implied > worst_magnitude) {
+                            worst_magnitude = implied;
+                            worst_magnitude_where = where;
+                        }
+                        if (headroom > worst_headroom) {
+                            worst_headroom = headroom;
+                            worst_headroom_where = where;
+                        }
+                        std::printf("%-18s %-12s %11lld %6llu %14.6e %14.6e %10s\n",
+                                    ckl::scan_algo_name(algo), dataset_name(kind), n,
+                                    static_cast<unsigned long long>(seed), residual, implied,
+                                    exclusive ? "mag/excl" : "magnitude");
+                    }
                 }
-                std::printf("%-18s %10lld %6llu %14.6e %14.6e %8s\n", ckl::scan_algo_name(algo), n,
-                            static_cast<unsigned long long>(seed), residual, ratio, "sqrt(n)");
             }
         }
     }
-    std::printf("\nworst sqrt(n) ratio %.6e at %s; committed c is %.3f\n", worst_parallel,
+    std::printf("\nworst sqrt(n) ratio   %.6e at %s; committed c_sqrt is %.4f\n", worst_parallel,
                 worst_parallel_where.c_str(), ckl::scan_tolerance_c());
-    std::printf("worst n ratio      %.6e at %s; committed c_serial is %.3f\n", worst_serial,
+    std::printf("worst chain ratio     %.6e at %s; committed c_serial is %.4f\n", worst_serial,
                 worst_serial_where.c_str(), kSerialToleranceC);
+    std::printf("worst implied c_mag   %.6e at %s; committed c_mag is %.4f\n", worst_magnitude,
+                worst_magnitude_where.c_str(), ckl::scan_magnitude_c());
+    std::printf("worst scan headroom   %.6e of the committed tolerance at %s\n", worst_headroom,
+                worst_headroom_where.c_str());
     EXPECT_GT(ckl::scan_tolerance_c(), worst_parallel)
         << "the committed constant has to be above the worst observed ratio, and it should not "
            "be far above it: a tolerance nothing can fail is not a gate";
     EXPECT_GT(kSerialToleranceC, worst_serial);
+    EXPECT_GT(ckl::scan_magnitude_c(), worst_magnitude);
+    EXPECT_LT(worst_headroom, 1.0) << "some swept row is already outside the committed tolerance";
 }

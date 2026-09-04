@@ -39,6 +39,14 @@ rows. v1 printed a warning and carried on.
 One commit per summary. refresh_summary filters the JSONL to a single commit and
 asserts one row per key. v1 mixed commits and the report took the first match.
 
+A refusal is recorded, not fatal. When a plan returns kNotSupported the bench
+exits 7 with the reason it refused, and the sweep writes a row that says
+status=skipped_not_supported and carries that sentence, prints it as a skip, and
+keeps going. The row survives into summary.csv, so a reader who looks for the
+BSR number on a power law matrix finds the fill arithmetic that explains the
+empty cell instead of an unexplained gap. Anything else non zero is still a
+failure and still fails the sweep.
+
 A ladder for reduction and scan. The family sweeps a length rather than a shape:
 the three large lengths are the ones Gate R is stated at, the two mid ones are L2
 resident and get the flushed and unflushed pair, and the two small ones are
@@ -91,6 +99,15 @@ CLOCK_TOLERANCE = 0.02
 DEFAULT_PROCESS_REPS = 5
 DEFAULT_COOLDOWN_S = 5.0
 BOOTSTRAP_RESAMPLES = 10000
+
+# bench_all's exit code for a plan that returns kNotSupported. A refusal is a
+# result: the row that records it says so and carries the plan's own reason, the
+# sweep prints it as a skip, and the sweep does not fail for it. Deleting the
+# configuration instead would leave a reader wondering why a rung has no number
+# on one matrix, which is the thing the spec asks not to happen.
+DISPATCH_REFUSED_EXIT = 7
+SKIPPED_STATUS = "skipped_not_supported"
+OK_STATUS = "ok"
 
 # sm_120 carries 48 MB of L2. A working set below that is resident across
 # back to back reps, so those rows are measured both flushed and unflushed and
@@ -509,20 +526,30 @@ def query_graphics_clock() -> int | None:
 
 
 def lock_clocks(target_mhz: int) -> tuple[bool, str]:
-    """Enable persistence mode and lock the graphics clock. Returns (locked, why)."""
+    """Enable persistence mode and lock the graphics clock. Returns (locked, why).
+
+    Under WSL2 the driver refuses -pm and -lgc from an unprivileged shell, and
+    the lock is applied from an elevated Windows side nvidia-smi instead. The
+    check of record is therefore the observed clock, not the command's exit
+    code: if our own -lgc fails but the GPU already reports the requested
+    clock, an external lock is in force and the sweep may claim it. The per
+    row drift gate still rejects any row whose measured median strays.
+    """
     pm = nvidia_smi("-pm", "1")
-    if pm.returncode != 0:
-        return False, f"nvidia-smi -pm 1 failed: {(pm.stderr or pm.stdout).strip()}"
     lgc = nvidia_smi("-lgc", str(target_mhz))
-    if lgc.returncode != 0:
-        return False, f"nvidia-smi -lgc {target_mhz} failed: {(lgc.stderr or lgc.stdout).strip()}"
     observed = query_graphics_clock()
     if observed is None:
         return False, "clocks.gr could not be queried back, so the lock is unverified"
     if abs(observed - target_mhz) > target_mhz * CLOCK_TOLERANCE:
+        if pm.returncode != 0 or lgc.returncode != 0:
+            return False, (f"nvidia-smi could not lock ({(lgc.stderr or lgc.stdout).strip()}) "
+                           f"and the GPU reports {observed} MHz against the requested "
+                           f"{target_mhz} MHz; lock from an elevated Windows terminal first")
         return False, (f"asked for {target_mhz} MHz, the GPU reports {observed} MHz; "
                        f"the lock did not take")
-    return True, f"graphics clock locked at {target_mhz} MHz, GPU reports {observed} MHz"
+    source = "locked here" if lgc.returncode == 0 else "externally locked, verified by query"
+    return True, (f"graphics clock at {observed} MHz against a {target_mhz} MHz request "
+                  f"({source})")
 
 
 def unlock_clocks() -> None:
@@ -586,9 +613,21 @@ class BenchFailure(RuntimeError):
         self.returncode = returncode
         self.payload = payload or {}
         self.raw = raw
-        stage = self.payload.get("stage", "?")
-        message = self.payload.get("message", raw.strip()[:400])
-        super().__init__(f"{cfg.label()}: exit {returncode} at stage {stage}: {message}")
+        self.stage = self.payload.get("stage", "?")
+        self.message = self.payload.get("message", raw.strip()[:400])
+        super().__init__(f"{cfg.label()}: exit {returncode} at stage {self.stage}: "
+                         f"{self.message}")
+
+    def is_dispatch_refusal(self) -> bool:
+        """A plan that says no, as opposed to a run that went wrong.
+
+        The bench exits DISPATCH_REFUSED_EXIT at stage "dispatch" when the plan
+        returns kNotSupported and hands back the reason it refused. That is an
+        answer, not a fault: the configuration is outside what the algorithm can
+        represent on this input and the sweep records why rather than dying.
+        """
+        return (self.returncode == DISPATCH_REFUSED_EXIT and self.stage == "dispatch"
+                and "kNotSupported" in str(self.message))
 
 
 def run_once(bench: Path, cfg: Config, commit: str, extra: list[str]) -> dict:
@@ -604,6 +643,47 @@ def run_once(bench: Path, cfg: Config, commit: str, extra: list[str]) -> dict:
     if proc.returncode != 0 or payload is None or payload.get("error"):
         raise BenchFailure(cfg, proc.returncode, payload, proc.stdout + proc.stderr)
     return payload
+
+
+def skipped_row(cfg: Config, exc: BenchFailure, commit: str, args) -> dict:
+    """The row a dispatch refusal writes.
+
+    It carries the same identity as a measured row would, so it lands in
+    summary.csv at the place a reader looks for the number, and it carries the
+    plan's own sentence about why there is no number there. Nothing is timed, so
+    every timing field is left empty rather than filled with a zero that a plot
+    would happily draw.
+
+    The shape comes from the configuration and not from the error payload. For
+    SpMV those two disagree: the bench reads its shape out of the matrix it
+    loaded and a refusal happens before that, so the payload carries zeros where
+    a measured row carries the matrix dimensions. A skip row keyed on zeros would
+    not collide with the measurement it stands in for, which is the one thing it
+    has to do: a resumed sweep would run the refused configuration again, and
+    refresh_summary would then see two rows under two keys instead of refusing
+    the duplicate.
+    """
+    return {
+        "sweep_schema_version": SWEEP_SCHEMA_VERSION,
+        "schema_version": exc.payload.get("schema_version", 2),
+        "status": SKIPPED_STATUS,
+        "status_reason": exc.message,
+        "family": cfg.family,
+        "variant": cfg.variant,
+        "dtype": cfg.dtype,
+        "m": cfg.m,
+        "n": cfg.n,
+        "k": cfg.k,
+        "matrix": cfg.matrix_label(),
+        "l2_flushed": cfg.flush_state(),
+        "launch_mode": cfg.launch_mode,
+        "inner_launches": cfg.inner,
+        "row_note": args.row_note,
+        "clock_locked": args.locked,
+        "locked_clock_mhz": args.locked_mhz if args.locked else "",
+        "order_seed": args.order_seed,
+        "commit": commit,
+    }
 
 
 def probe_autotune(bench: Path) -> tuple[bool, str]:
@@ -717,6 +797,11 @@ SUMMARY_COLUMNS = [
     "throttled", "median_sm_clock_mhz", "clock_locked", "locked_clock_mhz",
     "max_temp_c", "max_power_w", "cuda_runtime", "cuda_driver",
     "canonical", "schema_version", "commit",
+    # Last two columns, because they are empty on almost every row and a reader
+    # scanning numbers should not have to walk past them. "status" is "ok" on a
+    # measured row and SKIPPED_STATUS on a configuration the plan refused;
+    # "status_reason" then carries the plan's own sentence.
+    "status", "status_reason", "row_note",
 ]
 
 
@@ -836,11 +921,23 @@ def percent_of_baseline(row: dict, base: dict):
     return 100.0 * base_ms / row_ms if row_ms > 0.0 else ""
 
 
+def is_skipped(row: dict) -> bool:
+    return str(row.get("status", "")) == SKIPPED_STATUS
+
+
 def refresh_summary(commit: str, jsonl: Path = JSONL, summary: Path = SUMMARY) -> int:
     """Rebuild summary.csv from exactly one commit's rows.
 
     Mixing commits is how v1's report ended up quoting whichever row matched
     first. One commit, one row per key, and a loud failure otherwise.
+
+    Rows that record a dispatch refusal go through the same one row per key
+    check as measured rows, because they occupy the same key: a refusal and a
+    measurement of the same configuration are still two answers to one question
+    and only one of them can stand. They are then written out with their reason
+    and no numbers, so a reader who goes looking for the BSR column on a power
+    law matrix finds the sentence saying why it is empty rather than nothing at
+    all. They are not join targets and they take no percentage.
     """
     rows = read_jsonl(jsonl)
     if not rows:
@@ -871,10 +968,15 @@ def refresh_summary(commit: str, jsonl: Path = JSONL, summary: Path = SUMMARY) -
         raise SystemExit(1)
 
     baselines = {baseline_join_key(r): r for r in by_key.values()
-                 if r.get("variant", "") == BASELINE_VARIANT.get(r.get("family", ""), "")}
+                 if r.get("variant", "") == BASELINE_VARIANT.get(r.get("family", ""), "")
+                 and not is_skipped(r)}
 
-    joined = [attach_baseline(r, baselines) for r in by_key.values()]
+    joined = [dict(r) if is_skipped(r) else attach_baseline(r, baselines)
+              for r in by_key.values()]
     for r in joined:
+        r.setdefault("status", OK_STATUS)
+        r.setdefault("status_reason", "")
+        r.setdefault("row_note", "")
         r["canonical"] = is_canonical(r)
         for field in ("gflops", "baseline_gflops"):
             if isinstance(r.get(field), float):
@@ -904,6 +1006,13 @@ def refresh_summary(commit: str, jsonl: Path = JSONL, summary: Path = SUMMARY) -
         print(f"warning: {len(missing)} row(s) have no baseline row at their shape, so they "
               f"carry no percentage. Run the baseline configurations before quoting them.",
               file=sys.stderr)
+    skips = [r for r in joined if is_skipped(r)]
+    if skips:
+        print(f"{len(skips)} row(s) record a dispatch refusal and carry no measurement:")
+        for r in skips:
+            shape = r.get("matrix") or f"{r.get('m')}x{r.get('n')}x{r.get('k')}"
+            print(f"  {r.get('family')} {r.get('variant')} {r.get('dtype')} {shape}: "
+                  f"{r.get('status_reason')}")
     return len(joined)
 
 
@@ -923,7 +1032,7 @@ def done_keys(commit: str) -> set:
 
 def run_phase(name: str, configs: list[Config], bench: Path, commit: str, args,
               out, measured: list[dict], throttled_rows: list[str],
-              baselines: dict[tuple, dict]) -> int:
+              baselines: dict[tuple, dict], skipped_rows: list[str]) -> int:
     """Measure one phase of the sweep. Returns the number of failed configurations."""
     failures = 0
     start = time.time()
@@ -933,6 +1042,15 @@ def run_phase(name: str, configs: list[Config], bench: Path, commit: str, args,
         try:
             row = measure_config(bench, cfg, commit, args)
         except BenchFailure as exc:
+            if exc.is_dispatch_refusal():
+                skip = skipped_row(cfg, exc, commit, args)
+                skip["order_index"] = i
+                skip["order_phase"] = name
+                out.write(json.dumps(skip) + "\n")
+                out.flush()
+                skipped_rows.append(f"{cfg.label()}: {exc.message}")
+                print(f"  [{name} {i}/{len(configs)}] SKIP {cfg.label()}: {exc.message}")
+                continue
             print(f"  FAILED {exc}", file=sys.stderr)
             failures += 1
             continue
@@ -965,6 +1083,9 @@ def run_phase(name: str, configs: list[Config], bench: Path, commit: str, args,
         if row.get("throttled"):
             throttled_rows.append(cfg.label())
 
+        row["status"] = OK_STATUS
+        row["status_reason"] = ""
+        row["row_note"] = args.row_note
         row["clock_locked"] = args.locked
         row["locked_clock_mhz"] = args.locked_mhz if args.locked else ""
         row["order_seed"] = args.order_seed
@@ -1035,6 +1156,12 @@ def main() -> int:
                     help="restrict to configurations whose "
                          "family:variant:dtype:mxnxk contains this text; repeatable. The "
                          "baselines for the surviving shapes come along.")
+    ap.add_argument("--row-note", default="", metavar="TEXT",
+                    help="stamp this sentence into every row this invocation writes, as "
+                         "row_note. It exists for one case: filling a hole a completed "
+                         "campaign left, where --commit names the sweep commit but the run "
+                         "happened later. See the one commit per summary section of "
+                         "docs/benchmarking.md for when that is legitimate and when it is not.")
     ap.add_argument("--limit", type=int, default=0, metavar="N",
                     help="run only the first N variant configurations after the shuffle "
                          "(0 means all)")
@@ -1119,14 +1246,15 @@ def main() -> int:
 
     measured: list[dict] = []
     throttled_rows: list[str] = []
+    skipped_rows: list[str] = []
     failures = 0
     with args.jsonl.open("a") as out:
         # Baselines first: a variant row cannot be written until the measurement
         # it will be quoted against exists.
         failures += run_phase("baseline", baseline_cfgs, args.bench, commit, args, out,
-                              measured, throttled_rows, baselines)
+                              measured, throttled_rows, baselines, skipped_rows)
         failures += run_phase("variant", variant_cfgs, args.bench, commit, args, out,
-                              measured, throttled_rows, baselines)
+                              measured, throttled_rows, baselines, skipped_rows)
 
     if locked:
         unlock_clocks()
@@ -1139,6 +1267,13 @@ def main() -> int:
     if failures:
         print(f"{failures} configuration(s) failed to produce a row", file=sys.stderr)
         status = 1
+    if skipped_rows:
+        # Not a failure. The plan answered, the answer was no, and the row says
+        # so with the reason attached.
+        print(f"{len(skipped_rows)} configuration(s) were refused by the plan and recorded "
+              f"as skips:")
+        for line in skipped_rows:
+            print("  " + line)
     if throttled_rows:
         print(f"throttle gate FAILED: {len(throttled_rows)} configuration(s) were still "
               f"throttled after a cooldown and a re-run. These rows are not comparable with "

@@ -8,10 +8,15 @@
 # truthy: `on:` is the workflow trigger key, and GitHub requires that spelling.
 # yamllint reads it as the YAML 1.1 boolean and asks for `true`. The document
 # start marker is present in every file, so document-start stays on.
+# new-lines: on a Windows checkout with core.autocrlf the working copy carries
+# CRLF while the repository content is LF, and yamllint reads the platform
+# artifact as a finding. CI checks out on Linux with LF, so the rule only ever
+# fired on the development machine, about nothing.
 extends: default
 
 rules:
   line-length: disable
+  new-lines: disable
   truthy:
     allowed-values: ['true', 'false']
     check-keys: false

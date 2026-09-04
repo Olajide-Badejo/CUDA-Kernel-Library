@@ -1407,6 +1407,12 @@ Measured bench_conv(const Options& opt, const ckl::Context& ctx, cudaStream_t st
 // chain rather than with its square root. tests/test_scan.cpp derives both, and
 // this file uses the same two constants so a benchmark cannot pass a residual
 // the test suite would fail.
+//
+// The scan family takes the two argument ckl::scan_tolerance, which adds the
+// accumulated magnitude term to the random walk term. The magnitude ratio it
+// needs, sum_j |x_j| / max_j |x_j|, is measured from the same host pass that
+// builds the reference, so the bound is derived from the data the kernel was
+// given and not from an assumption about its distribution.
 
 struct ReduceVariantEntry {
     const char* name;
@@ -1607,6 +1613,7 @@ Measured bench_scan(const Options& opt, const ckl::Context& ctx, cudaStream_t st
         std::vector<float> reference(host.size());
         double running = 0.0;
         double scale = 0.0;
+        double accumulated_magnitude = 0.0;
         for (std::size_t i = 0; i < host.size(); ++i) {
             if (exclusive) {
                 reference[i] = static_cast<float>(running);
@@ -1615,11 +1622,14 @@ Measured bench_scan(const Options& opt, const ckl::Context& ctx, cudaStream_t st
                 running += static_cast<double>(host[i]);
                 reference[i] = static_cast<float>(running);
             }
-            scale = std::max(scale, std::fabs(static_cast<double>(host[i])));
+            const double magnitude = std::fabs(static_cast<double>(host[i]));
+            scale = std::max(scale, magnitude);
+            accumulated_magnitude += magnitude;
         }
         if (scale <= 0.0) {
             scale = 1.0;
         }
+        const double magnitude_ratio = accumulated_magnitude / scale;
         ckl::ScanAlgo chosen = ckl::ScanAlgo::kAuto;
         const ckl::Status st = ckl::scan(plan, entry->algo, ckl::ScanOp::kSum, exclusive, in.data(),
                                          dst.data(), &chosen, stream);
@@ -1642,7 +1652,7 @@ Measured bench_scan(const Options& opt, const ckl::Context& ctx, cudaStream_t st
         out.verify =
             scaled_residual(dst.to_host(), reference,
                             filled(host.size(), static_cast<float>(scale)), opt.verify_perturb);
-        out.verify_tol = ckl::scan_tolerance(n);
+        out.verify_tol = ckl::scan_tolerance(n, magnitude_ratio);
         require_verified(out);
     }
 

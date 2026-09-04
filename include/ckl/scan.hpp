@@ -147,33 +147,68 @@ CKL_EXPORT const char* scan_dtype_name(ScanDType t);
 CKL_EXPORT int scan_dtype_size(ScanDType t);
 
 /**
- * @brief The calibrated constant in the random data tolerance model.
- * @return The committed value of c in tol(N) = c * sqrt(N) * FLT_EPSILON.
- * @note Calibrated once by the disabled-by-default calibration case in
- *       tests/test_scan.cpp, which sweeps seeds, lengths and rungs and reports
- *       the worst observed ratio. The method and the observed maximum are in
- *       docs/scan.md; the committed value carries deliberate slack over the
- *       maximum and no more, so the tolerance is still a gate that can fail.
+ * @brief The calibrated constant on the random walk term of the tolerance model.
+ * @return The committed value of c_sqrt in
+ *         tol(N, R) = (c_sqrt * sqrt(N) + c_mag * R) * FLT_EPSILON.
+ * @note Calibrated by the disabled-by-default calibration case in
+ *       tests/test_scan.cpp, which sweeps seeds, lengths, datasets and rungs and
+ *       reports the worst observed ratio. The method and the observed maximum
+ *       are in docs/scan.md; the committed value carries deliberate slack over
+ *       the maximum and no more, so the tolerance is still a gate that can fail.
  */
 CKL_EXPORT double scan_tolerance_c();
 
 /**
- * @brief Tolerance for a reduction or scan of random uniform data.
+ * @brief The calibrated constant on the accumulated magnitude term.
+ * @return The committed value of c_mag in
+ *         tol(N, R) = (c_sqrt * sqrt(N) + c_mag * R) * FLT_EPSILON.
+ * @note Same calibration run and the same slack rule as scan_tolerance_c.
+ */
+CKL_EXPORT double scan_magnitude_c();
+
+/**
+ * @brief Tolerance for a reduction of random uniform data, random walk term only.
  * @param n Number of elements combined.
- * @return c * sqrt(n) * FLT_EPSILON.
- * @note The residual this bounds is max_i |got_i - ref_i| divided by the largest
- *       input magnitude, which is the error measured in units of the input
- *       scale. For random signed data the partial sums do a random walk of size
- *       sqrt(n) times that scale and the rounding error is machine epsilon times
- *       that walk, so the ratio is O(1) and c absorbs the depth of the reduction
- *       tree.
- * @note It is not a bound for adversarial input, so the mixed magnitude datasets
- *       are checked against a double precision reference divided by the running
- *       sum of magnitudes instead. It is also not the model for the two rungs
- *       that finish through a single global atomic, whose last combine is a
- *       serial accumulation; docs/scan.md carries that one and its calibration.
+ * @return c_sqrt * sqrt(n) * FLT_EPSILON.
+ * @note The residual this bounds is |got - ref| divided by the largest input
+ *       magnitude, which is the error measured in units of the input scale. For
+ *       random signed data the partial sums do a random walk of size sqrt(n)
+ *       times that scale and the rounding error is machine epsilon times that
+ *       walk, so the ratio is O(1) and c_sqrt absorbs the depth of the tree.
+ * @note This overload is the reduction model. A reduction finishes through a
+ *       tree whose depth is logarithmic and which carries no cross tile prefix
+ *       chain, so the accumulated magnitude term is not part of its error. A
+ *       prefix scan does carry that chain on the single pass rungs and takes the
+ *       two argument overload instead.
+ * @note It is not the model for the two rungs that finish through a single
+ *       global atomic, whose last combine is a serial accumulation; docs/scan.md
+ *       carries that one and its calibration.
  */
 CKL_EXPORT double scan_tolerance(long long n);
+
+/**
+ * @brief Tolerance for a prefix scan, over any input distribution.
+ * @param n Number of elements combined.
+ * @param magnitude_ratio The accumulated magnitude of the input divided by its
+ *        largest element, sum_j |x_j| / max_j |x_j|, measured from the data.
+ * @return (c_sqrt * sqrt(n) + c_mag * magnitude_ratio) * FLT_EPSILON.
+ * @note The residual this bounds is max_i |got_i - ref_i| divided by the largest
+ *       input magnitude. Two things produce it and the model carries both. A
+ *       tree combine of signed data walks with the partial sums, which reach
+ *       about sqrt(n) times the input scale, and that is the first term. The two
+ *       single pass rungs, kLookback and kCub, also carry a tile to tile prefix
+ *       chain whose length grows with n; the rounding along a chain is bounded
+ *       by the magnitude it accumulates rather than by the square root of its
+ *       length, and that is the second term. Below about 2^23 elements the first
+ *       term dominates and this reduces to the reduction model; above it the
+ *       second term takes over, which is why a sqrt(n) only model passed every
+ *       size the first calibration reached and was outgrown at 2^27.
+ * @note Passing the measured ratio rather than a distribution assumption is what
+ *       makes one model cover random, adversarial and structured input at once:
+ *       cancelling data has a large ratio and earns a larger bound, and data
+ *       that does not cancel has a ratio near n.
+ */
+CKL_EXPORT double scan_tolerance(long long n, double magnitude_ratio);
 
 /**
  * @brief Tuning knobs a caller can set before the plan is built.

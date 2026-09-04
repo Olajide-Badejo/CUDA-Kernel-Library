@@ -37,13 +37,25 @@ namespace ckl {
 
 namespace {
 
-// The calibrated constant of the tolerance model. See docs/scan.md for the
+// The two calibrated constants of the tolerance model. See docs/scan.md for the
 // calibration: tests/test_scan.cpp holds a disabled-by-default case that sweeps
-// seeds, lengths and rungs and reports the worst observed ratio of the measured
-// relative error to sqrt(N) * FLT_EPSILON, and this value is that maximum with
-// deliberate slack over it and no more. A value large enough to pass anything
-// would be a gate that cannot fail.
+// seeds, lengths, datasets and rungs and reports the worst observed ratio for
+// each term, and these values are those maxima with deliberate slack over them
+// and no more. A value large enough to pass anything would be a gate that cannot
+// fail.
+//
+// kToleranceC scales the random walk term, which is what a tree combine of
+// signed data produces: the partial sums reach about sqrt(N) times the input
+// scale and the rounding walks with them.
+//
+// kMagnitudeC scales the accumulated magnitude term, which is what the two
+// single pass rungs add on top: kLookback and kCub carry a tile to tile prefix
+// chain whose length grows with N, and the rounding along that chain is bounded
+// by the accumulated magnitude sum_j |x_j| rather than by sqrt(N). The first
+// campaign found the missing term at 2^27 and 2^28, where a sqrt(N) only model
+// is outgrown by a factor of two.
 constexpr double kToleranceC = 12.0;
+constexpr double kMagnitudeC = 0.01;
 
 // The narrowest tile any rung uses. The level buffer has to be sized for it,
 // because a narrower tile means more tiles at the first level and one more level
@@ -157,9 +169,20 @@ double scan_tolerance_c() {
     return kToleranceC;
 }
 
+double scan_magnitude_c() {
+    return kMagnitudeC;
+}
+
 double scan_tolerance(long long n) {
     const double count = n > 1 ? static_cast<double>(n) : 1.0;
     return kToleranceC * std::sqrt(count) * static_cast<double>(FLT_EPSILON);
+}
+
+double scan_tolerance(long long n, double magnitude_ratio) {
+    const double count = n > 1 ? static_cast<double>(n) : 1.0;
+    const double ratio = magnitude_ratio > 0.0 ? magnitude_ratio : 0.0;
+    return (kToleranceC * std::sqrt(count) + kMagnitudeC * ratio) *
+           static_cast<double>(FLT_EPSILON);
 }
 
 // ---------------------------------------------------------------------------

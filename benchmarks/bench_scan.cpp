@@ -174,6 +174,15 @@ double largest_magnitude(const std::vector<float>& in) {
     return worst > 0.0 ? worst : 1.0;
 }
 
+// sum_j |x_j| / max_j |x_j|, the second argument of the scan tolerance model.
+double magnitude_ratio(const std::vector<float>& in) {
+    double total = 0.0;
+    for (float x : in) {
+        total += std::fabs(static_cast<double>(x));
+    }
+    return total / largest_magnitude(in);
+}
+
 }  // namespace
 
 // NOLINTNEXTLINE(bugprone-exception-escape): a ckl::Error here is fatal by design
@@ -206,6 +215,7 @@ int main(int argc, char** argv) {
     ckl::ScanPlan plan(opt.n);
 
     const double scale = largest_magnitude(host);
+    const double scan_magnitude = magnitude_ratio(host);
     double reference_total = 0.0;
     for (float x : host) {
         reference_total += static_cast<double>(x);
@@ -240,10 +250,10 @@ int main(int argc, char** argv) {
                 static_cast<double>(l2) / (1024.0 * 1024.0),
                 l2_resident ? "L2 resident: flushed and unflushed rows below"
                             : "larger than L2: flushed rows only");
-    std::printf("CUB_VERSION %d (CUB %d.%d.%d), tolerance c %.3f, serial c %.3f\n",
+    std::printf("CUB_VERSION %d (CUB %d.%d.%d), tolerance c_sqrt %.3f, c_mag %.4f, serial c %.3f\n",
                 ckl::ScanPlan::cub_version(), ckl::ScanPlan::cub_version() / 100000,
                 ckl::ScanPlan::cub_version() / 100 % 1000, ckl::ScanPlan::cub_version() % 100,
-                ckl::scan_tolerance_c(), kSerialToleranceC);
+                ckl::scan_tolerance_c(), ckl::scan_magnitude_c(), kSerialToleranceC);
     std::printf("plan: persistent blocks %d, deterministic blocks %d, look-back tiles %lld\n",
                 plan.persistent_blocks(), plan.deterministic_blocks(),
                 plan.tiles(ckl::ScanAlgo::kLookback));
@@ -363,7 +373,7 @@ int main(int argc, char** argv) {
         row.family = "scan";
         row.rung = ckl::scan_algo_name(algo);
         row.model_bytes = plan.scan_model_bytes(algo);
-        row.tolerance = ckl::scan_tolerance(opt.n);
+        row.tolerance = ckl::scan_tolerance(opt.n, scan_magnitude);
 
         ckl::ScanAlgo chosen = ckl::ScanAlgo::kAuto;
         out.zero();

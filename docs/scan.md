@@ -244,14 +244,81 @@ operators on this rung and says so.
 
 The model is
 
-    tol(N) = c * sqrt(N) * FLT_EPSILON
+    tol(N, R) = (c_sqrt * sqrt(N) + c_mag * R) * FLT_EPSILON
 
 on the residual `max_i |got_i - ref_i| / max_j |x_j|`, which is the error
-measured in units of the input scale. For random signed data the partial sums do
-a random walk of size `sqrt(N)` times that scale and the rounding error is
-machine epsilon times that walk, times a slowly growing factor for the depth of
-the reduction tree, so the ratio of the residual to `sqrt(N) * FLT_EPSILON` is
-O(1) and c absorbs the depth term.
+measured in units of the input scale, with
+
+    R = sum_j |x_j| / max_j |x_j|
+
+measured from the data the kernel was given rather than assumed from its length.
+`ckl::scan_tolerance(n, R)` is the whole model and both the suite and the sweep
+verifier call it, so a benchmark cannot pass a residual the tests would fail.
+
+**The first term is the random walk.** For random signed data the partial sums do
+a walk of size `sqrt(N)` times the input scale, and a tree combine's rounding is
+machine epsilon times that walk, times a slowly growing factor for the depth, so
+the ratio of the residual to `sqrt(N) * FLT_EPSILON` is O(1) and `c_sqrt` absorbs
+the depth term. A reduction is only ever this term, and the one argument
+`ckl::scan_tolerance(n)` is that case: its combine is a tree of logarithmic depth
+with no cross tile prefix chain in it.
+
+**The second term is the accumulated magnitude, and 1.1.0 is where it was
+added.** `kLookback` and `kCub` are single pass scans: tile `t` gets its prefix
+by combining with the inclusive prefix of the tiles before it, so element `i`
+sits at the end of a chain whose length grows with `i` and not with its
+logarithm. The rounding along a chain is bounded by the magnitude the chain
+accumulates, `sum_j |x_j|`, and not by the square root of its length, which is
+why the residual of those two rungs grows about linearly in N while the tree
+rungs' grows like `sqrt(N)`. Below about `2^23` elements the walk term swamps it;
+above that it takes over.
+
+### How the sqrt only model was found to be wrong
+
+The first locked clock campaign is what found it. Five configurations wrote no
+row, three of them scans: `lookback` at `2^28` and `2^27` and `baseline_cub_scan`
+at `2^28`, all exiting 9 from the bench self verify. Run by hand at the locked
+clock, with the old `tol(N) = 12 * sqrt(N) * FLT_EPSILON`:
+
+| configuration | residual | old tolerance | worst index |
+| --- | --- | --- | --- |
+| `scan lookback fp32 2^28` | 5.273438e-02 | 2.343750e-02 | 237041807 |
+| `scan baseline_cub_scan fp32 2^28` | 4.101562e-02 | 2.343750e-02 | 256237453 |
+| `scan lookback fp32 2^27` | 9.8e-03 to 3.6e-02 over six runs | 1.657282e-02 | near the end |
+
+Three things decided that this was the model and not a defect in a rung of mine.
+
+1. **CUB fails the same gate at the same length.** `baseline_cub_scan` is NVIDIA's
+   decoupled look-back, not mine, and it misses by the same factor. A tolerance
+   that the vendor implementation of the same algorithm cannot meet is a
+   tolerance, not a bug report.
+2. **The shape of the growth matches the chain and not the walk.** Worst residual
+   for `kLookback` over sizes, one seed: `4.3e-04` at `2^22`, `1.5e-03` at `2^23`,
+   `2.0e-03` at `2^24`, `3.3e-03` at `2^25`, `2.7e-03` at `2^26`, `2.3e-02` at
+   `2^27`, `6.3e-02` at `2^28`. The `sqrt(N)` model predicts a factor of 1.41 per
+   doubling and the measurement gives about 2. Divided by `sum_j |x_j|` instead,
+   the same numbers are flat to within a factor of four across the whole range,
+   which is the definition of the right denominator.
+3. **The tree rungs never crossed the line.** `kDeterministic` at `2^28`
+   residual `9.8e-03` against the same `2.3e-02`, and `kHillisSteele`,
+   `kBlelloch` and `kThreeKernel` sit lower still. Only the two rungs that carry
+   a tile to tile chain need the second term, which is exactly what the
+   derivation says.
+
+The calibration is why nothing caught it earlier: it stopped at `2^24`, one and
+two doublings short of where the second term takes over, and the ladder in
+`ScanLadder` stops at 1048573. The campaign swept `2^27` and `2^28` and nothing
+in the suite had ever run a float prefix sum there.
+`ScanSlow.FloatScanAtTheSweptLengths` now does, at both lengths and both
+directions, against the double reference and the committed model, so the sweep
+cannot reach a length the suite has not.
+
+`2^27` is worth a second look because it is what a tolerance with no headroom
+looks like. Six consecutive runs of `scan lookback fp32 2^27` gave residuals of
+9.765625e-03, 1.171875e-02, 3.613281e-02, 2.050781e-02, 2.050781e-02 and
+2.246094e-02 against an old tolerance of 1.657282e-02: four red, two green, from
+one binary on one clock. Decoupled look-back's combine order depends on tile
+scheduling, so its residual is a draw from a distribution, and the sweep drew red.
 
 **Two rungs do not fit that model and are not made to.** `kAtomic` and `kShuffle`
 both finish through a single global atomic, so their last combine is a serial
@@ -267,9 +334,13 @@ long dependent chain, and a long dependent chain is where floating point error
 comes from.
 
 **Method.** `ScanCalibration.DISABLED_ToleranceConstant` in `tests/test_scan.cpp`
-sweeps eight lengths from 1023 to `2^24`, eight seeds, and every rung of both
-ladders, computes the residual above, and reports the worst ratio of that
-residual to the model's unit. It is disabled by default because it is a
+sweeps twelve lengths from 1023 to `2^28`, eight seeds below `2^24` and three
+above, both scan directions, five datasets below `2^22` and the two signed ones
+above, and every rung of both ladders. For each row it computes the residual
+above and reports the ratio the corresponding constant is calibrated against:
+`sqrt(N)` ratio for the reduction rungs, chain ratio for the two atomic ones, and
+for the scan rungs the value of `c_mag` the residual implies once the committed
+`sqrt(N)` term is taken out. It is disabled by default because it is a
 calibration and not a check. Run it with
 
 ```sh
@@ -277,24 +348,56 @@ calibration and not a check. Run it with
     --gtest_filter=ScanCalibration.DISABLED_ToleranceConstant
 ```
 
-**Result.** Across four runs on this machine the worst `sqrt(N)` ratio was 5.09
-to 6.07, always on one of the two rungs whose own last combine is a device wide
-tree (`kCub` and `kLookback` traded places between runs), and the worst chain
-ratio was 5.17 to 6.71, always on `kShuffle`. The committed constants are
+**Result**, one run of the case above on this machine, 183 seconds:
 
-- `c = 12.0`, in `ckl::scan_tolerance_c`, about twice the worst observed ratio.
+    worst sqrt(n) ratio   9.459891e+00 at reduce kSharedTree random n=268435456 seed=1
+    worst chain ratio     6.705521e+00 at reduce kShuffle random n=1024 seed=8
+    worst implied c_mag   3.628572e-03 at scan kLookback random n=268435456 seed=1 exclusive
+    worst scan headroom   4.442656e-01 of the committed tolerance at the same row
+
+The committed constants are
+
+- `c_sqrt = 12.0`, in `ckl::scan_tolerance_c`, 1.27 times the worst observed
+  ratio.
+- `c_mag = 0.01`, in `ckl::scan_magnitude_c`, 2.76 times the worst observed
+  implied value. An independent six seed probe over `2^25` to `2^28` outside the
+  suite put the worst at `3.70e-03`, so the ratio holds across runs.
 - `c_serial = 16.0`, in `tests/test_scan.cpp` and mirrored in `bench_scan.cpp`
-  and `bench_all.cpp`, about 2.4 times the worst observed ratio.
+  and `bench_all.cpp`, 2.4 times the worst observed ratio.
 
-The slack is there for seed to seed variation and for the two atomic rungs, whose
-ratio moves from run to run because their combine order does. It is not there to
-make the tolerance unfailable: a rung that dropped a tile, mixed up an order, or
-lost its compensation misses by orders of magnitude, not by a factor of two.
+The slack is there for seed to seed variation and for the rungs whose ratio moves
+from run to run because their combine order does. It is not there to make the
+tolerance unfailable: the worst scan row in the calibration sits at 44 percent of
+its tolerance, so a rung that dropped a tile, mixed up an order or lost its
+compensation misses by orders of magnitude and the gate says so.
 
-**Adversarial data is checked differently, because the model above says nothing
-about cancellation.** The mixed magnitude datasets of `1e30` and `1e-30` are
-compared against the double precision reference divided by the running sum of
-magnitudes, which is what bounds the rounding error whatever the data does.
+`c_sqrt` is the one to watch. It was calibrated when the sweep stopped at `2^24`
+and its worst ratio there was around 6; at `2^28` the reduction rungs reach 9.46,
+which is 79 percent of the committed 12. The reduction model is sound, since a
+tree's error really does grow like `sqrt(N)`, but the constant has about a
+quarter of its headroom left and a ladder that grew past `2^28` should
+recalibrate it rather than assume it.
+
+**Adversarial data goes through the same model, which is the point of measuring R
+rather than assuming it.** The mixed magnitude datasets of `1e30` and `1e-30`
+cancel down to something far smaller than the terms they were built from, so
+`sum_j |x_j| / max_j |x_j|` is large for them and the bound they earn is large
+with it. Before 1.1.0 they had a measure and a model of their own, compared
+against the double reference divided by the running sum of magnitudes; that is
+now what the second term says directly, and there is one model for every dataset.
+
+**Where the model does not apply, and it is left that way on purpose.** Data that
+is all one sign stops being about rounding dispersion and starts being about
+absorption. At `0.75` per element the running sum passes `2^24 * 0.75` somewhere
+above `2^22`, after which adding `0.75` to it either does nothing or moves a full
+ulp, every rounding goes the same way instead of cancelling, and the residual is
+enormous: `kCub` on all equal data at `2^28` implies a `c_mag` of about 89, four
+orders above the calibrated value. That is fp32 telling the truth about a serial sum of
+a quarter of a billion equal terms, not a defect, and no constant should be
+stretched to cover it. The calibration therefore runs the structured datasets
+only below `2^22`, where they are exact, and the sweep uses signed random data at
+every length, so the domain of the model and the domain of the campaign are the
+same.
 
 ## Tests
 
@@ -322,8 +425,12 @@ dataset in the suite at once.
 The `2^28` cases are in a `ScanSlow` suite and registered as their own ctest entry
 under the labels `gpu;slow`, with the discovery of the fast tests excluding them,
 so `ctest -L gpu -LE slow` is the fast suite and `ctest -L slow` is the large one
-and neither measures the other twice. Their datasets repeat a small pattern so the
-reference is a closed form rather than a two gigabyte host array.
+and neither measures the other twice. Three of the four use a repeating pattern
+or an integer input so the reference is a closed form rather than a two gigabyte
+host array. The fourth, `FloatScanAtTheSweptLengths`, pays for the host array,
+because a float prefix sum of random data at the lengths the campaign sweeps is
+exactly the thing no closed form covers and exactly the thing that went unchecked
+until the first campaign found the tolerance model outgrown there.
 
 ## Gate R
 

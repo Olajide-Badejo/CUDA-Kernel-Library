@@ -34,6 +34,11 @@ TABLES = REPO / "report" / "tables"
 FIGURES = REPO / "report" / "figures"
 
 PENDING = "pending"
+# A configuration the plan declined to run, as opposed to one nobody has measured
+# yet. sweep.py writes those rows with status=skipped_not_supported and the
+# plan's own reason; the reason itself is too long for a table cell and lives in
+# summary.csv and in docs/sparse.md.
+REFUSED = "refused"
 
 # The GEMM ladder, in the order the rungs were built. Each entry is the key into
 # the summary plus the label the report uses.
@@ -478,6 +483,11 @@ def write_spmv_suite(rows) -> None:
     setup my kernels never paid. That cannot be subtracted after the fact, so the
     percent is printed as withdrawn rather than as a number. A row that names a
     matrix comes from the 1.1.0 schema and its percent stands.
+
+    A row the plan refused reads "refused", not "pending". Pending means nobody
+    has measured it yet; refused means the plan looked at this matrix and said
+    no, and the two are not the same statement. docs/sparse.md carries the fill
+    arithmetic behind the one refusal in the suite.
     """
     body = []
     for r in find_all(rows, "spmv"):
@@ -486,7 +496,10 @@ def write_spmv_suite(rows) -> None:
         matrix = row_matrix(r)
         gflops = fnum(r, "gflops")
         pct = fnum(r, "pct_baseline")
-        if not matrix:
+        refused = str(r.get("status", "")) == "skipped_not_supported"
+        if refused:
+            pct_cell = REFUSED
+        elif not matrix:
             pct_cell = "withdrawn (A2)"
         elif pct is None:
             pct_cell = PENDING
@@ -497,7 +510,7 @@ def write_spmv_suite(rows) -> None:
             f"CSR SpMV {latex_escape(r['variant'])}",
             latex_escape(matrix) if matrix else f"synthetic, {int(r['m'])} rows",
             f"{int(nnz):,}" if str(nnz).strip().isdigit() else PENDING,
-            f"{gflops:.1f}" if gflops is not None else PENDING,
+            REFUSED if refused else (f"{gflops:.1f}" if gflops is not None else PENDING),
             pct_cell,
         ])
     if not body:

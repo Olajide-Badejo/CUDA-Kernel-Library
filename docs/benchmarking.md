@@ -63,6 +63,16 @@ compares them. On a mismatch it prints a JSON error object naming the stage, the
 residual, the tolerance and the index of the worst element, and exits non-zero.
 The sweep treats that as a failed configuration rather than writing a row.
 
+A refusal is not a mismatch. When the plan returns `kNotSupported`, `bench_all`
+exits 7 at stage `dispatch` and hands back the plan's own reason. The sweep
+writes a row for it with `status=skipped_not_supported`, the reason in
+`status_reason` and every timing column empty, prints it as a skip, and does not
+fail. That row goes into `summary.csv` like any other, so a reader who goes
+looking for a number that is not there finds the sentence saying why instead of a
+gap. `refresh_summary` puts a skip through the same one row per key check as a
+measurement, because a refusal and a measurement of the same configuration are
+still two answers to one question. Every other non zero exit is still a failure.
+
 The comparison is the worst elementwise difference divided by the magnitude the
 rounding error is actually bounded by, which for a dot product is the sum of
 `|a| |b|` over the contraction. That sum is itself a GEMM, so it is computed on
@@ -240,6 +250,35 @@ A shape can therefore carry up to four rows. Exactly one of them is marked
 `auto` would have chosen. That is the row a consumer looking up a shape should
 read, and the summary is ordered so it comes first.
 
+### Filling a hole in a campaign without re-running it
+
+One commit per summary is a hard rule, and it collides with a real situation: a
+campaign completes, a handful of configurations wrote no row, the cause turns out
+to be in the harness rather than in a kernel, and the fix lands after the sweep
+commit. Re-running everything at the new commit costs the whole campaign, and
+stamping only the re-run rows with the new commit is not an option, since
+`refresh_summary` would then refuse to build a summary that contains both.
+
+The rule for this is the one the 1.1.0 campaign followed for the three scan rows
+that the tolerance model had cost it, and it turns on one question: **did the fix
+change anything the measurement went through?**
+
+- **If it did not**, the re-run rows carry the sweep commit, and the reason is
+  written down where the rows are. The scan hotfix changed
+  `ckl::scan_tolerance`, the verifier that decides whether a kernel is allowed to
+  be timed, and the kernels, the plan, the launch path, the timing loop and the
+  protocol are untouched by it. A row measured after the fix is therefore the row
+  the machine would have produced at the sweep commit if the gate had let it
+  through, and stamping it with the commit whose code produced the timings is the
+  honest label. Confirm it before relying on it: rebuild only what changed, and
+  check that nothing in the timing path did.
+- **If it did**, there is no shortcut. Re-run the campaign at the new commit.
+
+The re-run rows are otherwise ordinary: full protocol, same locked clock, same
+process repeat count, same drift gate. What separates them from the rest is that
+they were measured on a later date, and `experiments/results/` keeps the JSONL
+append order, so the sequence is on the record rather than being smoothed over.
+
 ## Row schema
 
 `bench_all` stamps `schema_version`, `sweep.py` adds `sweep_schema_version`, and
@@ -249,6 +288,12 @@ those rows and marks them `baseline_source=per_row_remeasured` rather than
 quoting them as if they had been measured under this protocol. Building a summary
 from them needs `--commit` pointing at the v1 hash, since they do not carry the
 current one.
+
+Three columns say what kind of row this is rather than what it measured.
+`status` is `ok` or `skipped_not_supported`; `status_reason` carries the plan's
+sentence when it is the latter; and `row_note` is empty on a normal sweep and
+carries whatever `--row-note` was given otherwise, which is how a row filled in
+after the fact says so on its own face.
 
 ## Running it
 

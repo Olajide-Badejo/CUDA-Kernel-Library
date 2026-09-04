@@ -142,6 +142,43 @@ spec asks to be recorded rather than deleted: the code path stays, the plan
 reports why it did not run, and `kBsr` returns `kNotSupported` with the reason
 instead of falling back to a CSR kernel.
 
+### What the first locked clock campaign measured, BSR included
+
+The refusal above is now a measurement rather than a prediction. Running
+`spmv bsr fp32 soc-LiveJournal1` at the sweep commit gives, verbatim:
+
+    ckl::spmv returned kNotSupported for algo kBsr; SpmvPlan has no BSR copy of
+    this matrix: the best block dimension is 2 at a fill of 0.288618, which would
+    store 239048588 values for 68993773 nonzeros, past the 134217728 entry
+    ceiling
+
+Two rows in `experiments/results/summary.csv` carry that sentence, one for each
+L2 state, with `status=skipped_not_supported` and every timing column empty. The
+sweep prints them as skips and does not fail for them. The alternative, dropping
+the two configurations from the matrix, would leave a reader looking at the BSR
+column for `soc-LiveJournal1` with nothing to look at and no way to tell a
+refusal from an oversight.
+
+The numbers make the refusal a result and not a limitation of the ceiling. A fill
+of 0.289 at the largest block dimension left, 2, means about 71 percent of every
+2 by 2 block this matrix would build is padding: 239 million stored values for 69
+million real ones, a 3.5x inflation of the array the kernel would stream. Even
+with an unlimited ceiling that is a rung that has already lost, since BSR's whole
+argument is that a shared column index buys back more than the padded zeros cost.
+
+**BSR is not refused on power law matrices as a class, and the row that shows it
+is worth keeping.** `webbase-1M` is about 1500 times its mean row length and it
+converts: block dimension 2, and a measured 27.9 percent of `cusparseSbsrmv`
+flushed and 29.8 percent unflushed. So the class is not the criterion; the fill
+is, and one power law matrix passes the ceiling while another does not.
+
+**On the two matrices the rung exists for it stands and wins.** `pdb1HYS` at
+block dimension 4 runs 148.4 percent of the cuSPARSE BSR baseline flushed and
+169.7 percent unflushed, and `cant`, also at block dimension 4, runs 120.7 and
+105.5 percent. Those four rows are the case for the variant; every other BSR row
+in the sweep is below its baseline, which is the same statement seen from the
+other side.
+
 **The merge path's seven units per thread** is the fourth. It sets both the
 serial work a thread does and how far apart neighbouring threads read, since
 thread t starts at path offset 7t. The thread count follows from it rather than
