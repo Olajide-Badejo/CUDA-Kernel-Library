@@ -334,7 +334,3 @@ in place of the datasheet.
 ## License and how this was built
 
 MIT, sole author Olajide Badejo. See [LICENSE](LICENSE).
-
-I built this project with AI agent tooling (Claude Code) driven by specifications
-I wrote. The design decisions, the hardware targets, the diagnostic rounds, and
-every claim in this README are mine, and I am responsible for all of them.
