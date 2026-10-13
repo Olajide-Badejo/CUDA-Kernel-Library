@@ -1,4 +1,4 @@
-# CUDA Kernel Library 
+# CUDA Kernel Library
 
 > A hand-written CUDA linear-algebra library, driven from a naive GEMM to a
 > **compute-bound tensor-core kernel** on a single NVIDIA RTX 5070. At a locked
